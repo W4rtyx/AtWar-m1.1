@@ -1,12 +1,16 @@
 import './style.css';
+import { validateBuildingPlacement } from './engine/buildings';
 import {
   buildSmoothAttackWaypoints,
   computePolylineLength,
 } from './engine/frontExpansion';
-import { createEngineController } from './engine/simulation';
+import { createEngineController, planSimulationTicks } from './engine/simulation';
 import {
+  ALL_BUILDING_TYPES,
+  BuildingType,
   ClientRenderState,
   Point,
+  PublicBuildingInfo,
   TICK_DT,
   WILDERNESS_OWNER,
 } from './engine/types';
@@ -14,6 +18,7 @@ import { Camera } from './render/camera';
 import {
   AmbushOverlay,
   ArrowPreview,
+  BuildPlacementPreview,
   CanvasRenderer,
   FrontPushPreview,
 } from './render/canvasRenderer';
@@ -41,6 +46,8 @@ function bootstrap(): void {
   let tacticalMode: TacticalMode = 'ARROW';
   let manpowerPercent = 35;
   let simSpeed: SimSpeed = 1;
+  let selectedBuildType: BuildingType | null = null;
+  let selectedBuildingId: number | null = null;
   let selectedFrontierCells: number[] = [];
   let initialSelectedCount = 0;
   let frontLassoPoints: Point[] = [];
@@ -104,12 +111,15 @@ function bootstrap(): void {
     onRestart: () => {
       accumulatorSec = 0;
       lastFrameMs = performance.now();
+      selectedBuildType = null;
+      selectedBuildingId = null;
       clearFrontSelection();
       clearInteractionPreviews();
       engine.dispatch({ type: 'RESTART_GAME' });
     },
     onModeChange: (mode) => {
       tacticalMode = mode;
+      selectedBuildType = null;
       rawArrowPoints = [];
       arrowBendOffset = 0;
       arrowPreview = null;
@@ -154,7 +164,12 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(engine.getRenderState(), selectedFrontierCells.length);
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
     },
     onMakePeace: (targetId) => {
       const state = engine.getRenderState();
@@ -163,7 +178,12 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(engine.getRenderState(), selectedFrontierCells.length);
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
     },
     onToggleAlliance: (targetId) => {
       const state = engine.getRenderState();
@@ -172,7 +192,92 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(engine.getRenderState(), selectedFrontierCells.length);
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onToggleTrade: (targetId) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'TOGGLE_TRADE',
+        actorId: state.humanPlayerId,
+        targetId,
+      });
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onSelectBuildType: (bType) => {
+      selectedBuildType = bType;
+      if (bType !== null) {
+        clearFrontSelection();
+        clearInteractionPreviews();
+      }
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onSetTypeOccupancy: (buildingType, occupancyPct) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'SET_BUILDING_TYPE_OCCUPANCY',
+        playerId: state.humanPlayerId,
+        buildingType,
+        occupancyPct,
+      });
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onSetBuildingOccupancy: (buildingId, occupancyPct) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'SET_BUILDING_OCCUPANCY',
+        playerId: state.humanPlayerId,
+        buildingId,
+        occupancyPct,
+      });
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onSetAllOccupancy: (occupancyPct) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'SET_ALL_OCCUPANCY',
+        playerId: state.humanPlayerId,
+        occupancyPct,
+      });
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
+    },
+    onCloseBuildingInspector: () => {
+      selectedBuildingId = null;
+      hud.update(
+        engine.getRenderState(),
+        selectedFrontierCells.length,
+        selectedBuildType,
+        selectedBuildingId,
+      );
     },
   });
 
@@ -223,6 +328,24 @@ function bootstrap(): void {
       }
     }
     return null;
+  }
+
+  function findHumanBuildingAtScreen(
+    state: ClientRenderState,
+    screenX: number,
+    screenY: number,
+  ): PublicBuildingInfo | null {
+    let best: PublicBuildingInfo | null = null;
+    let bestDist = 12;
+    for (const building of state.buildings) {
+      const sc = camera.worldToScreen(building.x + 0.5, building.y + 0.5);
+      const d = Math.hypot(screenX - sc.x, screenY - sc.y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = building;
+      }
+    }
+    return best;
   }
 
   function getNonWarForeignOwnerAtPoint(
@@ -284,7 +407,7 @@ function bootstrap(): void {
     }
     const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
     const human = state.players.find((p) => p.id === state.humanPlayerId);
-    const committed = (human?.manpower ?? 0) * (manpowerPercent / 100);
+    const committed = (human?.activeManpower ?? 0) * (manpowerPercent / 100);
     arrowPreview = {
       waypoints,
       committedManpower: committed,
@@ -323,6 +446,30 @@ function bootstrap(): void {
       return;
     }
 
+    if (selectedBuildType !== null) {
+      const prevLastId =
+        state.buildings.length > 0 ? state.buildings[state.buildings.length - 1].id : 0;
+      engine.dispatch({
+        type: 'PLACE_BUILDING',
+        playerId: state.humanPlayerId,
+        buildingType: selectedBuildType,
+        x: Math.floor(worldPt.x),
+        y: Math.floor(worldPt.y),
+      });
+      const post = engine.getRenderState();
+      const newest =
+        post.buildings.length > 0 ? post.buildings[post.buildings.length - 1] : undefined;
+      if (newest && newest.id > prevLastId) {
+        selectedBuildingId = newest.id;
+        hud.manpowerPanel.setCollapsed(false);
+        if (!e.shiftKey) {
+          selectedBuildType = null;
+        }
+      }
+      hud.update(post, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
+      return;
+    }
+
     const useFrontTool = e.shiftKey || tacticalMode === 'FRONT_SELECT';
     if (useFrontTool) {
       if (
@@ -350,6 +497,15 @@ function bootstrap(): void {
       return;
     }
 
+    const clickedBuilding = findHumanBuildingAtScreen(state, e.clientX, e.clientY);
+    if (clickedBuilding) {
+      selectedBuildingId = clickedBuilding.id;
+      hud.manpowerPanel.setCollapsed(false);
+      hud.update(state, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
+      return;
+    }
+
+    selectedBuildingId = null;
     rawArrowPoints = [worldPt];
     arrowBendOffset = 0;
     arrowPreview = null;
@@ -359,6 +515,8 @@ function bootstrap(): void {
   canvas.addEventListener('dblclick', (e) => {
     const state = engine.getRenderState();
     if (state.phase !== 'PLAYING' || e.button !== 0) return;
+    if (selectedBuildType !== null) return;
+    if (findHumanBuildingAtScreen(state, e.clientX, e.clientY) !== null) return;
     const worldPt = camera.screenToWorld(e.clientX, e.clientY);
     engine.dispatch({
       type: 'BORDER_SURGE_PUSH',
@@ -438,6 +596,10 @@ function bootstrap(): void {
     if ((e.button === 2 || e.button === 1) && isPanning) {
       isPanning = false;
       if (e.button === 2 && !rmbDragged && state.phase === 'PLAYING') {
+        if (selectedBuildType !== null) {
+          selectedBuildType = null;
+          return;
+        }
         const ix = Math.floor(worldPt.x);
         const iy = Math.floor(worldPt.y);
         if (ix >= 0 && ix < state.width && iy >= 0 && iy < state.height) {
@@ -559,10 +721,28 @@ function bootstrap(): void {
     }
 
     if (e.code === 'Escape') {
+      selectedBuildType = null;
+      selectedBuildingId = null;
       clearFrontSelection();
       clearInteractionPreviews();
       hud.leaderboard.closeProfile();
       return;
+    }
+
+    if (e.code.startsWith('Digit')) {
+      const digit = Number(e.code.slice(5));
+      if (digit >= 1 && digit <= ALL_BUILDING_TYPES.length) {
+        const state = engine.getRenderState();
+        if (state.phase === 'PLAYING') {
+          const bType = ALL_BUILDING_TYPES[digit - 1];
+          selectedBuildType = selectedBuildType === bType ? null : bType;
+          if (selectedBuildType !== null) {
+            clearFrontSelection();
+            clearInteractionPreviews();
+          }
+        }
+        return;
+      }
     }
 
     if (e.code === 'KeyM') {
@@ -628,22 +808,21 @@ function bootstrap(): void {
       window.innerHeight,
     );
 
-    const preState = engine.getRenderState();
-    if (preState.phase === 'PLAYING' && !preState.paused) {
-      accumulatorSec = Math.min(2.6, accumulatorSec + dtSec * simSpeed);
-      const maxTicksPerFrame = Math.min(25, Math.max(4, Math.ceil(simSpeed * 0.5)));
+    if (engine.isPlayingAndUnpaused()) {
+      const maxAccumulator = Math.max(1.0, simSpeed * 0.25);
+      const preAccum = Math.min(maxAccumulator, accumulatorSec + dtSec * simSpeed);
+      const plan = planSimulationTicks(accumulatorSec, dtSec, simSpeed);
       const tickBudgetStart = performance.now();
       let ticksRun = 0;
 
-      while (
-        accumulatorSec >= TICK_DT &&
-        ticksRun < maxTicksPerFrame &&
-        performance.now() - tickBudgetStart < 11
-      ) {
+      while (ticksRun < plan.ticksToRun) {
+        if (ticksRun > 0 && performance.now() - tickBudgetStart >= 12) {
+          break;
+        }
         engine.dispatch({ type: 'TICK' });
-        accumulatorSec -= TICK_DT;
         ticksRun++;
       }
+      accumulatorSec = Math.max(0, preAccum - ticksRun * TICK_DT);
     } else {
       accumulatorSec = 0;
     }
@@ -667,6 +846,7 @@ function bootstrap(): void {
     }
 
     let ambushOverlay: AmbushOverlay | null = null;
+    let ambushTriggered = false;
     if (renderState.phase === 'PLAYING' && rawArrowPoints.length >= 2) {
       const previewWaypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
       const nonWarTarget = getNonWarForeignOwnerAlongArrow(renderState, previewWaypoints);
@@ -688,6 +868,7 @@ function bootstrap(): void {
               waypoints,
               manpowerPercent,
             });
+            ambushTriggered = true;
           }
           rawArrowPoints = [];
           arrowBendOffset = 0;
@@ -710,8 +891,38 @@ function bootstrap(): void {
       resetAmbush();
     }
 
-    const finalState = engine.getRenderState();
-    hud.update(finalState, selectedFrontierCells.length);
+    const finalState = ambushTriggered ? engine.getRenderState() : renderState;
+    if (
+      selectedBuildingId !== null &&
+      !finalState.buildings.some((b) => b.id === selectedBuildingId)
+    ) {
+      selectedBuildingId = null;
+    }
+
+    let buildPreview: BuildPlacementPreview | null = null;
+    if (finalState.phase === 'PLAYING' && selectedBuildType !== null && hoverCell) {
+      const ix = Math.floor(hoverCell.x);
+      const iy = Math.floor(hoverCell.y);
+      const human = finalState.players.find((p) => p.id === finalState.humanPlayerId);
+      const check = validateBuildingPlacement(
+        finalState,
+        human,
+        selectedBuildType,
+        ix,
+        iy,
+      );
+      buildPreview = {
+        buildingType: selectedBuildType,
+        x: ix,
+        y: iy,
+        valid: check.valid,
+        reasonCs: check.reasonCs,
+        inMatchingZone: check.inMatchingZone,
+        isFreePowerPlant: check.isFreePowerPlant,
+      };
+    }
+
+    hud.update(finalState, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
     renderer.render(finalState, camera, {
       hoverCell,
       arrowPreview,
@@ -720,6 +931,8 @@ function bootstrap(): void {
       frontPushPreview,
       activeBendOrderId: activeBendDrag?.orderId ?? null,
       ambush: ambushOverlay,
+      buildPreview,
+      selectedBuildingId,
     });
 
     requestAnimationFrame(frame);

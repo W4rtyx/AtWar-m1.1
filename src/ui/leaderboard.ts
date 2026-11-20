@@ -9,6 +9,7 @@ export interface DiplomacyCallbacks {
   readonly onDeclareWar: (targetId: number) => void;
   readonly onMakePeace: (targetId: number) => void;
   readonly onToggleAlliance: (targetId: number) => void;
+  readonly onToggleTrade: (targetId: number) => void;
 }
 
 function relationLabel(rel: DiplomaticRelation): string {
@@ -102,6 +103,8 @@ export class LeaderboardController {
         this.callbacks.onMakePeace(tid);
       } else if (action === 'alliance') {
         this.callbacks.onToggleAlliance(tid);
+      } else if (action === 'trade') {
+        this.callbacks.onToggleTrade(tid);
       }
       this.lastListRenderKey = '';
       this.lastProfileStructureKey = '';
@@ -218,6 +221,11 @@ export class LeaderboardController {
         ? `<span class="hud-lb-betrayal" title="Postih za zradu aliance">• Zrádce</span>`
         : '';
 
+    const tradeTag =
+      !isHuman && player.hasTradeWithHuman
+        ? '<span class="hud-lb-tag rel-trade">OBCH.</span>'
+        : '';
+
     const interactiveAttr = isHuman ? '' : `data-player-id="${player.id}"`;
     const clickableClass = isHuman ? 'hud-lb-row-self' : 'hud-lb-row-clickable';
 
@@ -227,7 +235,7 @@ export class LeaderboardController {
         <span class="hud-lb-identity">
           <span class="hud-lb-swatch" style="background:${player.colorHex}"></span>
           <span class="hud-lb-name">${player.name}</span>
-          ${statusHint}${betrayalTag}
+          ${statusHint}${tradeTag}${betrayalTag}
         </span>
         <span class="hud-lb-pct">${pct} %</span>
       </div>
@@ -245,7 +253,9 @@ export class LeaderboardController {
 
     const rel = target.relationToHuman;
     const hasBetrayal = target.betrayalDebuffTicks > 0;
-    const structureKey = `${target.id}|${rel}|${hasBetrayal}|${this.profileX}|${this.profileY}`;
+    const isNeighbor = target.isNeighborOfHuman;
+    const hasTrade = target.hasTradeWithHuman;
+    const structureKey = `${target.id}|${rel}|${hasBetrayal}|${isNeighbor}|${hasTrade}|${this.profileX}|${this.profileY}`;
 
     if (structureKey !== this.lastProfileStructureKey) {
       this.lastProfileStructureKey = structureKey;
@@ -265,7 +275,7 @@ export class LeaderboardController {
       } else if (rel === 'ALLIED') {
         actionsHtml = `
           <button type="button" class="hud-btn hud-btn-danger" data-dip-action="war">
-            Zradit a vyhlásit válku (−35 % obrana)
+            Zradit a vyhlásit válku (−35 % obr., −25 % pokladny)
           </button>
           <button type="button" class="hud-btn" data-dip-action="alliance">
             Zrušit alianci
@@ -277,6 +287,25 @@ export class LeaderboardController {
             Uzavřít mír
           </button>
         `;
+      }
+
+      let tradeHtml = '';
+      if (rel !== 'WAR') {
+        if (isNeighbor) {
+          const tradeBtnClass = hasTrade
+            ? 'hud-btn hud-btn-trade active'
+            : 'hud-btn hud-btn-trade';
+          const tradeLabel = hasTrade
+            ? `Zrušit obchod (+${target.tradeIncomeWithHumanPerSec.toFixed(1)} $/s)`
+            : 'Obchodní dohoda (Trade)';
+          tradeHtml = `
+            <button type="button" class="${tradeBtnClass}" data-dip-action="trade">
+              ${tradeLabel}
+            </button>
+          `;
+        } else {
+          tradeHtml = `<div class="hud-dip-note">Obchodní dohoda vyžaduje společnou hranici</div>`;
+        }
       }
 
       const betrayalInfo = hasBetrayal
@@ -300,6 +329,7 @@ export class LeaderboardController {
         ${betrayalInfo}
         <div class="hud-dip-actions">
           ${actionsHtml}
+          ${tradeHtml}
         </div>
       `;
       this.profileEl.classList.remove('hidden');
@@ -310,6 +340,12 @@ export class LeaderboardController {
     const pctEl = this.profileEl.querySelector<HTMLElement>('[data-dip-el="pct"]');
     if (pctEl) {
       pctEl.textContent = `${pct} %`;
+    }
+    if (hasTrade) {
+      const tradeBtn = this.profileEl.querySelector<HTMLButtonElement>('[data-dip-action="trade"]');
+      if (tradeBtn) {
+        tradeBtn.textContent = `Zrušit obchod (+${target.tradeIncomeWithHumanPerSec.toFixed(1)} $/s)`;
+      }
     }
     if (hasBetrayal) {
       const betEl = this.profileEl.querySelector<HTMLElement>('[data-dip-el="betrayal"]');

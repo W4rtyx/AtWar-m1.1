@@ -1,3 +1,4 @@
+import { createInitialPlayerState, syncPlayerActiveManpower } from './economy';
 import {
   MAX_ORDER_TICKS,
   buildSmoothAttackWaypoints,
@@ -11,7 +12,6 @@ import {
 import { nextRandom } from './mapGenerator';
 import {
   GameState,
-  PlayerState,
   Point,
   TerrainType,
   WILDERNESS_OWNER,
@@ -115,7 +115,7 @@ export function spawnBots(state: GameState, count: number): void {
       continue;
     }
 
-    const botState: PlayerState = {
+    const botState = createInitialPlayerState({
       id: botId,
       name: identity.name,
       isBot: true,
@@ -123,15 +123,9 @@ export function spawnBots(state: GameState, count: number): void {
       colorRgb: identity.colorRgb,
       capitalX: bestX,
       capitalY: bestY,
-      manpower: 240,
-      maxManpower: 480,
-      manpowerIncomePerSec: 14,
-      manpowerGrowthEfficiency: 1,
-      betrayalDebuffTicks: 0,
-      nextBotDecisionTick: 6 + i * 2,
       territoryCells: claimed,
-      alive: true,
-    };
+      nextBotDecisionTick: 6 + i * 2,
+    });
 
     state.players.set(botId, botState);
   }
@@ -175,7 +169,8 @@ export function stepBots(state: GameState): void {
 
     // One well-coordinated attack at a time to avoid scattered manpower waste
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
-    if (activeBotOrders >= 1 || player.manpower < player.maxManpower * 0.46) {
+    const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
+    if (activeBotOrders >= 1 || activeMp < player.maxManpower * 0.38) {
       continue;
     }
 
@@ -287,7 +282,7 @@ export function stepBots(state: GameState): void {
         wildernessTargets[Math.floor(nextRandom(rngBox) * wildernessTargets.length)];
     } else if (
       warTargets.length > 0 &&
-      player.manpower >= player.maxManpower * 0.48
+      activeMp >= player.maxManpower * 0.44
     ) {
       warTargets.sort((a, b) => b.tacticalScore - a.tacticalScore);
       const topSlice = Math.min(4, warTargets.length);
@@ -295,7 +290,7 @@ export function stepBots(state: GameState): void {
     } else if (
       neutralTargets.length > 0 &&
       !hasActiveWarOpponent(state, player.id) &&
-      player.manpower >= player.maxManpower * 0.52 &&
+      activeMp >= player.maxManpower * 0.48 &&
       nextRandom(rngBox) < 0.35
     ) {
       chosen = neutralTargets[Math.floor(nextRandom(rngBox) * neutralTargets.length)];
@@ -326,12 +321,13 @@ export function stepBots(state: GameState): void {
     }
 
     const commitRatio = chosen.isWilderness ? 0.2 : 0.25;
-    const manpowerCommitted = player.manpower * commitRatio;
+    const manpowerCommitted = activeMp * commitRatio;
     if (manpowerCommitted < 16) {
       continue;
     }
 
     player.manpower -= manpowerCommitted;
+    syncPlayerActiveManpower(player);
     state.attackOrders.push({
       id: state.nextOrderId++,
       playerId: player.id,

@@ -4,6 +4,9 @@ export const TICK_RATE = 10;
 export const TICK_DT = 1 / TICK_RATE;
 export const WILDERNESS_OWNER = -1;
 export const BETRAYAL_DEBUFF_TICKS = 600;
+export const BETRAYAL_MONEY_PENALTY_RATIO = 0.25;
+export const MIN_BUILDING_SPACING = 9;
+export const BARRACKS_DEFENSE_RADIUS = 18;
 
 export enum TerrainType {
   WATER = 0,
@@ -12,6 +15,97 @@ export enum TerrainType {
 }
 
 export type ResourceType = 'CONSTRUCTION_MATERIAL' | 'BASIC_ENERGY';
+
+export type BuildingType =
+  | 'CITY'
+  | 'MINE'
+  | 'POWER_PLANT'
+  | 'FACTORY'
+  | 'LAB'
+  | 'BARRACKS'
+  | 'PORT'
+  | 'AIRFIELD';
+
+export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
+  'CITY',
+  'MINE',
+  'POWER_PLANT',
+  'FACTORY',
+  'LAB',
+  'BARRACKS',
+  'PORT',
+  'AIRFIELD',
+];
+
+export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
+  'MINE',
+  'POWER_PLANT',
+  'FACTORY',
+  'LAB',
+  'BARRACKS',
+  'PORT',
+  'AIRFIELD',
+];
+
+export interface BuildingCost {
+  readonly money: number;
+  readonly buildingMaterial: number;
+  readonly industry: number;
+}
+
+export interface BuildingSpec {
+  readonly type: BuildingType;
+  readonly nameCs: string;
+  readonly shortCode: string;
+  readonly descriptionCs: string;
+  readonly cost: BuildingCost;
+  readonly baseEnergyConsumption: number;
+  readonly baseEnergyProduction: number;
+  readonly baseManpowerRequired: number;
+  readonly baseMoneyPerSec: number;
+  readonly baseMaterialPerSec: number;
+  readonly baseIndustryPerSec: number;
+  readonly baseKnowledgePerSec: number;
+  readonly baseMaxManpowerBonus: number;
+  readonly baseManpowerIncomeBonus: number;
+  readonly energyReserveBonus: number;
+  readonly requiresCoast: boolean;
+  readonly resourceZoneType: ResourceType | null;
+}
+
+export interface Building {
+  readonly id: number;
+  readonly type: BuildingType;
+  ownerId: number;
+  readonly x: number;
+  readonly y: number;
+  readonly isCapital: boolean;
+  readonly revealedEfficiencyPct: number;
+  occupancyOverride: number | null;
+  effectiveOccupancyPct: number;
+  effectiveOutputPct: number;
+  allocatedManpower: number;
+  currentEnergyUse: number;
+  currentEnergyProd: number;
+}
+
+export interface PublicBuildingInfo {
+  readonly id: number;
+  readonly type: BuildingType;
+  readonly ownerId: number;
+  readonly x: number;
+  readonly y: number;
+  readonly isCapital: boolean;
+  readonly revealedEfficiencyPct: number;
+  readonly occupancyOverride: number | null;
+  readonly effectiveOccupancyPct: number;
+  readonly effectiveOutputPct: number;
+  readonly allocatedManpower: number;
+  readonly currentEnergyUse: number;
+  readonly currentEnergyProd: number;
+}
+
+export type OccupancyByType = Record<BuildingType, number>;
 
 export type DiplomaticRelation = 'NEUTRAL' | 'WAR' | 'ALLIED';
 
@@ -53,6 +147,25 @@ export interface PlayerState {
   maxManpower: number;
   manpowerIncomePerSec: number;
   manpowerGrowthEfficiency: number;
+  allocatedManpower: number;
+  activeManpower: number;
+  money: number;
+  moneyIncomePerSec: number;
+  tradeIncomePerSec: number;
+  knowledge: number;
+  knowledgeIncomePerSec: number;
+  buildingMaterial: number;
+  buildingMaterialIncomePerSec: number;
+  industry: number;
+  industryIncomePerSec: number;
+  energyReserve: number;
+  energyReserveMax: number;
+  energyProductionPerSec: number;
+  energyConsumptionPerSec: number;
+  energyNetPerSec: number;
+  energySupplyRatio: number;
+  freePowerPlantUsed: boolean;
+  buildingOccupancyByType: OccupancyByType;
   betrayalDebuffTicks: number;
   nextBotDecisionTick: number;
   territoryCells: number;
@@ -71,11 +184,33 @@ export interface PublicPlayerInfo {
   readonly alive: boolean;
   readonly betrayalDebuffTicks: number;
   readonly relationToHuman: DiplomaticRelation;
+  readonly isNeighborOfHuman: boolean;
+  readonly hasTradeWithHuman: boolean;
+  readonly tradeIncomeWithHumanPerSec: number;
   /** Only populated for the local human player; omitted for AI bots / opponents. */
   readonly manpower?: number;
   readonly maxManpower?: number;
   readonly manpowerIncomePerSec?: number;
   readonly manpowerGrowthEfficiency?: number;
+  readonly allocatedManpower?: number;
+  readonly activeManpower?: number;
+  readonly money?: number;
+  readonly moneyIncomePerSec?: number;
+  readonly tradeIncomePerSec?: number;
+  readonly knowledge?: number;
+  readonly knowledgeIncomePerSec?: number;
+  readonly buildingMaterial?: number;
+  readonly buildingMaterialIncomePerSec?: number;
+  readonly industry?: number;
+  readonly industryIncomePerSec?: number;
+  readonly energyReserve?: number;
+  readonly energyReserveMax?: number;
+  readonly energyProductionPerSec?: number;
+  readonly energyConsumptionPerSec?: number;
+  readonly energyNetPerSec?: number;
+  readonly energySupplyRatio?: number;
+  readonly freePowerPlantUsed?: boolean;
+  readonly buildingOccupancyByType?: Readonly<OccupancyByType>;
 }
 
 export interface AttackOrder {
@@ -128,6 +263,11 @@ export interface GameState {
   readonly players: Map<number, PlayerState>;
   readonly humanPlayerId: number;
   readonly relations: Map<string, DiplomaticRelation>;
+  readonly tradeAgreements: Set<string>;
+  readonly neighborPairs: Set<string>;
+  buildings: Building[];
+  nextBuildingId: number;
+  lastTerritorySyncVersion: number;
   attackOrders: AttackOrder[];
   frontPushOrders: FrontPushOrder[];
   readonly publicResourceZones: ResourceZonePublic[];
@@ -149,6 +289,8 @@ export interface ClientRenderState {
   readonly players: ReadonlyArray<PublicPlayerInfo>;
   readonly humanPlayerId: number;
   readonly relations: Readonly<Record<string, DiplomaticRelation>>;
+  readonly tradeAgreements: ReadonlyArray<string>;
+  readonly buildings: ReadonlyArray<PublicBuildingInfo>;
   readonly attackOrders: ReadonlyArray<Readonly<AttackOrder>>;
   readonly frontPushOrders: ReadonlyArray<Readonly<FrontPushOrder>>;
   readonly publicResourceZones: ReadonlyArray<ResourceZonePublic>;
@@ -195,9 +337,34 @@ export type Action =
       readonly y: number;
       readonly manpowerPercent: number;
     }
+  | {
+      readonly type: 'PLACE_BUILDING';
+      readonly playerId: number;
+      readonly buildingType: BuildingType;
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly type: 'SET_BUILDING_TYPE_OCCUPANCY';
+      readonly playerId: number;
+      readonly buildingType: BuildingType;
+      readonly occupancyPct: number;
+    }
+  | {
+      readonly type: 'SET_BUILDING_OCCUPANCY';
+      readonly playerId: number;
+      readonly buildingId: number;
+      readonly occupancyPct: number | null;
+    }
+  | {
+      readonly type: 'SET_ALL_OCCUPANCY';
+      readonly playerId: number;
+      readonly occupancyPct: number;
+    }
   | { readonly type: 'DECLARE_WAR'; readonly actorId: number; readonly targetId: number }
   | { readonly type: 'MAKE_PEACE'; readonly actorId: number; readonly targetId: number }
   | { readonly type: 'TOGGLE_ALLIANCE'; readonly actorId: number; readonly targetId: number }
+  | { readonly type: 'TOGGLE_TRADE'; readonly actorId: number; readonly targetId: number }
   | { readonly type: 'CANCEL_PLAYER_ORDERS'; readonly playerId: number }
   | { readonly type: 'TOGGLE_PAUSE' }
   | { readonly type: 'RESTART_GAME'; readonly seed?: number }

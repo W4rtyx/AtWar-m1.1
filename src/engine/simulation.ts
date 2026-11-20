@@ -1,5 +1,18 @@
 import { spawnBots, stepBots } from './bots';
 import {
+  createCapitalCityBuilding,
+  placeBuilding,
+  syncBuildingOwnership,
+} from './buildings';
+import {
+  OPTIMUM_FILL_RATIO,
+  areNeighbors,
+  computeTradePairIncomePerSec,
+  createInitialPlayerState,
+  recomputeNeighborPairs,
+  updateAllPlayersEconomy,
+} from './economy';
+import {
   MAX_ARROW_PATH_LENGTH,
   MAX_ORDER_TICKS,
   MIN_ACTIVE_ORDER_MANPOWER,
@@ -18,11 +31,15 @@ import { generateEuropeMap } from './mapGenerator';
 import {
   Action,
   BETRAYAL_DEBUFF_TICKS,
+  BETRAYAL_MONEY_PENALTY_RATIO,
+  Building,
   ClientRenderState,
   DiplomaticRelation,
   GameState,
+  MANPOWER_BUILDING_TYPES,
   PlayerState,
   Point,
+  PublicBuildingInfo,
   PublicPlayerInfo,
   TICK_DT,
   TerrainType,
@@ -33,7 +50,35 @@ import {
 const HUMAN_PLAYER_ID = 1;
 const HUMAN_START_RADIUS = 14;
 const BOT_COUNT = 11;
-const OPTIMUM_FILL_RATIO = 0.5;
+
+export interface SpeedStepPlan {
+  readonly ticksToRun: number;
+  readonly nextAccumulatorSec: number;
+  readonly maxTicksPerFrame: number;
+}
+
+/**
+ * Computes exact fixed-timestep simulation steps for the elapsed real frame time scaled by simSpeed,
+ * allowing 1x (10 ticks/s) through 50x (500 ticks/s) without premature per-frame throttling.
+ */
+export function planSimulationTicks(
+  currentAccumulatorSec: number,
+  dtSec: number,
+  simSpeed: number,
+): SpeedStepPlan {
+  const clampedDt = Math.min(0.1, Math.max(0, dtSec));
+  const maxAccumulator = Math.max(1.0, simSpeed * 0.25);
+  const added = Math.min(maxAccumulator, Math.max(0, currentAccumulatorSec) + clampedDt * simSpeed);
+  const maxTicksPerFrame = Math.min(60, Math.max(2, Math.ceil(simSpeed * 1.2)));
+  const availableTicks = Math.floor(added / TICK_DT + 1e-9);
+  const ticksToRun = Math.min(availableTicks, maxTicksPerFrame);
+  const nextAccumulatorSec = Math.max(0, added - ticksToRun * TICK_DT);
+  return {
+    ticksToRun,
+    nextAccumulatorSec,
+    maxTicksPerFrame,
+  };
+}
 
 function createBaseState(seed: number): GameState {
   const generated = generateEuropeMap(seed);
@@ -49,6 +94,11 @@ function createBaseState(seed: number): GameState {
     players: new Map<number, PlayerState>(),
     humanPlayerId: HUMAN_PLAYER_ID,
     relations: new Map<string, DiplomaticRelation>(),
+    tradeAgreements: new Set<string>(),
+    neighborPairs: new Set<string>(),
+    buildings: [],
+    nextBuildingId: 1,
+    lastTerritorySyncVersion: -1,
     attackOrders: [],
     frontPushOrders: [],
     publicResourceZones: generated.publicResourceZones,
@@ -61,41 +111,6 @@ function createBaseState(seed: number): GameState {
 
 export function createInitialGameState(seed = 20261120): GameState {
   return createBaseState(seed);
-}
-
-/**
- * Computes non-linear manpower capacity and growth rate around a 50% optimum,
- * with a protected emergency home-defense recovery floor to prevent death spirals.
- */
-function updatePlayerManpowerEconomy(player: PlayerState, applyTickGrowth: boolean): void {
-  const maxManpower = Math.round(320 + Math.pow(Math.max(1, player.territoryCells), 0.88) * 0.62);
-  const clampedManpower = Math.min(maxManpower, Math.max(0, player.manpower));
-  const fillRatio = Math.max(0, Math.min(1, clampedManpower / Math.max(1, maxManpower)));
-
-  let efficiency: number;
-  if (fillRatio <= OPTIMUM_FILL_RATIO) {
-    efficiency = 0.48 + 0.52 * Math.sin((fillRatio / OPTIMUM_FILL_RATIO) * (Math.PI / 2));
-  } else {
-    const overRatio = (fillRatio - OPTIMUM_FILL_RATIO) / (1 - OPTIMUM_FILL_RATIO);
-    efficiency = Math.pow(Math.max(0, 1 - overRatio), 1.65);
-  }
-
-  const peakIncomePerSec = 7.2 + Math.pow(Math.max(1, player.territoryCells), 0.76) * 0.066;
-  let incomePerSec = peakIncomePerSec * efficiency;
-
-  if (fillRatio < 0.18) {
-    incomePerSec = Math.max(incomePerSec, 14 + maxManpower * 0.025);
-  }
-
-  player.maxManpower = maxManpower;
-  player.manpowerGrowthEfficiency = efficiency;
-  player.manpowerIncomePerSec = incomePerSec;
-
-  if (applyTickGrowth) {
-    player.manpower = Math.min(maxManpower, clampedManpower + incomePerSec * TICK_DT);
-  } else {
-    player.manpower = clampedManpower;
-  }
 }
 
 function findNearestOwnedPoint(
@@ -194,9 +209,12 @@ function declareWar(state: GameState, actorId: number, targetId: number): void {
 
   if (prev === 'ALLIED') {
     actor.betrayalDebuffTicks = BETRAYAL_DEBUFF_TICKS;
+    actor.money = Math.max(0, actor.money * (1 - BETRAYAL_MONEY_PENALTY_RATIO));
   }
 
+  state.tradeAgreements.delete(getRelationKey(actorId, targetId));
   setWarRelation(state, actorId, targetId);
+  updateAllPlayersEconomy(state, false);
 }
 
 function isOrderDirectedAtState(
@@ -268,11 +286,12 @@ function cancelOrdersBetween(state: GameState, aId: number, bId: number): void {
 
   if (playerA && refundA > 0) {
     playerA.manpower = Math.min(playerA.maxManpower, playerA.manpower + refundA);
-    updatePlayerManpowerEconomy(playerA, false);
   }
   if (playerB && refundB > 0) {
     playerB.manpower = Math.min(playerB.maxManpower, playerB.manpower + refundB);
-    updatePlayerManpowerEconomy(playerB, false);
+  }
+  if (refundA > 0 || refundB > 0) {
+    updateAllPlayersEconomy(state, false);
   }
 }
 
@@ -310,6 +329,31 @@ function toggleAlliance(state: GameState, actorId: number, targetId: number): vo
   state.stateVersion++;
 }
 
+function toggleTrade(state: GameState, actorId: number, targetId: number): void {
+  if (actorId === targetId) return;
+  const actor = state.players.get(actorId);
+  const target = state.players.get(targetId);
+  if (!actor || !actor.alive || !target || !target.alive) {
+    return;
+  }
+
+  const key = getRelationKey(actorId, targetId);
+  if (state.tradeAgreements.has(key)) {
+    state.tradeAgreements.delete(key);
+    updateAllPlayersEconomy(state, false);
+    state.stateVersion++;
+    return;
+  }
+
+  if (!areNeighbors(state, actorId, targetId) || getRelation(state, actorId, targetId) === 'WAR') {
+    return;
+  }
+
+  state.tradeAgreements.add(key);
+  updateAllPlayersEconomy(state, false);
+  state.stateVersion++;
+}
+
 function handleSelectStart(state: GameState, x: number, y: number): void {
   if (state.phase !== 'SELECT_START') {
     return;
@@ -329,7 +373,7 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
     return;
   }
 
-  const humanPlayer: PlayerState = {
+  const humanPlayer = createInitialPlayerState({
     id: HUMAN_PLAYER_ID,
     name: 'Republika (Vy)',
     isBot: false,
@@ -337,29 +381,29 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
     colorRgb: [59, 110, 140],
     capitalX: ix,
     capitalY: iy,
-    manpower: 240,
-    maxManpower: 480,
-    manpowerIncomePerSec: 14,
-    manpowerGrowthEfficiency: 1,
-    betrayalDebuffTicks: 0,
-    nextBotDecisionTick: 0,
     territoryCells: claimed,
-    alive: true,
-  };
+    nextBotDecisionTick: 0,
+  });
 
   state.players.set(HUMAN_PLAYER_ID, humanPlayer);
   spawnBots(state, BOT_COUNT);
   recalculateTerritoryAndCapitals(state);
+  recomputeNeighborPairs(state);
 
   for (const player of state.players.values()) {
-    updatePlayerManpowerEconomy(player, false);
-    player.manpower = Math.round(player.maxManpower * OPTIMUM_FILL_RATIO);
-    updatePlayerManpowerEconomy(player, false);
+    createCapitalCityBuilding(state, player.id, player.capitalX, player.capitalY);
   }
+
+  updateAllPlayersEconomy(state, false);
+  for (const player of state.players.values()) {
+    player.manpower = Math.round(player.maxManpower * OPTIMUM_FILL_RATIO);
+  }
+  updateAllPlayersEconomy(state, false);
 
   state.phase = 'PLAYING';
   state.paused = false;
   state.stateVersion++;
+  state.lastTerritorySyncVersion = state.stateVersion;
 }
 
 function handleCreateAttackOrder(
@@ -411,13 +455,14 @@ function handleCreateAttackOrder(
   }
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
-  const committed = player.manpower * (clampedPct / 100);
+  const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
+  const committed = activeMp * (clampedPct / 100);
   if (committed < MIN_ACTIVE_ORDER_MANPOWER) {
     return;
   }
 
   player.manpower -= committed;
-  updatePlayerManpowerEconomy(player, false);
+  updateAllPlayersEconomy(state, false);
 
   state.attackOrders.push({
     id: state.nextOrderId++,
@@ -594,13 +639,14 @@ function handleCreateFrontPushOrder(
   );
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
-  const committed = player.manpower * (clampedPct / 100);
+  const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
+  const committed = activeMp * (clampedPct / 100);
   if (committed < MIN_ACTIVE_ORDER_MANPOWER) {
     return;
   }
 
   player.manpower -= committed;
-  updatePlayerManpowerEconomy(player, false);
+  updateAllPlayersEconomy(state, false);
 
   state.frontPushOrders.push({
     id: state.nextOrderId++,
@@ -743,7 +789,7 @@ function handleCancelPlayerOrders(state: GameState, playerId: number): void {
 
   if (refund > 0) {
     player.manpower = Math.min(player.maxManpower, player.manpower + refund);
-    updatePlayerManpowerEconomy(player, false);
+    updateAllPlayersEconomy(state, false);
   }
 }
 
@@ -753,18 +799,82 @@ function handleTick(state: GameState): void {
   }
 
   state.tick++;
+  const versionBefore = state.stateVersion;
   stepFrontExpansion(state);
-  recalculateTerritoryAndCapitals(state);
+  if (syncBuildingOwnership(state)) {
+    state.stateVersion++;
+  }
+
+  if (
+    state.stateVersion !== versionBefore ||
+    state.lastTerritorySyncVersion !== state.stateVersion ||
+    state.tick % 10 === 1
+  ) {
+    recalculateTerritoryAndCapitals(state);
+    recomputeNeighborPairs(state);
+    state.lastTerritorySyncVersion = state.stateVersion;
+  }
 
   for (const player of state.players.values()) {
     if (!player.alive) continue;
     if (player.betrayalDebuffTicks > 0) {
       player.betrayalDebuffTicks--;
     }
-    updatePlayerManpowerEconomy(player, true);
   }
 
+  updateAllPlayersEconomy(state, true);
   stepBots(state);
+}
+
+function handleSetBuildingTypeOccupancy(
+  state: GameState,
+  playerId: number,
+  buildingType: keyof PlayerState['buildingOccupancyByType'],
+  occupancyPct: number,
+): void {
+  const player = state.players.get(playerId);
+  if (!player || !player.alive) return;
+  player.buildingOccupancyByType[buildingType] = Math.max(0, Math.min(200, Math.round(occupancyPct)));
+  updateAllPlayersEconomy(state, false);
+  state.stateVersion++;
+}
+
+function handleSetBuildingOccupancy(
+  state: GameState,
+  playerId: number,
+  buildingId: number,
+  occupancyPct: number | null,
+): void {
+  const player = state.players.get(playerId);
+  if (!player || !player.alive) return;
+  const building = state.buildings.find(
+    (b) => b.id === buildingId && b.ownerId === playerId,
+  );
+  if (!building) return;
+  building.occupancyOverride =
+    occupancyPct === null ? null : Math.max(0, Math.min(200, Math.round(occupancyPct)));
+  updateAllPlayersEconomy(state, false);
+  state.stateVersion++;
+}
+
+function handleSetAllOccupancy(
+  state: GameState,
+  playerId: number,
+  occupancyPct: number,
+): void {
+  const player = state.players.get(playerId);
+  if (!player || !player.alive) return;
+  const clamped = Math.max(0, Math.min(200, Math.round(occupancyPct)));
+  for (const bType of MANPOWER_BUILDING_TYPES) {
+    player.buildingOccupancyByType[bType] = clamped;
+  }
+  for (const building of state.buildings) {
+    if (building.ownerId === playerId) {
+      building.occupancyOverride = null;
+    }
+  }
+  updateAllPlayersEconomy(state, false);
+  state.stateVersion++;
 }
 
 export function dispatchAction(state: GameState, action: Action): void {
@@ -821,6 +931,38 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.manpowerPercent,
       );
       break;
+    case 'PLACE_BUILDING': {
+      const placed = placeBuilding(
+        state,
+        action.playerId,
+        action.buildingType,
+        action.x,
+        action.y,
+      );
+      if (placed) {
+        updateAllPlayersEconomy(state, false);
+      }
+      break;
+    }
+    case 'SET_BUILDING_TYPE_OCCUPANCY':
+      handleSetBuildingTypeOccupancy(
+        state,
+        action.playerId,
+        action.buildingType,
+        action.occupancyPct,
+      );
+      break;
+    case 'SET_BUILDING_OCCUPANCY':
+      handleSetBuildingOccupancy(
+        state,
+        action.playerId,
+        action.buildingId,
+        action.occupancyPct,
+      );
+      break;
+    case 'SET_ALL_OCCUPANCY':
+      handleSetAllOccupancy(state, action.playerId, action.occupancyPct);
+      break;
     case 'DECLARE_WAR':
       declareWar(state, action.actorId, action.targetId);
       break;
@@ -829,6 +971,9 @@ export function dispatchAction(state: GameState, action: Action): void {
       break;
     case 'TOGGLE_ALLIANCE':
       toggleAlliance(state, action.actorId, action.targetId);
+      break;
+    case 'TOGGLE_TRADE':
+      toggleTrade(state, action.actorId, action.targetId);
       break;
     case 'CANCEL_PLAYER_ORDERS':
       handleCancelPlayerOrders(state, action.playerId);
@@ -847,6 +992,11 @@ export function dispatchAction(state: GameState, action: Action): void {
       state.owners.set(fresh.owners);
       state.players.clear();
       state.relations.clear();
+      state.tradeAgreements.clear();
+      state.neighborPairs.clear();
+      state.buildings = [];
+      state.nextBuildingId = 1;
+      state.lastTerritorySyncVersion = -1;
       state.attackOrders = [];
       state.frontPushOrders = [];
       state.publicResourceZones.splice(
@@ -870,20 +1020,44 @@ export function dispatchAction(state: GameState, action: Action): void {
   }
 }
 
+function toPublicBuilding(b: Building): PublicBuildingInfo {
+  return {
+    id: b.id,
+    type: b.type,
+    ownerId: b.ownerId,
+    x: b.x,
+    y: b.y,
+    isCapital: b.isCapital,
+    revealedEfficiencyPct: b.revealedEfficiencyPct,
+    occupancyOverride: b.occupancyOverride,
+    effectiveOccupancyPct: b.effectiveOccupancyPct,
+    effectiveOutputPct: b.effectiveOutputPct,
+    allocatedManpower: b.allocatedManpower,
+    currentEnergyUse: b.currentEnergyUse,
+    currentEnergyProd: b.currentEnergyProd,
+  };
+}
+
 /**
  * Produces a strictly sanitized client state snapshot:
  * - Secret resource optimum coordinates are never exposed.
- * - Opponent manpower and internal stats are omitted.
+ * - Opponent manpower, buildings, and internal economy stats are omitted.
  */
 export function createClientRenderState(state: GameState): ClientRenderState {
   const players: PublicPlayerInfo[] = [];
   for (const p of state.players.values()) {
-    const relationToHuman: DiplomaticRelation =
-      p.id === state.humanPlayerId
-        ? 'NEUTRAL'
-        : getRelation(state, state.humanPlayerId, p.id);
+    const isHuman = p.id === state.humanPlayerId;
+    const relationToHuman: DiplomaticRelation = isHuman
+      ? 'NEUTRAL'
+      : getRelation(state, state.humanPlayerId, p.id);
+    const isNeighborOfHuman = !isHuman && areNeighbors(state, state.humanPlayerId, p.id);
+    const tradeKey = getRelationKey(state.humanPlayerId, p.id);
+    const hasTradeWithHuman = !isHuman && state.tradeAgreements.has(tradeKey);
+    const tradeIncomeWithHumanPerSec = hasTradeWithHuman
+      ? computeTradePairIncomePerSec(state, state.humanPlayerId, p.id)
+      : 0;
 
-    if (p.id === state.humanPlayerId) {
+    if (isHuman) {
       players.push({
         id: p.id,
         name: p.name,
@@ -896,10 +1070,32 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         alive: p.alive,
         betrayalDebuffTicks: p.betrayalDebuffTicks,
         relationToHuman,
+        isNeighborOfHuman: false,
+        hasTradeWithHuman: false,
+        tradeIncomeWithHumanPerSec: 0,
         manpower: p.manpower,
         maxManpower: p.maxManpower,
         manpowerIncomePerSec: p.manpowerIncomePerSec,
         manpowerGrowthEfficiency: p.manpowerGrowthEfficiency,
+        allocatedManpower: p.allocatedManpower,
+        activeManpower: p.activeManpower,
+        money: p.money,
+        moneyIncomePerSec: p.moneyIncomePerSec,
+        tradeIncomePerSec: p.tradeIncomePerSec,
+        knowledge: p.knowledge,
+        knowledgeIncomePerSec: p.knowledgeIncomePerSec,
+        buildingMaterial: p.buildingMaterial,
+        buildingMaterialIncomePerSec: p.buildingMaterialIncomePerSec,
+        industry: p.industry,
+        industryIncomePerSec: p.industryIncomePerSec,
+        energyReserve: p.energyReserve,
+        energyReserveMax: p.energyReserveMax,
+        energyProductionPerSec: p.energyProductionPerSec,
+        energyConsumptionPerSec: p.energyConsumptionPerSec,
+        energyNetPerSec: p.energyNetPerSec,
+        energySupplyRatio: p.energySupplyRatio,
+        freePowerPlantUsed: p.freePowerPlantUsed,
+        buildingOccupancyByType: { ...p.buildingOccupancyByType },
       });
     } else {
       players.push({
@@ -914,6 +1110,9 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         alive: p.alive,
         betrayalDebuffTicks: p.betrayalDebuffTicks,
         relationToHuman,
+        isNeighborOfHuman,
+        hasTradeWithHuman,
+        tradeIncomeWithHumanPerSec,
       });
     }
   }
@@ -921,6 +1120,13 @@ export function createClientRenderState(state: GameState): ClientRenderState {
   const relationsObj: Record<string, DiplomaticRelation> = {};
   for (const [key, rel] of state.relations) {
     relationsObj[key] = rel;
+  }
+
+  const buildings: PublicBuildingInfo[] = [];
+  for (const b of state.buildings) {
+    if (b.ownerId === state.humanPlayerId) {
+      buildings.push(toPublicBuilding(b));
+    }
   }
 
   return {
@@ -935,6 +1141,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     players,
     humanPlayerId: state.humanPlayerId,
     relations: relationsObj,
+    tradeAgreements: Array.from(state.tradeAgreements),
+    buildings,
     attackOrders: state.attackOrders.map((o) => ({
       ...o,
       origin: { ...o.origin },
@@ -992,6 +1200,7 @@ function distToPolylinePoints(
 export interface EngineController {
   dispatch(action: Action): void;
   getRenderState(): ClientRenderState;
+  isPlayingAndUnpaused(): boolean;
   findHumanBorderCellsFromLasso(points: ReadonlyArray<Point>): number[];
   pruneHumanBorderCells(cells: ReadonlyArray<number>, originalCount: number): number[];
 }
@@ -1005,6 +1214,9 @@ export function createEngineController(seed?: number): EngineController {
     },
     getRenderState(): ClientRenderState {
       return createClientRenderState(state);
+    },
+    isPlayingAndUnpaused(): boolean {
+      return state.phase === 'PLAYING' && !state.paused;
     },
     findHumanBorderCellsFromLasso(points: ReadonlyArray<Point>): number[] {
       if (state.phase !== 'PLAYING' || points.length === 0) {

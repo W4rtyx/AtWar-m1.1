@@ -1,5 +1,7 @@
+import { syncPlayerActiveManpower } from './economy';
 import {
   AttackOrder,
+  BARRACKS_DEFENSE_RADIUS,
   DiplomaticRelation,
   GameState,
   MAP_HEIGHT,
@@ -21,6 +23,9 @@ export const MAX_STAGNANT_TICKS = 12;
 
 const WILDERNESS_BASE_COST = 0.62;
 const ENEMY_BORDER_BASE_COST = 3.0;
+
+const annexVisited = new Uint8Array(MAP_WIDTH * MAP_HEIGHT);
+const annexQueue = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
 
 const NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
@@ -61,6 +66,7 @@ export function getRelation(
 export function setWarRelation(state: GameState, a: number, b: number): void {
   if (a === b || a < 0 || b < 0) return;
   const key = getRelationKey(a, b);
+  state.tradeAgreements.delete(key);
   if (state.relations.get(key) !== 'WAR') {
     state.relations.set(key, 'WAR');
     state.stateVersion++;
@@ -437,9 +443,13 @@ function getProtectedReserveFloor(defender: PlayerState): number {
 
 function applyDefenderAttrition(defender: PlayerState, rawLoss: number): void {
   if (!defender.alive || rawLoss <= 0) return;
-  const floor = getProtectedReserveFloor(defender);
-  if (defender.manpower > floor) {
-    defender.manpower = Math.max(floor, defender.manpower - rawLoss);
+  const minTotalFloor = Math.min(
+    defender.maxManpower,
+    defender.allocatedManpower + getProtectedReserveFloor(defender),
+  );
+  if (defender.manpower > minTotalFloor) {
+    defender.manpower = Math.max(minTotalFloor, defender.manpower - rawLoss);
+    syncPlayerActiveManpower(defender);
   }
 }
 
@@ -461,15 +471,39 @@ function computeCellCaptureCost(
   }
 
   const defender = state.players.get(prevOwner);
+  const defenderActive = defender
+    ? Math.max(0, defender.manpower - defender.allocatedManpower)
+    : 0;
   const defenderRatio = defender
-    ? defender.manpower / Math.max(100, defender.maxManpower)
+    ? defenderActive / Math.max(100, defender.maxManpower)
     : 0;
   const defenderStrength = 0.72 + 0.85 * Math.min(1, defenderRatio / 0.55);
   const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
   const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
 
+  let bestBarracksEff = 0;
+  for (const building of state.buildings) {
+    if (
+      building.ownerId === prevOwner &&
+      building.type === 'BARRACKS' &&
+      building.effectiveOutputPct > 0 &&
+      Math.hypot(building.x - nx, building.y - ny) <= BARRACKS_DEFENSE_RADIUS
+    ) {
+      const eff = building.effectiveOutputPct / 100;
+      if (eff > bestBarracksEff) {
+        bestBarracksEff = eff;
+      }
+    }
+  }
+  const barracksDefenseFactor =
+    bestBarracksEff > 0 ? 1 + Math.min(0.45, bestBarracksEff * 0.35) : 1;
+
   let effectiveCost =
-    ENEMY_BORDER_BASE_COST * defenderStrength * cohesionFactor * terrainFactor;
+    ENEMY_BORDER_BASE_COST *
+    defenderStrength *
+    cohesionFactor *
+    terrainFactor *
+    barracksDefenseFactor;
   // Scale defender losses proportionally so low reserves don't spiral permanently to zero
   let defenderLoss =
     ENEMY_BORDER_BASE_COST * (0.18 + 0.38 * defenderRatio) * cohesionFactor;
@@ -691,6 +725,7 @@ function computeContiguousOwnedSpineArc(
 function refundRemainingManpower(player: PlayerState, remaining: number): void {
   if (remaining > 0) {
     player.manpower = Math.min(player.maxManpower, player.manpower + remaining);
+    syncPlayerActiveManpower(player);
   }
 }
 
@@ -1097,8 +1132,9 @@ function stepFrontPushOrders(state: GameState): boolean {
 export function annexEncircledPockets(state: GameState): boolean {
   const { width, height, terrain, owners } = state;
   const total = width * height;
-  const visited = new Uint8Array(total);
-  const queue = new Int32Array(total);
+  const visited = total <= annexVisited.length ? annexVisited : new Uint8Array(total);
+  const queue = total <= annexQueue.length ? annexQueue : new Int32Array(total);
+  visited.fill(0, 0, total);
   let anyAnnexed = false;
 
   for (let startIdx = 0; startIdx < total; startIdx++) {

@@ -1,9 +1,15 @@
+import { BUILDING_SPECS } from '../engine/buildings';
 import {
+  BARRACKS_DEFENSE_RADIUS,
+  BuildingType,
   ClientRenderState,
   MAP_HEIGHT,
   MAP_WIDTH,
+  MIN_BUILDING_SPACING,
   Point,
+  PublicBuildingInfo,
   PublicPlayerInfo,
+  ResourceType,
   ResourceZonePublic,
   TerrainType,
   WILDERNESS_OWNER,
@@ -32,6 +38,16 @@ export interface AmbushOverlay {
   readonly remainingSec: number;
 }
 
+export interface BuildPlacementPreview {
+  readonly buildingType: BuildingType;
+  readonly x: number;
+  readonly y: number;
+  readonly valid: boolean;
+  readonly reasonCs: string | null;
+  readonly inMatchingZone: boolean;
+  readonly isFreePowerPlant: boolean;
+}
+
 export interface RenderOverlayState {
   readonly hoverCell: Point | null;
   readonly arrowPreview: ArrowPreview | null;
@@ -40,6 +56,8 @@ export interface RenderOverlayState {
   readonly frontPushPreview: FrontPushPreview | null;
   readonly activeBendOrderId: number | null;
   readonly ambush: AmbushOverlay | null;
+  readonly buildPreview: BuildPlacementPreview | null;
+  readonly selectedBuildingId: number | null;
 }
 
 function computeDistanceField(
@@ -461,14 +479,23 @@ export class CanvasRenderer {
       state.height * camera.zoom,
     );
 
-    this.drawResourceZones(ctx, camera, state.publicResourceZones);
+    const highlightZoneType =
+      overlays.buildPreview !== null
+        ? BUILDING_SPECS[overlays.buildPreview.buildingType].resourceZoneType
+        : null;
+
+    this.drawResourceZones(ctx, camera, state.publicResourceZones, highlightZoneType);
     this.drawFrontPushOrders(ctx, camera, state);
     this.drawSelectedFrontierCells(ctx, camera, state.width, overlays.selectedFrontierCells);
     this.drawAttackOrders(ctx, camera, state, overlays.activeBendOrderId);
-    this.drawCapitals(ctx, camera, state.players);
+    this.drawBuildings(ctx, camera, state.buildings, overlays.selectedBuildingId);
+    this.drawCapitals(ctx, camera, state.players, state.humanPlayerId, state.buildings);
 
     if (state.phase === 'SELECT_START' && overlays.hoverCell) {
       this.drawStartHoverPreview(ctx, camera, state, overlays.hoverCell);
+    }
+    if (overlays.buildPreview) {
+      this.drawBuildPlacementPreview(ctx, camera, overlays.buildPreview);
     }
     if (overlays.arrowPreview) {
       this.drawArrowPreview(ctx, camera, overlays.arrowPreview);
@@ -490,28 +517,38 @@ export class CanvasRenderer {
     ctx: CanvasRenderingContext2D,
     camera: Camera,
     zones: ReadonlyArray<ResourceZonePublic>,
+    highlightType: ResourceType | null = null,
   ): void {
     for (const zone of zones) {
       const screen = camera.worldToScreen(zone.centerX + 0.5, zone.centerY + 0.5);
       const radiusPx = zone.radius * camera.zoom;
       const isMaterial = zone.type === 'CONSTRUCTION_MATERIAL';
+      const isHighlighted = highlightType !== null && zone.type === highlightType;
 
       ctx.save();
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radiusPx, 0, Math.PI * 2);
       ctx.fillStyle = isMaterial
-        ? 'rgba(202, 148, 70, 0.08)'
-        : 'rgba(86, 160, 178, 0.08)';
+        ? isHighlighted
+          ? 'rgba(202, 148, 70, 0.22)'
+          : 'rgba(202, 148, 70, 0.08)'
+        : isHighlighted
+          ? 'rgba(86, 160, 178, 0.22)'
+          : 'rgba(86, 160, 178, 0.08)';
       ctx.fill();
 
       ctx.setLineDash([5, 4]);
-      ctx.lineWidth = 1.25;
+      ctx.lineWidth = isHighlighted ? 2.0 : 1.25;
       ctx.strokeStyle = isMaterial
-        ? 'rgba(202, 148, 70, 0.72)'
-        : 'rgba(94, 173, 191, 0.72)';
+        ? isHighlighted
+          ? 'rgba(230, 176, 90, 0.95)'
+          : 'rgba(202, 148, 70, 0.72)'
+        : isHighlighted
+          ? 'rgba(118, 200, 220, 0.95)'
+          : 'rgba(94, 173, 191, 0.72)';
       ctx.stroke();
 
-      if (camera.zoom >= 1.1) {
+      if (camera.zoom >= 1.1 || isHighlighted) {
         ctx.setLineDash([]);
         ctx.font = '600 10px "Segoe UI", system-ui, sans-serif';
         ctx.textAlign = 'center';
@@ -751,36 +788,281 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
+  private drawBuildings(
+    ctx: CanvasRenderingContext2D,
+    camera: Camera,
+    buildings: ReadonlyArray<PublicBuildingInfo>,
+    selectedBuildingId: number | null,
+  ): void {
+    const r = Math.max(5.5, Math.min(9.5, camera.zoom * 2.2));
+    for (const b of buildings) {
+      const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
+      const isSelected = selectedBuildingId === b.id;
+
+      ctx.save();
+
+      if (isSelected && b.type === 'BARRACKS') {
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, BARRACKS_DEFENSE_RADIUS * camera.zoom, 0, Math.PI * 2);
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1.25;
+        ctx.strokeStyle = 'rgba(130, 198, 150, 0.65)';
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, r + 3.5, 0, Math.PI * 2);
+        ctx.strokeStyle = '#f0dca0';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(19, 24, 31, 0.92)';
+      ctx.fill();
+      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.7 : 1.2;
+      ctx.strokeStyle =
+        isSelected
+          ? '#f0dca0'
+          : b.effectiveOccupancyPct > 105
+            ? '#d99a4a'
+            : '#8ba4b8';
+      ctx.stroke();
+
+      this.drawBuildingGlyph(ctx, b.type, sc.x, sc.y, r * 0.66);
+
+      const spec = BUILDING_SPECS[b.type];
+      if (!b.isCapital && (camera.zoom >= 1.35 || isSelected)) {
+        const label =
+          spec.resourceZoneType !== null
+            ? `${spec.shortCode} ${b.revealedEfficiencyPct}%`
+            : spec.shortCode;
+        ctx.font = '600 9.5px "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const w = ctx.measureText(label).width + 6;
+        const labelY = sc.y + r + 2;
+        ctx.fillStyle = 'rgba(16, 20, 26, 0.84)';
+        ctx.fillRect(sc.x - w / 2, labelY, w, 13);
+        ctx.fillStyle = b.revealedEfficiencyPct < 50 ? '#dfaa7d' : '#d8e3ec';
+        ctx.fillText(label, sc.x, labelY + 1.5);
+      }
+
+      ctx.restore();
+    }
+  }
+
+  private drawBuildingGlyph(
+    ctx: CanvasRenderingContext2D,
+    type: BuildingType,
+    cx: number,
+    cy: number,
+    s: number,
+  ): void {
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(1.1, s * 0.28);
+
+    switch (type) {
+      case 'CITY':
+        ctx.fillStyle = '#e7dfd1';
+        ctx.fillRect(cx - s * 0.72, cy - s * 0.1, s * 0.38, s * 0.72);
+        ctx.fillRect(cx - s * 0.22, cy - s * 0.68, s * 0.44, s * 1.3);
+        ctx.fillRect(cx + s * 0.34, cy + s * 0.06, s * 0.38, s * 0.56);
+        break;
+      case 'MINE':
+        ctx.strokeStyle = '#e2ac5c';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.65, cy - s * 0.45);
+        ctx.lineTo(cx + s * 0.65, cy - s * 0.45);
+        ctx.moveTo(cx, cy - s * 0.45);
+        ctx.lineTo(cx, cy + s * 0.7);
+        ctx.stroke();
+        break;
+      case 'POWER_PLANT':
+        ctx.fillStyle = '#75cce0';
+        ctx.beginPath();
+        ctx.moveTo(cx + s * 0.16, cy - s * 0.78);
+        ctx.lineTo(cx - s * 0.48, cy + s * 0.08);
+        ctx.lineTo(cx + s * 0.05, cy + s * 0.08);
+        ctx.lineTo(cx - s * 0.18, cy + s * 0.78);
+        ctx.lineTo(cx + s * 0.48, cy - s * 0.08);
+        ctx.lineTo(cx - s * 0.04, cy - s * 0.08);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      case 'FACTORY':
+        ctx.fillStyle = '#cfa07a';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.75, cy + s * 0.62);
+        ctx.lineTo(cx - s * 0.75, cy - s * 0.25);
+        ctx.lineTo(cx - s * 0.15, cy + s * 0.15);
+        ctx.lineTo(cx - s * 0.15, cy - s * 0.25);
+        ctx.lineTo(cx + s * 0.45, cy + s * 0.15);
+        ctx.lineTo(cx + s * 0.45, cy - s * 0.55);
+        ctx.lineTo(cx + s * 0.75, cy - s * 0.55);
+        ctx.lineTo(cx + s * 0.75, cy + s * 0.62);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      case 'LAB':
+        ctx.strokeStyle = '#8ec0eb';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.24, cy - s * 0.7);
+        ctx.lineTo(cx + s * 0.24, cy - s * 0.7);
+        ctx.moveTo(cx - s * 0.18, cy - s * 0.7);
+        ctx.lineTo(cx - s * 0.6, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.6, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.18, cy - s * 0.7);
+        ctx.stroke();
+        break;
+      case 'BARRACKS':
+        ctx.strokeStyle = '#8ec79b';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - s * 0.72);
+        ctx.lineTo(cx + s * 0.6, cy - s * 0.35);
+        ctx.lineTo(cx + s * 0.45, cy + s * 0.32);
+        ctx.lineTo(cx, cy + s * 0.75);
+        ctx.lineTo(cx - s * 0.45, cy + s * 0.32);
+        ctx.lineTo(cx - s * 0.6, cy - s * 0.35);
+        ctx.closePath();
+        ctx.stroke();
+        break;
+      case 'PORT':
+        ctx.strokeStyle = '#75b5de';
+        ctx.beginPath();
+        ctx.arc(cx, cy - s * 0.46, s * 0.22, 0, Math.PI * 2);
+        ctx.moveTo(cx, cy - s * 0.24);
+        ctx.lineTo(cx, cy + s * 0.68);
+        ctx.moveTo(cx - s * 0.45, cy);
+        ctx.lineTo(cx + s * 0.45, cy);
+        ctx.moveTo(cx - s * 0.58, cy + s * 0.35);
+        ctx.quadraticCurveTo(cx, cy + s * 0.9, cx + s * 0.58, cy + s * 0.35);
+        ctx.stroke();
+        break;
+      case 'AIRFIELD':
+        ctx.strokeStyle = '#d3dce6';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - s * 0.74);
+        ctx.lineTo(cx, cy + s * 0.72);
+        ctx.moveTo(cx - s * 0.72, cy + s * 0.12);
+        ctx.lineTo(cx, cy - s * 0.25);
+        ctx.lineTo(cx + s * 0.72, cy + s * 0.12);
+        ctx.moveTo(cx - s * 0.32, cy + s * 0.65);
+        ctx.lineTo(cx + s * 0.32, cy + s * 0.65);
+        ctx.stroke();
+        break;
+    }
+
+    ctx.restore();
+  }
+
+  private drawBuildPlacementPreview(
+    ctx: CanvasRenderingContext2D,
+    camera: Camera,
+    preview: BuildPlacementPreview,
+  ): void {
+    const sc = camera.worldToScreen(preview.x + 0.5, preview.y + 0.5);
+    const r = Math.max(7, Math.min(11, camera.zoom * 2.4));
+    const spacingR = MIN_BUILDING_SPACING * camera.zoom;
+
+    ctx.save();
+
+    ctx.beginPath();
+    ctx.arc(sc.x, sc.y, spacingR, 0, Math.PI * 2);
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = preview.valid
+      ? 'rgba(105, 198, 134, 0.45)'
+      : 'rgba(216, 98, 90, 0.45)';
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = preview.valid
+      ? 'rgba(42, 108, 66, 0.72)'
+      : 'rgba(128, 44, 40, 0.72)';
+    ctx.fill();
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = preview.valid ? '#84e0a0' : '#ea8c84';
+    ctx.stroke();
+
+    this.drawBuildingGlyph(ctx, preview.buildingType, sc.x, sc.y, r * 0.64);
+
+    const spec = BUILDING_SPECS[preview.buildingType];
+    let statusText: string;
+    if (!preview.valid && preview.reasonCs) {
+      statusText = `${spec.nameCs} — ${preview.reasonCs}`;
+    } else if (preview.isFreePowerPlant) {
+      statusText = preview.inMatchingZone
+        ? `${spec.nameCs} (ZDARMA) · V zóně zdroje`
+        : `${spec.nameCs} (ZDARMA) · Mimo zónu (nouzový režim)`;
+    } else if (spec.resourceZoneType !== null) {
+      statusText = preview.inMatchingZone
+        ? `${spec.nameCs} · V zóně zdroje`
+        : `${spec.nameCs} · Mimo zónu (nouzový režim)`;
+    } else {
+      statusText = `${spec.nameCs} · Kliknutím postavíte`;
+    }
+
+    ctx.font = '600 11px "Segoe UI", system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const boxW = ctx.measureText(statusText).width + 14;
+    const boxY = sc.y - r - 18;
+    ctx.fillStyle = 'rgba(16, 20, 26, 0.90)';
+    ctx.strokeStyle = preview.valid ? '#589c6f' : '#a84e48';
+    ctx.lineWidth = 1.1;
+    ctx.fillRect(sc.x - boxW / 2, boxY - 9, boxW, 18);
+    ctx.strokeRect(sc.x - boxW / 2, boxY - 9, boxW, 18);
+    ctx.fillStyle = preview.valid ? '#caeeda' : '#f2c2be';
+    ctx.fillText(statusText, sc.x, boxY + 0.5);
+
+    ctx.restore();
+  }
+
   private drawCapitals(
     ctx: CanvasRenderingContext2D,
     camera: Camera,
     players: ReadonlyArray<PublicPlayerInfo>,
+    humanPlayerId: number,
+    humanBuildings: ReadonlyArray<PublicBuildingInfo>,
   ): void {
+    const humanHasCapitalIcon = humanBuildings.some((b) => b.isCapital);
+
     for (const player of players) {
       if (!player.alive) continue;
       const sc = camera.worldToScreen(player.capitalX + 0.5, player.capitalY + 0.5);
       const r = Math.max(3.8, Math.min(6.5, camera.zoom * 1.4));
+      const skipHumanDot = player.id === humanPlayerId && humanHasCapitalIcon;
 
       ctx.save();
-      ctx.beginPath();
-      ctx.arc(sc.x, sc.y, r + 1.8, 0, Math.PI * 2);
-      ctx.fillStyle =
-        player.relationToHuman === 'WAR'
-          ? '#a83c36'
-          : player.relationToHuman === 'ALLIED'
-            ? '#478b5e'
-            : '#14191f';
-      ctx.fill();
+      if (!skipHumanDot) {
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, r + 1.8, 0, Math.PI * 2);
+        ctx.fillStyle =
+          player.relationToHuman === 'WAR'
+            ? '#a83c36'
+            : player.relationToHuman === 'ALLIED'
+              ? '#478b5e'
+              : '#14191f';
+        ctx.fill();
 
-      ctx.beginPath();
-      ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = player.colorHex;
-      ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = player.colorHex;
+        ctx.fill();
 
-      ctx.beginPath();
-      ctx.arc(sc.x, sc.y, Math.max(1.6, r * 0.42), 0, Math.PI * 2);
-      ctx.fillStyle = '#f0ece1';
-      ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, Math.max(1.6, r * 0.42), 0, Math.PI * 2);
+        ctx.fillStyle = '#f0ece1';
+        ctx.fill();
+      }
 
       if (camera.zoom >= 0.95) {
         ctx.font = '600 11px "Segoe UI", system-ui, sans-serif';
@@ -789,7 +1071,8 @@ export class CanvasRenderer {
         const suffix = player.betrayalDebuffTicks > 0 ? ' [ZRÁDCE]' : '';
         const label = `${player.name}${suffix}`;
         const w = ctx.measureText(label).width + 10;
-        const labelY = sc.y + r + 4;
+        const labelOffset = skipHumanDot ? Math.max(8, camera.zoom * 2.2) + 4 : r + 4;
+        const labelY = sc.y + labelOffset;
         ctx.fillStyle = 'rgba(16, 20, 26, 0.84)';
         ctx.fillRect(sc.x - w / 2, labelY, w, 15);
         ctx.strokeStyle =

@@ -47,10 +47,55 @@ body {
 
 .hud-top-bar {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 14px;
+}
+
+.hud-top-row-main {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 8px 14px;
+}
+
+.hud-resource-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding-top: 5px;
+  border-top: 1px solid #28323e;
+}
+
+.hud-res-pill {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.hud-res-pill.energy-deficit .hud-stat-value {
+  color: #e2a298;
+}
+
+.hud-stat-sub.rate-negative {
+  color: #dc867c;
+}
+
+.hud-alloc-badge {
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: #202933;
+  border: 1px solid #354454;
+  color: #a8b7c6;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-alloc-toggle-btn {
+  padding: 1px 7px;
+  font-size: 10.5px;
 }
 
 .hud-brand {
@@ -232,9 +277,11 @@ body {
 .hud-middle-slot {
   position: relative;
   flex: 1;
+  min-height: 0;
   display: flex;
   align-items: flex-start;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   padding: 10px 0;
   pointer-events: none;
 }
@@ -364,6 +411,10 @@ body {
   color: #87cfa0;
 }
 
+.hud-lb-tag.rel-trade {
+  color: #8dc2dc;
+}
+
 .hud-lb-betrayal {
   flex-shrink: 0;
   font-size: 9.5px;
@@ -463,6 +514,28 @@ body {
   border-color: #548c67;
 }
 
+.hud-btn-trade {
+  border-color: #3a5d73;
+  color: #b8d8eb;
+}
+
+.hud-btn-trade:hover:not(:disabled) {
+  background: #233b4a;
+  border-color: #5586a3;
+}
+
+.hud-btn-trade.active {
+  background: #2a4c60;
+  border-color: #659ec0;
+  color: #e4f2fa;
+}
+
+.hud-dip-note {
+  font-size: 11px;
+  color: #828e9b;
+  padding-top: 2px;
+}
+
 .hud-prompt-banner.hidden {
   display: none;
 }
@@ -472,6 +545,284 @@ body {
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
+}
+
+.hud-bottom-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.hud-build-bar {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hud-build-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hud-build-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9ba6b2;
+}
+
+.hud-build-cancel {
+  padding: 1px 7px;
+  font-size: 10.5px;
+}
+
+.hud-build-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hud-build-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 4px 8px;
+  min-width: 96px;
+}
+
+.hud-build-btn.unaffordable:not(.active) {
+  opacity: 0.62;
+}
+
+.hud-build-btn-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hud-build-hotkey {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: #182028;
+  border: 1px solid #394654;
+  color: #9bb0c4;
+}
+
+.hud-build-name {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.hud-build-cost {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: #9faab5;
+}
+
+.hud-build-cost.free-bonus {
+  color: #9ad8ac;
+  font-weight: 700;
+}
+
+.hud-manpower-panel {
+  width: 288px;
+  max-height: 410px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: rgba(16, 21, 27, 0.90);
+  border-color: #2c3744;
+}
+
+.hud-mp-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-mp-badge {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: #a9bac9;
+}
+
+.hud-mp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px 10px;
+  overflow-y: auto;
+}
+
+.hud-mp-summary {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #a8b3be;
+  font-variant-numeric: tabular-nums;
+  padding-bottom: 5px;
+  border-bottom: 1px solid #26303b;
+}
+
+.hud-mp-summary strong {
+  color: #e4dfd2;
+}
+
+.hud-mp-presets {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.hud-mp-preset-btn {
+  padding: 3px 4px;
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.hud-mp-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hud-mp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hud-mp-row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.hud-mp-label-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hud-mp-type-name {
+  color: #dedad0;
+  font-weight: 600;
+}
+
+.hud-mp-count {
+  font-size: 10px;
+  color: #818d99;
+}
+
+.hud-mp-readout {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: #9ec0d4;
+}
+
+.hud-mp-readout.overload {
+  color: #e0ad6b;
+  font-weight: 600;
+}
+
+.hud-manpower-panel .hud-mp-slider {
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.hud-building-inspector {
+  margin-top: 4px;
+  padding-top: 7px;
+  border-top: 1px solid #303d4b;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hud-insp-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hud-insp-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ebe6da;
+}
+
+.hud-insp-coords {
+  font-size: 10px;
+  color: #8895a2;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-insp-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+  font-size: 11px;
+}
+
+.hud-insp-metric {
+  display: flex;
+  flex-direction: column;
+  background: rgba(26, 34, 42, 0.72);
+  border: 1px solid #2b3642;
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+
+.hud-insp-metric span {
+  font-size: 9.5px;
+  color: #8f9ba7;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.hud-insp-metric strong {
+  color: #e5e0d4;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-insp-metric strong.high-site {
+  color: #93cfa7;
+}
+
+.hud-insp-metric strong.low-site {
+  color: #dfa273;
+}
+
+.hud-insp-slider-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hud-insp-slider-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-mp-reset-btn {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  font-size: 10px;
 }
 
 .hud-tactical-bar {
@@ -531,10 +882,11 @@ body {
 }
 
 .hud-legend {
+  flex-shrink: 0;
   padding: 8px 12px;
   font-size: 11px;
   color: #a6b0ba;
-  max-width: 310px;
+  max-width: 340px;
 }
 
 .hud-legend-row {

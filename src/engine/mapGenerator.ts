@@ -583,10 +583,10 @@ function generateResourceZones(
   publicResourceZones: ResourceZonePublic[];
   secretResourceZones: ResourceZoneSecret[];
 } {
-  const targetZones = 20;
+  const targetZones = 26;
   const publicResourceZones: ResourceZonePublic[] = [];
   const secretResourceZones: ResourceZoneSecret[] = [];
-  const minZoneSeparation = 52;
+  const minZoneSeparation = 42;
 
   let attempts = 0;
   while (publicResourceZones.length < targetZones && attempts < 6000) {

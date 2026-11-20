@@ -1,3 +1,8 @@
+import { placeBuilding } from '../src/engine/buildings';
+import {
+  CAPITAL_BASE_MATERIAL_PER_SEC,
+  areNeighbors,
+} from '../src/engine/economy';
 import {
   MAX_ORDER_TICKS,
   annexEncircledPockets,
@@ -8,11 +13,16 @@ import {
   createEngineController,
   createInitialGameState,
   dispatchAction,
+  planSimulationTicks,
 } from '../src/engine/simulation';
 import {
+  BETRAYAL_DEBUFF_TICKS,
   GameState,
+  MIN_BUILDING_SPACING,
+  TICK_DT,
   TerrainType,
   WILDERNESS_OWNER,
+  getRelationKey,
 } from '../src/engine/types';
 
 declare const console: { log(message: string): void };
@@ -485,6 +495,568 @@ function testAntiDeathSpiralUnderMultiBotAttack(): void {
   console.log('PASS [f]: Anti-death-spiral manpower safeguard verified.');
 }
 
+function findSpacedOwnedSpot(
+  state: GameState,
+  playerId: number,
+  nearX: number,
+  nearY: number,
+  maxSearchR: number,
+  requireOutsideAllZones: boolean,
+): { x: number; y: number } | null {
+  for (let r = 0; r <= maxSearchR; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        const x = nearX + dx;
+        const y = nearY + dy;
+        if (x < 0 || x >= state.width || y < 0 || y >= state.height) continue;
+        const idx = y * state.width + x;
+        if (state.terrain[idx] === TerrainType.WATER || state.owners[idx] !== playerId) {
+          continue;
+        }
+        let tooClose = false;
+        for (const b of state.buildings) {
+          if (Math.hypot(b.x - x, b.y - y) < MIN_BUILDING_SPACING) {
+            tooClose = true;
+            break;
+          }
+        }
+        if (tooClose) continue;
+        if (requireOutsideAllZones) {
+          let insideZone = false;
+          for (const z of state.publicResourceZones) {
+            if (Math.hypot(x - z.centerX, y - z.centerY) <= z.radius) {
+              insideZone = true;
+              break;
+            }
+          }
+          if (insideZone) continue;
+        }
+        return { x, y };
+      }
+    }
+  }
+  return null;
+}
+
+function testSpeedUpRealTimeRatio(): void {
+  const simulateRealSecond = (fps: number, simSpeed: number): number => {
+    const dt = 1 / fps;
+    let accum = 0;
+    let totalTicks = 0;
+    for (let frameIdx = 0; frameIdx < fps; frameIdx++) {
+      const plan = planSimulationTicks(accum, dt, simSpeed);
+      totalTicks += plan.ticksToRun;
+      accum = plan.nextAccumulatorSec;
+    }
+    return totalTicks;
+  };
+
+  for (const fps of [60, 30]) {
+    const ticks1x = simulateRealSecond(fps, 1);
+    const ticks10x = simulateRealSecond(fps, 10);
+    const ticks50x = simulateRealSecond(fps, 50);
+    assert(ticks1x === 10, `At ${fps} FPS 1x must advance 10 ticks/s (got ${ticks1x})`);
+    assert(ticks10x === 100, `At ${fps} FPS 10x must advance 100 ticks/s (got ${ticks10x})`);
+    assert(ticks50x === 500, `At ${fps} FPS 50x must advance 500 ticks/s (got ${ticks50x})`);
+  }
+
+  const engine = createEngineController(9191);
+  const pre = engine.getRenderState();
+  let startX = 240;
+  let startY = 260;
+  for (let y = 200; y < 340; y++) {
+    let found = false;
+    for (let x = 200; x < 360; x++) {
+      if (pre.terrain[y * pre.width + x] === TerrainType.PLAINS) {
+        startX = x;
+        startY = y;
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+  engine.dispatch({ type: 'SELECT_START_POSITION', x: startX, y: startY });
+
+  let accum = 0;
+  for (let f = 0; f < 60; f++) {
+    const plan = planSimulationTicks(accum, 1 / 60, 10);
+    for (let t = 0; t < plan.ticksToRun; t++) {
+      engine.dispatch({ type: 'TICK' });
+    }
+    accum = plan.nextAccumulatorSec;
+  }
+  const after = engine.getRenderState();
+  assert(
+    Math.abs(after.tick * TICK_DT - 10) < 0.001,
+    `10x speed-up over 1.0 real second must advance timer to 10.0s (got ${(after.tick * TICK_DT).toFixed(2)}s)`,
+  );
+  console.log('PASS [g]: Real-time 1x/10x/50x speed-up scaling verified.');
+}
+
+function testBuildingsFreePowerPlantAndResourceZones(): void {
+  const controller = createEngineController(3131);
+  const pre = controller.getRenderState();
+  let sx = 240;
+  let sy = 260;
+  for (let y = 200; y < 340; y++) {
+    let ok = false;
+    for (let x = 200; x < 360; x++) {
+      if (pre.terrain[y * pre.width + x] === TerrainType.PLAINS) {
+        sx = x;
+        sy = y;
+        ok = true;
+        break;
+      }
+    }
+    if (ok) break;
+  }
+  controller.dispatch({ type: 'SELECT_START_POSITION', x: sx, y: sy });
+  const sanitized = controller.getRenderState();
+  const rawJson = JSON.stringify({
+    players: sanitized.players,
+    buildings: sanitized.buildings,
+    publicResourceZones: sanitized.publicResourceZones,
+    tradeAgreements: sanitized.tradeAgreements,
+  });
+  assert(!rawJson.includes('optimumX'), 'ClientRenderState must never expose optimumX');
+  assert(!rawJson.includes('optimumY'), 'ClientRenderState must never expose optimumY');
+  assert(
+    !('secretResourceZones' in sanitized),
+    'ClientRenderState must never contain secretResourceZones',
+  );
+  assert(
+    sanitized.buildings.every((b) => b.ownerId === sanitized.humanPlayerId),
+    'ClientRenderState must not leak opponent buildings',
+  );
+
+  const state = createInitialGameState(3232);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  human.money = 3000;
+  human.buildingMaterial = 1500;
+  human.industry = 500;
+
+  // 1st Power Plant MUST be free
+  const pp1Spot = findSpacedOwnedSpot(state, humanId, human.capitalX, human.capitalY, 13, false);
+  assert(pp1Spot !== null, 'Should find valid spot near capital for 1st Power Plant');
+  const moneyBeforeFree = human.money;
+  const matBeforeFree = human.buildingMaterial;
+  const pp1 = placeBuilding(state, humanId, 'POWER_PLANT', pp1Spot!.x, pp1Spot!.y);
+  assert(pp1 !== null, '1st Power Plant placement must succeed');
+  assert(human.freePowerPlantUsed === true, 'freePowerPlantUsed must flip true');
+  assert(
+    human.money === moneyBeforeFree && human.buildingMaterial === matBeforeFree,
+    '1st Power Plant must cost 0 money and 0 buildingMaterial',
+  );
+
+  // Spacing check: < MIN_BUILDING_SPACING must fail
+  const tooClose = placeBuilding(state, humanId, 'MINE', pp1Spot!.x + 3, pp1Spot!.y);
+  assert(tooClose === null, 'Placement closer than MIN_BUILDING_SPACING must be rejected');
+
+  // 2nd Power Plant MUST deduct full cost (130 money, 60 material)
+  const pp2Spot = findSpacedOwnedSpot(state, humanId, human.capitalX, human.capitalY, 14, false);
+  assert(pp2Spot !== null, 'Should find spot for 2nd Power Plant');
+  const pp2 = placeBuilding(state, humanId, 'POWER_PLANT', pp2Spot!.x, pp2Spot!.y);
+  assert(pp2 !== null, '2nd Power Plant placement must succeed');
+  assert(
+    human.money === moneyBeforeFree - 130 && human.buildingMaterial === matBeforeFree - 60,
+    '2nd Power Plant must deduct 130 money and 60 buildingMaterial',
+  );
+
+  // Locate a CONSTRUCTION_MATERIAL zone with an optimum spot and a distant in-zone edge spot
+  let chosenOpt: { x: number; y: number } | null = null;
+  let chosenEdge: { x: number; y: number } | null = null;
+  for (const pub of state.publicResourceZones) {
+    if (pub.type !== 'CONSTRUCTION_MATERIAL') continue;
+    const sec = state.secretResourceZones.find((s) => s.zoneId === pub.id);
+    if (!sec) continue;
+    // Paint circle to human cleanly
+    let edgeCand: { x: number; y: number } | null = null;
+    for (let dy = -pub.radius; dy <= pub.radius; dy++) {
+      for (let dx = -pub.radius; dx <= pub.radius; dx++) {
+        if (dx * dx + dy * dy > pub.radius * pub.radius) continue;
+        const x = pub.centerX + dx;
+        const y = pub.centerY + dy;
+        if (x < 0 || x >= state.width || y < 0 || y >= state.height) continue;
+        if (state.terrain[y * state.width + x] === TerrainType.WATER) continue;
+        const dOpt = Math.hypot(x - sec.optimumX, y - sec.optimumY);
+        if (dOpt >= MIN_BUILDING_SPACING + 2) {
+          let clear = true;
+          for (const b of state.buildings) {
+            if (Math.hypot(b.x - x, b.y - y) < MIN_BUILDING_SPACING + 1) {
+              clear = false;
+              break;
+            }
+          }
+          if (clear && (!edgeCand || dOpt > Math.hypot(edgeCand.x - sec.optimumX, edgeCand.y - sec.optimumY))) {
+            edgeCand = { x, y };
+          }
+        }
+      }
+    }
+    let optClear = state.terrain[sec.optimumY * state.width + sec.optimumX] !== TerrainType.WATER;
+    for (const b of state.buildings) {
+      if (Math.hypot(b.x - sec.optimumX, b.y - sec.optimumY) < MIN_BUILDING_SPACING + 1) {
+        optClear = false;
+      }
+    }
+    if (optClear && edgeCand) {
+      paintBlock(
+        state,
+        Math.max(0, pub.centerX - pub.radius),
+        Math.max(0, pub.centerY - pub.radius),
+        Math.min(state.width - 1, pub.centerX + pub.radius),
+        Math.min(state.height - 1, pub.centerY + pub.radius),
+        humanId,
+      );
+      chosenOpt = { x: sec.optimumX, y: sec.optimumY };
+      chosenEdge = edgeCand;
+      break;
+    }
+  }
+  assert(chosenOpt !== null && chosenEdge !== null, 'Should find valid material zone opt & edge');
+
+  const optMine = placeBuilding(state, humanId, 'MINE', chosenOpt!.x, chosenOpt!.y);
+  const edgeMine = placeBuilding(state, humanId, 'MINE', chosenEdge!.x, chosenEdge!.y);
+  assert(optMine !== null && edgeMine !== null, 'Both in-zone mines should build');
+
+  const outsideArea = findInlandPlainsCenter(state, 16, 16);
+  paintBlock(state, outsideArea.x - 10, outsideArea.y - 10, outsideArea.x + 10, outsideArea.y + 10, humanId);
+  const outSpot = findSpacedOwnedSpot(state, humanId, outsideArea.x, outsideArea.y, 8, true);
+  assert(outSpot !== null, 'Should find outside-zone land spot');
+  const outsideMine = placeBuilding(state, humanId, 'MINE', outSpot!.x, outSpot!.y);
+  assert(outsideMine !== null, 'Outside-zone mine should build');
+
+  assert(
+    optMine!.revealedEfficiencyPct >= 95,
+    `Mine on secret optimum should reveal >= 95% efficiency (got ${optMine!.revealedEfficiencyPct}%)`,
+  );
+  assert(
+    optMine!.revealedEfficiencyPct > edgeMine!.revealedEfficiencyPct &&
+      edgeMine!.revealedEfficiencyPct > outsideMine!.revealedEfficiencyPct &&
+      outsideMine!.revealedEfficiencyPct === 35,
+    `Site efficiencies must order opt (${optMine!.revealedEfficiencyPct}) > edge (${edgeMine!.revealedEfficiencyPct}) > outside (${outsideMine!.revealedEfficiencyPct}===35)`,
+  );
+
+  // Port coastal check
+  const inlandPortFail = placeBuilding(state, humanId, 'PORT', outsideArea.x, outsideArea.y);
+  assert(inlandPortFail === null, 'PORT must be rejected inland away from water');
+
+  let coastSpot: { x: number; y: number } | null = null;
+  for (let y = 120; y < 380 && !coastSpot; y++) {
+    for (let x = 120; x < 620; x++) {
+      if (
+        state.terrain[y * state.width + x] === TerrainType.WATER &&
+        state.terrain[y * state.width + (x + 1)] !== TerrainType.WATER
+      ) {
+        const cx = x + 1;
+        let farEnough = true;
+        for (const b of state.buildings) {
+          if (Math.hypot(b.x - cx, b.y - y) < MIN_BUILDING_SPACING) {
+            farEnough = false;
+            break;
+          }
+        }
+        if (farEnough) {
+          state.owners[y * state.width + cx] = humanId;
+          coastSpot = { x: cx, y };
+          break;
+        }
+      }
+    }
+  }
+  assert(coastSpot !== null, 'Should find valid coastal cell');
+  const coastPort = placeBuilding(state, humanId, 'PORT', coastSpot!.x, coastSpot!.y);
+  assert(coastPort !== null, 'PORT must succeed on coastal land cell');
+
+  // LAB capture keeps previously gained knowledge
+  const labSpot = findSpacedOwnedSpot(state, humanId, outsideArea.x, outsideArea.y, 10, false);
+  assert(labSpot !== null, 'Should find spot for LAB');
+  const lab = placeBuilding(state, humanId, 'LAB', labSpot!.x, labSpot!.y);
+  assert(lab !== null, 'LAB placement must succeed');
+  for (let t = 0; t < 15; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const gainedKnowledge = human.knowledge;
+  assert(gainedKnowledge > 1, `Human should have gained knowledge (got ${gainedKnowledge})`);
+  const endX = Math.min(state.width - 4, Math.max(lab!.x + 2, outsideArea.x + 13));
+  paintBlock(state, outsideArea.x + 11, lab!.y - 3, endX + 3, lab!.y + 3, WILDERNESS_OWNER);
+  paintBlock(state, lab!.x - 1, lab!.y - 1, endX, lab!.y + 1, 2);
+  dispatchAction(state, { type: 'TICK' });
+  assert(lab!.ownerId === 2, 'Captured LAB must transfer ownership to capturer');
+  assert(
+    human.knowledge >= gainedKnowledge,
+    'Previously earned knowledge must NEVER be lost when LAB is lost',
+  );
+  console.log('PASS [h]: Free 1st Power Plant, resource zone optima, coastal Port & LAB capture verified.');
+}
+
+function testManpowerAllocationAnd200Overload(): void {
+  const state = createInitialGameState(6464);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  const arena = findInlandPlainsCenter(state, 24, 24);
+  paintBlock(state, arena.x - 18, arena.y - 18, arena.x + 18, arena.y + 18, humanId);
+  dispatchAction(state, { type: 'TICK' });
+
+  human.money = 1200;
+  human.energyReserve = 200;
+  human.manpower = Math.min(human.maxManpower, 450);
+
+  const ppSpot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 16, false);
+  assert(ppSpot !== null, 'Should find valid spaced spot for POWER_PLANT');
+  dispatchAction(state, {
+    type: 'PLACE_BUILDING',
+    playerId: humanId,
+    buildingType: 'POWER_PLANT',
+    x: ppSpot!.x,
+    y: ppSpot!.y,
+  });
+
+  const mineSpot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 16, false);
+  assert(mineSpot !== null, 'Should find valid spaced spot for MINE');
+  dispatchAction(state, {
+    type: 'PLACE_BUILDING',
+    playerId: humanId,
+    buildingType: 'MINE',
+    x: mineSpot!.x,
+    y: mineSpot!.y,
+  });
+
+  const mine = state.buildings.find((b) => b.ownerId === humanId && b.type === 'MINE');
+  assert(mine !== undefined, 'MINE should exist');
+
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: mine!.id,
+    occupancyPct: 100,
+  });
+
+  const netMat100 = human.buildingMaterialIncomePerSec - CAPITAL_BASE_MATERIAL_PER_SEC;
+  const energy100 = mine!.currentEnergyUse;
+  const alloc100 = human.allocatedManpower;
+  const active100 = human.activeManpower;
+  assert(netMat100 > 0 && energy100 > 0, 'MINE should produce material and use energy at 100%');
+
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: mine!.id,
+    occupancyPct: 200,
+  });
+
+  const netMat200 = human.buildingMaterialIncomePerSec - CAPITAL_BASE_MATERIAL_PER_SEC;
+  const energy200 = mine!.currentEnergyUse;
+  const alloc200 = human.allocatedManpower;
+  const active200 = human.activeManpower;
+
+  const outputRatio = netMat200 / netMat100;
+  const energyRatio = energy200 / energy100;
+  assert(
+    Math.abs(outputRatio - 1.2) < 0.01,
+    `200% occupancy must grant +20% output = 1.20x (got ${outputRatio.toFixed(4)})`,
+  );
+  assert(
+    Math.abs(energyRatio - 1.5) < 0.01,
+    `200% overload at 80% efficiency must draw 1.50x energy (got ${energyRatio.toFixed(4)})`,
+  );
+  assert(
+    Math.abs(alloc200 - alloc100 - 35) < 0.01 &&
+      Math.abs(active100 - active200 - 35) < 0.01,
+    '200% MINE occupancy must shift +35 MP from activeManpower to allocatedManpower',
+  );
+
+  // Full 100% attack order must ONLY commit activeManpower, leaving building staff intact
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: arena.x + 15, y: arena.y },
+      { x: arena.x + 28, y: arena.y },
+    ],
+    manpowerPercent: 100,
+  });
+  const humanOrder = state.attackOrders.find((o) => o.playerId === humanId);
+  assert(humanOrder !== undefined, 'Attack order should be created');
+  assert(
+    Math.abs(humanOrder!.manpowerCommitted - active200) < 0.01,
+    `Attack order must commit only activeManpower (${active200.toFixed(1)}, got ${humanOrder!.manpowerCommitted.toFixed(1)})`,
+  );
+  assert(
+    Math.abs(human.allocatedManpower - alloc200) < 0.01 && human.activeManpower < 0.01,
+    'Building allocatedManpower must remain protected when active forces deploy',
+  );
+  console.log('PASS [i]: 200% manpower overload (+20% output at 80% efficiency) & active/building separation verified.');
+}
+
+function testHomeFrontVsBareWilderness(): void {
+  const state = createInitialGameState(7575);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const botId = 2;
+  const human = state.players.get(humanId)!;
+  const bot = state.players.get(botId)!;
+
+  // Give bot a huge bare wilderness landmass (~3,600+ extra cells) with NO extra cities/buildings
+  const widePlains = findInlandPlainsCenter(state, 34, 34);
+  for (let y = widePlains.y - 32; y <= widePlains.y + 32; y++) {
+    for (let x = widePlains.x - 32; x <= widePlains.x + 32; x++) {
+      const idx = y * state.width + x;
+      if (state.terrain[idx] !== TerrainType.WATER && state.owners[idx] === WILDERNESS_OWNER) {
+        state.owners[idx] = botId;
+      }
+    }
+  }
+
+  // Build compact home-front homeland cleanly around human capital (well away from widePlains)
+  for (let y = Math.max(0, human.capitalY - 13); y <= Math.min(state.height - 1, human.capitalY + 13); y++) {
+    for (let x = Math.max(0, human.capitalX - 13); x <= Math.min(state.width - 1, human.capitalX + 13); x++) {
+      const idx = y * state.width + x;
+      if (state.terrain[idx] !== TerrainType.WATER && state.owners[idx] === WILDERNESS_OWNER) {
+        state.owners[idx] = humanId;
+      }
+    }
+  }
+
+  human.money = 1200;
+  human.buildingMaterial = 600;
+  for (const bType of ['POWER_PLANT', 'MINE', 'CITY', 'CITY', 'BARRACKS'] as const) {
+    const spot = findSpacedOwnedSpot(state, humanId, human.capitalX, human.capitalY, 13, false);
+    assert(spot !== null, `Should find valid home-front spot for ${bType}`);
+    dispatchAction(state, {
+      type: 'PLACE_BUILDING',
+      playerId: humanId,
+      buildingType: bType,
+      x: spot!.x,
+      y: spot!.y,
+    });
+  }
+  const humanBuildingCount = state.buildings.filter((b) => b.ownerId === humanId).length;
+  assert(
+    humanBuildingCount >= 6,
+    `Human home-front should have at least 6 buildings including capital (got ${humanBuildingCount})`,
+  );
+
+  // Sync territories & economy
+  dispatchAction(state, { type: 'TICK' });
+  human.manpower = Math.round(human.maxManpower * 0.5);
+  bot.manpower = Math.round(bot.maxManpower * 0.5);
+  dispatchAction(state, { type: 'TICK' });
+
+  assert(
+    bot.territoryCells > human.territoryCells * 2,
+    `Bare-wilderness bot should hold >2x cells (${bot.territoryCells} vs ${human.territoryCells})`,
+  );
+  assert(
+    human.maxManpower > bot.maxManpower,
+    `Home-front state must exceed bare wilderness in maxManpower (${human.maxManpower} vs ${bot.maxManpower})`,
+  );
+  assert(
+    human.manpowerIncomePerSec > bot.manpowerIncomePerSec,
+    `Home-front state must exceed bare wilderness in manpower growth (${human.manpowerIncomePerSec.toFixed(1)} vs ${bot.manpowerIncomePerSec.toFixed(1)})`,
+  );
+  assert(
+    human.moneyIncomePerSec > bot.moneyIncomePerSec &&
+      human.buildingMaterialIncomePerSec > bot.buildingMaterialIncomePerSec,
+    'Home-front infrastructure must beat bare wilderness in money and building material rates',
+  );
+  console.log('PASS [j]: Home-front Cities/Mines/Barracks outweigh bare wilderness land.');
+}
+
+function testNeighborTradeAndBetrayalFine(): void {
+  const state = createInitialGameState(8686);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const neighborId = 2;
+  const human = state.players.get(humanId)!;
+  const neighbor = state.players.get(neighborId)!;
+
+  const arena = findInlandPlainsCenter(state, 24, 16);
+  paintBlock(state, arena.x - 16, arena.y - 8, arena.x - 1, arena.y + 8, humanId);
+  paintBlock(state, arena.x, arena.y - 8, arena.x + 16, arena.y + 8, neighborId);
+  dispatchAction(state, { type: 'TICK' });
+
+  assert(areNeighbors(state, humanId, neighborId), 'Human and Bot 2 must detect shared border');
+
+  let farBotId: number | null = null;
+  for (const p of state.players.values()) {
+    if (p.id !== humanId && p.id !== neighborId && p.alive && !areNeighbors(state, humanId, p.id)) {
+      farBotId = p.id;
+      break;
+    }
+  }
+  if (farBotId !== null) {
+    dispatchAction(state, { type: 'TOGGLE_TRADE', actorId: humanId, targetId: farBotId });
+    assert(
+      !state.tradeAgreements.has(getRelationKey(humanId, farBotId)),
+      'Trade agreement with non-neighbor must be rejected',
+    );
+  }
+
+  dispatchAction(state, { type: 'TOGGLE_TRADE', actorId: humanId, targetId: neighborId });
+  const tradeKey = getRelationKey(humanId, neighborId);
+  assert(state.tradeAgreements.has(tradeKey), 'Trade agreement with neighbor must activate');
+  assert(
+    human.tradeIncomePerSec > 0 && neighbor.tradeIncomePerSec > 0,
+    'Trade must generate passive income for both neighbors',
+  );
+
+  const tradeBeforeFactory = human.tradeIncomePerSec;
+  human.money = 1000;
+  human.buildingMaterial = 500;
+  const facSpot = findSpacedOwnedSpot(state, humanId, arena.x - 8, arena.y, 7, false);
+  assert(facSpot !== null, 'Should find valid spot for FACTORY inside human border block');
+  dispatchAction(state, {
+    type: 'PLACE_BUILDING',
+    playerId: humanId,
+    buildingType: 'FACTORY',
+    x: facSpot!.x,
+    y: facSpot!.y,
+  });
+  const fac = state.buildings.find((b) => b.ownerId === humanId && b.type === 'FACTORY');
+  assert(fac !== undefined, 'FACTORY must be constructed');
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    human.tradeIncomePerSec > tradeBeforeFactory,
+    `FACTORY must boost trade income (${human.tradeIncomePerSec.toFixed(2)} > ${tradeBeforeFactory.toFixed(2)})`,
+  );
+
+  // Ally and then betray -> 25% treasury loss + debuff + cancelled trade
+  dispatchAction(state, { type: 'TOGGLE_ALLIANCE', actorId: humanId, targetId: neighborId });
+  assert(getRelation(state, humanId, neighborId) === 'ALLIED', 'Must be ALLIED before betrayal');
+
+  human.money = 1000;
+  const preBetrayMoney = human.money;
+  dispatchAction(state, { type: 'DECLARE_WAR', actorId: humanId, targetId: neighborId });
+
+  assert(
+    Math.abs(human.money - preBetrayMoney * 0.75) < 0.01,
+    `Alliance betrayal must fine 25% treasury (expected 750, got ${human.money.toFixed(2)})`,
+  );
+  assert(
+    human.betrayalDebuffTicks === BETRAYAL_DEBUFF_TICKS,
+    'Alliance betrayal must apply combat betrayalDebuffTicks',
+  );
+  assert(
+    !state.tradeAgreements.has(tradeKey) && human.tradeIncomePerSec === 0,
+    'Declaring war must cancel active trade agreement',
+  );
+  console.log('PASS [k]: Neighbor trade, Factory boost, and 25% alliance betrayal fine verified.');
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -492,7 +1064,12 @@ function main(): void {
   testBidirectionalWarAndCrossArrowCounterAttack();
   testLongBlockedArrowTerminationAndRefund();
   testAntiDeathSpiralUnderMultiBotAttack();
-  console.log('ALL 6 SIMULATION TESTS PASSED.');
+  testSpeedUpRealTimeRatio();
+  testBuildingsFreePowerPlantAndResourceZones();
+  testManpowerAllocationAnd200Overload();
+  testHomeFrontVsBareWilderness();
+  testNeighborTradeAndBetrayalFine();
+  console.log('ALL 11 SIMULATION TESTS PASSED.');
 }
 
 main();
