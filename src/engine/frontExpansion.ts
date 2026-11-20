@@ -33,6 +33,13 @@ const NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [-1, -1],
 ];
 
+function organicCellNoise(x: number, y: number, orderId: number): number {
+  return (
+    Math.sin(x * 0.53 + y * 0.41 + orderId * 1.9) * 0.38 +
+    Math.cos(x * 0.37 - y * 0.59 - orderId * 1.1) * 0.32
+  );
+}
+
 const CARDINAL_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
   [-1, 0],
@@ -867,7 +874,8 @@ function stepAttackOrders(state: GameState): boolean {
             arcLeadBonus +
             terrainBonus +
             wildernessBonus +
-            cleanupBonus;
+            cleanupBonus +
+            organicCellNoise(nx, ny, order.id) * 0.45;
 
           const existing = candidateBestScore.get(nIdx);
           if (!existing || score > existing.score) {
@@ -926,10 +934,34 @@ function stepFrontPushOrders(state: GameState): boolean {
     order.ticksRemaining--;
     const allowedEnemyIds =
       order.targetOwnerId >= 0 ? [order.targetOwnerId] : [];
-    const activeFrontierSet = new Set<number>();
+    const activeFrontierSet = new Set<number>(order.frontierCells);
+
+    // For organic double-tap surge, also recruit nearby owned border cells inside an Euclidean circle
+    if (order.focalPoint) {
+      const recruitRadius = 22;
+      const recruitRSq = recruitRadius * recruitRadius;
+      const fx = Math.round(order.focalPoint.x);
+      const fy = Math.round(order.focalPoint.y);
+      const minRx = Math.max(0, fx - recruitRadius);
+      const maxRx = Math.min(width - 1, fx + recruitRadius);
+      const minRy = Math.max(0, fy - recruitRadius);
+      const maxRy = Math.min(height - 1, fy + recruitRadius);
+
+      for (let cy = minRy; cy <= maxRy; cy++) {
+        for (let cx = minRx; cx <= maxRx; cx++) {
+          const dSq = (cx - order.focalPoint.x) * (cx - order.focalPoint.x) +
+            (cy - order.focalPoint.y) * (cy - order.focalPoint.y);
+          if (dSq <= recruitRSq && isBorderCell(state, cx, cy, order.playerId)) {
+            activeFrontierSet.add(cy * width + cx);
+          }
+        }
+      }
+    }
+
+    const prunedFrontierSet = new Set<number>();
     const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
 
-    for (const cellIdx of order.frontierCells) {
+    for (const cellIdx of activeFrontierSet) {
       if (cellIdx < 0 || cellIdx >= width * height) continue;
       if (owners[cellIdx] !== order.playerId) continue;
 
@@ -952,18 +984,58 @@ function stepFrontPushOrders(state: GameState): boolean {
 
         hasTarget = true;
         const stepLen = Math.hypot(dx, dy);
-        const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
         const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
-        // Clean up surrounded micro-dots regardless of wave angle
-        if (dot < 0.25 && friendly < 3) {
-          continue;
-        }
-
         const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
         const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.15;
-        const cleanupBonus = friendly >= 3 ? 2.2 : 0;
-        const score =
-          dot * 2.6 + friendly * 0.5 + terrainBonus + wildernessBonus + cleanupBonus;
+        const cleanupBonus = friendly >= 3 ? 2.0 : 0;
+        const edgeNoise = organicCellNoise(nx, ny, order.id);
+
+        let score: number;
+        if (order.focalPoint) {
+          const toFocalX = order.focalPoint.x - (x + 0.5);
+          const toFocalY = order.focalPoint.y - (y + 0.5);
+          const focalLen = Math.hypot(toFocalX, toFocalY);
+          const localDirX = focalLen > 3 ? toFocalX / focalLen : order.dirX;
+          const localDirY = focalLen > 3 ? toFocalY / focalLen : order.dirY;
+          const localDot = (dx * localDirX + dy * localDirY) / stepLen;
+          if (localDot < -0.15 && friendly < 3) {
+            continue;
+          }
+
+          const distFocal = Math.hypot(
+            nx + 0.5 - order.focalPoint.x,
+            ny + 0.5 - order.focalPoint.y,
+          );
+          const distOrigin = Math.hypot(
+            nx + 0.5 - order.originCenter.x,
+            ny + 0.5 - order.originCenter.y,
+          );
+          score =
+            localDot * 1.9 -
+            distFocal * 0.22 -
+            distOrigin * 0.08 +
+            friendly * 0.32 +
+            terrainBonus +
+            wildernessBonus +
+            cleanupBonus +
+            edgeNoise;
+        } else {
+          const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
+          if (dot < 0.2 && friendly < 3) {
+            continue;
+          }
+          const relX = nx + 0.5 - order.originCenter.x;
+          const relY = ny + 0.5 - order.originCenter.y;
+          const lateralDist = relX * -order.dirY + relY * order.dirX;
+          score =
+            dot * 2.5 -
+            lateralDist * lateralDist * 0.015 +
+            friendly * 0.42 +
+            terrainBonus +
+            wildernessBonus +
+            cleanupBonus +
+            edgeNoise;
+        }
 
         const existing = candidateBestScore.get(nIdx);
         if (!existing || score > existing.score) {
@@ -972,7 +1044,7 @@ function stepFrontPushOrders(state: GameState): boolean {
       }
 
       if (hasTarget) {
-        activeFrontierSet.add(cellIdx);
+        prunedFrontierSet.add(cellIdx);
       }
     }
 
@@ -987,7 +1059,7 @@ function stepFrontPushOrders(state: GameState): boolean {
       allowedEnemyIds,
       candidates,
       (claimedIdx) => {
-        activeFrontierSet.add(claimedIdx);
+        prunedFrontierSet.add(claimedIdx);
       },
     );
     if (claimed) {
@@ -997,7 +1069,7 @@ function stepFrontPushOrders(state: GameState): boolean {
       order.stagnantTicks++;
     }
 
-    order.frontierCells = Array.from(activeFrontierSet);
+    order.frontierCells = Array.from(prunedFrontierSet);
 
     const shouldTerminate =
       order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER ||
@@ -1018,11 +1090,12 @@ function stepFrontPushOrders(state: GameState): boolean {
 }
 
 /**
- * Immediately annexes enclosed pockets and residual coastal/border micro-dots
- * surrounded by a single state, plus 1-pass 4-neighbor micro-speckle absorption.
+ * Strictly deterministic pocket annexation:
+ * Annexes a connected land component ONLY when 100% enclosed by one single state
+ * and NEVER touching water, map edges, wilderness, or any third state.
  */
 export function annexEncircledPockets(state: GameState): boolean {
-  const { width, height, terrain, owners, players } = state;
+  const { width, height, terrain, owners } = state;
   const total = width * height;
   const visited = new Uint8Array(total);
   const queue = new Int32Array(total);
@@ -1041,24 +1114,11 @@ export function annexEncircledPockets(state: GameState): boolean {
 
     let touchesMapEdge = false;
     let touchesWater = false;
+    let touchesWildernessOrMultiple = false;
     let singleEncloser: number | null = null;
-    let multipleEnclosers = false;
-    let containsCapital = false;
-
-    let capIdx = -1;
-    if (regionOwner >= 0) {
-      const p = players.get(regionOwner);
-      if (p) {
-        capIdx = p.capitalY * width + p.capitalX;
-      }
-    }
 
     while (head < tail) {
       const idx = queue[head++];
-      if (idx === capIdx) {
-        containsCapital = true;
-      }
-
       const x = idx % width;
       const y = (idx - x) / width;
 
@@ -1066,7 +1126,8 @@ export function annexEncircledPockets(state: GameState): boolean {
         touchesMapEdge = true;
       }
 
-      for (const [dx, dy] of CARDINAL_OFFSETS) {
+      // 8-neighbor check ensures even diagonal touches with water/map edge/3rd state block annexation
+      for (const [dx, dy] of NEIGHBOR_OFFSETS) {
         const nx = x + dx;
         const ny = y + dy;
         if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
@@ -1079,95 +1140,44 @@ export function annexEncircledPockets(state: GameState): boolean {
           continue;
         }
         const nOwner = owners[nIdx];
-        if (nOwner === regionOwner) {
-          if (!visited[nIdx]) {
-            visited[nIdx] = 1;
-            queue[tail++] = nIdx;
-          }
-        } else {
-          if (singleEncloser === null) {
+        if (nOwner !== regionOwner) {
+          if (nOwner === WILDERNESS_OWNER) {
+            touchesWildernessOrMultiple = true;
+          } else if (singleEncloser === null) {
             singleEncloser = nOwner;
           } else if (singleEncloser !== nOwner) {
-            multipleEnclosers = true;
+            touchesWildernessOrMultiple = true;
           }
+        }
+      }
+
+      // 4-connected BFS traversal for same-owner region cells
+      for (const [dx, dy] of CARDINAL_OFFSETS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const nIdx = ny * width + nx;
+        if (!visited[nIdx] && terrain[nIdx] !== TerrainType.WATER && owners[nIdx] === regionOwner) {
+          visited[nIdx] = 1;
+          queue[tail++] = nIdx;
         }
       }
     }
 
     if (
-      !multipleEnclosers &&
+      !touchesMapEdge &&
+      !touchesWater &&
+      !touchesWildernessOrMultiple &&
       singleEncloser !== null &&
       singleEncloser >= 0 &&
-      singleEncloser !== regionOwner
+      singleEncloser !== regionOwner &&
+      (regionOwner === WILDERNESS_OWNER ||
+        getRelation(state, singleEncloser, regionOwner) !== 'ALLIED')
     ) {
-      const pocketSize = tail;
-      const landLocked = !touchesMapEdge && !touchesWater;
-      const canAnnexMicroDot =
-        pocketSize <= 48 &&
-        (!containsCapital || pocketSize <= 18) &&
-        (regionOwner === WILDERNESS_OWNER ||
-          getRelation(state, singleEncloser, regionOwner) === 'WAR');
-      const canAnnexLandlocked =
-        landLocked &&
-        ((regionOwner === WILDERNESS_OWNER && pocketSize <= 2200) ||
-          (regionOwner >= 0 &&
-            pocketSize < 3200 &&
-            (!containsCapital || pocketSize <= 450) &&
-            getRelation(state, singleEncloser, regionOwner) === 'WAR'));
-      const canAnnexCoastalCutoff =
-        !landLocked &&
-        regionOwner >= 0 &&
-        !containsCapital &&
-        pocketSize <= 600 &&
-        getRelation(state, singleEncloser, regionOwner) === 'WAR';
-
-      if (canAnnexMicroDot || canAnnexLandlocked || canAnnexCoastalCutoff) {
-        for (let i = 0; i < tail; i++) {
-          owners[queue[i]] = singleEncloser;
-        }
-        anyAnnexed = true;
+      for (let i = 0; i < tail; i++) {
+        owners[queue[i]] = singleEncloser;
       }
-    }
-  }
-
-  // Fast 1-pass micro-speckle absorption for 1px isolated residual cells
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      if (terrain[idx] === TerrainType.WATER) continue;
-      const selfOwner = owners[idx];
-      let firstOther = -99;
-      let sameAsOther = 0;
-      let hasOwnNeighbor = false;
-
-      for (const [dx, dy] of CARDINAL_OFFSETS) {
-        const nIdx = (y + dy) * width + (x + dx);
-        if (terrain[nIdx] === TerrainType.WATER) continue;
-        const nOwner = owners[nIdx];
-        if (nOwner === selfOwner) {
-          hasOwnNeighbor = true;
-          break;
-        }
-        if (nOwner >= 0) {
-          if (firstOther === -99) {
-            firstOther = nOwner;
-            sameAsOther = 1;
-          } else if (firstOther === nOwner) {
-            sameAsOther++;
-          }
-        }
-      }
-
-      if (
-        !hasOwnNeighbor &&
-        firstOther >= 0 &&
-        sameAsOther >= 3 &&
-        (selfOwner === WILDERNESS_OWNER ||
-          getRelation(state, firstOther, selfOwner) === 'WAR')
-      ) {
-        owners[idx] = firstOther;
-        anyAnnexed = true;
-      }
+      anyAnnexed = true;
     }
   }
 

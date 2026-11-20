@@ -33,7 +33,9 @@ export class LeaderboardController {
   private openProfileTargetId: number | null = null;
   private profileX = 0;
   private profileY = 0;
-  private lastRenderKey = '';
+  private lastListRenderKey = '';
+  private lastProfileStructureKey = '';
+  private lastDipActionAtMs = 0;
 
   public constructor(root: HTMLElement, callbacks: DiplomacyCallbacks) {
     this.callbacks = callbacks;
@@ -68,19 +70,22 @@ export class LeaderboardController {
       this.collapseBtn.textContent = this.collapsed ? 'Rozbalit' : 'Sbalit';
     });
 
-    this.listEl.addEventListener('click', (e) => {
+    // Fire row selection on mousedown so live list DOM updates never swallow the click
+    this.listEl.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
       const target = e.target;
       if (!(target instanceof HTMLElement)) return;
       const row = target.closest<HTMLElement>('[data-player-id]');
       if (!row) return;
+      e.preventDefault();
+      e.stopPropagation();
       const id = Number(row.dataset.playerId);
       if (!Number.isFinite(id)) return;
       const rect = row.getBoundingClientRect();
       this.openProfile(id, rect.left - 252, rect.top);
     });
 
-    this.profileEl.addEventListener('click', (e) => {
-      const target = e.target;
+    const handleDipInteraction = (target: EventTarget | null): void => {
       if (!(target instanceof HTMLElement)) return;
       const btn = target.closest<HTMLButtonElement>('[data-dip-action]');
       if (!btn) return;
@@ -98,7 +103,29 @@ export class LeaderboardController {
       } else if (action === 'alliance') {
         this.callbacks.onToggleAlliance(tid);
       }
-      this.lastRenderKey = '';
+      this.lastListRenderKey = '';
+      this.lastProfileStructureKey = '';
+    };
+
+    // Handle on mousedown immediately so background state ticks never destroy the button mid-click
+    this.profileEl.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      const target = e.target;
+      if (target instanceof HTMLElement && target.closest('[data-dip-action]')) {
+        e.preventDefault();
+        this.lastDipActionAtMs = performance.now();
+        handleDipInteraction(target);
+      }
+    });
+
+    // Keyboard / synthetic click fallback (skipped if mousedown just handled it)
+    this.profileEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (performance.now() - this.lastDipActionAtMs < 350) {
+        return;
+      }
+      handleDipInteraction(e.target);
     });
   }
 
@@ -110,11 +137,13 @@ export class LeaderboardController {
     this.openProfileTargetId = targetId;
     this.profileX = Math.max(12, Math.min(window.innerWidth - 256, screenX));
     this.profileY = Math.max(54, Math.min(window.innerHeight - 190, screenY));
-    this.lastRenderKey = '';
+    this.lastProfileStructureKey = '';
+    this.lastListRenderKey = '';
   }
 
   public closeProfile(): void {
     this.openProfileTargetId = null;
+    this.lastProfileStructureKey = '';
     this.profileEl.classList.add('hidden');
   }
 
@@ -131,22 +160,20 @@ export class LeaderboardController {
       return;
     }
 
-    const renderKey = `${state.stateVersion}|${Math.floor(state.tick / 5)}|${this.openProfileTargetId ?? 'none'}|${this.collapsed}`;
-    if (renderKey === this.lastRenderKey) {
-      return;
-    }
-    this.lastRenderKey = renderKey;
+    const listKey = `${state.stateVersion}|${Math.floor(state.tick / 5)}|${this.collapsed}`;
+    if (listKey !== this.lastListRenderKey) {
+      this.lastListRenderKey = listKey;
+      if (!this.collapsed) {
+        const alivePlayers = state.players
+          .filter((p) => p.alive)
+          .slice()
+          .sort((a, b) => b.territoryCells - a.territoryCells);
 
-    const alivePlayers = state.players
-      .filter((p) => p.alive)
-      .slice()
-      .sort((a, b) => b.territoryCells - a.territoryCells);
-
-    if (!this.collapsed) {
-      const rowsHtml = alivePlayers
-        .map((p, index) => this.renderRowHtml(p, index + 1, state))
-        .join('');
-      this.listEl.innerHTML = rowsHtml;
+        const rowsHtml = alivePlayers
+          .map((p, index) => this.renderRowHtml(p, index + 1, state))
+          .join('');
+        this.listEl.innerHTML = rowsHtml;
+      }
     }
 
     if (this.openProfileTargetId !== null) {
@@ -154,7 +181,7 @@ export class LeaderboardController {
       if (!target || !target.alive || target.id === state.humanPlayerId) {
         this.closeProfile();
       } else {
-        this.renderProfilePopover(target, state);
+        this.syncProfilePopover(target, state);
       }
     }
   }
@@ -207,7 +234,7 @@ export class LeaderboardController {
     `;
   }
 
-  private renderProfilePopover(
+  private syncProfilePopover(
     target: PublicPlayerInfo,
     state: ClientRenderState,
   ): void {
@@ -217,60 +244,78 @@ export class LeaderboardController {
         : '0.0';
 
     const rel = target.relationToHuman;
-    const relClass =
-      rel === 'WAR' ? 'rel-war' : rel === 'ALLIED' ? 'rel-allied' : 'rel-neutral';
+    const hasBetrayal = target.betrayalDebuffTicks > 0;
+    const structureKey = `${target.id}|${rel}|${hasBetrayal}|${this.profileX}|${this.profileY}`;
 
-    let actionsHtml = '';
-    if (rel === 'NEUTRAL') {
-      actionsHtml = `
-        <button type="button" class="hud-btn hud-btn-danger" data-dip-action="war">
-          Vyhlásit válku
-        </button>
-        <button type="button" class="hud-btn hud-btn-ally" data-dip-action="alliance">
-          Uzavřít alianci
-        </button>
-      `;
-    } else if (rel === 'ALLIED') {
-      actionsHtml = `
-        <button type="button" class="hud-btn hud-btn-danger" data-dip-action="war">
-          Zradit a vyhlásit válku (−35 % obrana)
-        </button>
-        <button type="button" class="hud-btn" data-dip-action="alliance">
-          Zrušit alianci
-        </button>
-      `;
-    } else {
-      actionsHtml = `
-        <button type="button" class="hud-btn hud-btn-ally" data-dip-action="peace">
-          Uzavřít mír
-        </button>
-      `;
-    }
+    if (structureKey !== this.lastProfileStructureKey) {
+      this.lastProfileStructureKey = structureKey;
+      const relClass =
+        rel === 'WAR' ? 'rel-war' : rel === 'ALLIED' ? 'rel-allied' : 'rel-neutral';
 
-    const betrayalInfo =
-      target.betrayalDebuffTicks > 0
-        ? `<div class="hud-dip-warning">Zrádce aliance: −35 % obrana (${Math.ceil(target.betrayalDebuffTicks / TICK_RATE)}s)</div>`
+      let actionsHtml = '';
+      if (rel === 'NEUTRAL') {
+        actionsHtml = `
+          <button type="button" class="hud-btn hud-btn-danger" data-dip-action="war">
+            Vyhlásit válku
+          </button>
+          <button type="button" class="hud-btn hud-btn-ally" data-dip-action="alliance">
+            Uzavřít alianci
+          </button>
+        `;
+      } else if (rel === 'ALLIED') {
+        actionsHtml = `
+          <button type="button" class="hud-btn hud-btn-danger" data-dip-action="war">
+            Zradit a vyhlásit válku (−35 % obrana)
+          </button>
+          <button type="button" class="hud-btn" data-dip-action="alliance">
+            Zrušit alianci
+          </button>
+        `;
+      } else {
+        actionsHtml = `
+          <button type="button" class="hud-btn hud-btn-ally" data-dip-action="peace">
+            Uzavřít mír
+          </button>
+        `;
+      }
+
+      const betrayalInfo = hasBetrayal
+        ? `<div class="hud-dip-warning" data-dip-el="betrayal">Zrádce aliance: −35 % obrana (${Math.ceil(target.betrayalDebuffTicks / TICK_RATE)}s)</div>`
         : '';
 
-    this.profileEl.style.left = `${this.profileX}px`;
-    this.profileEl.style.top = `${this.profileY}px`;
-    this.profileEl.innerHTML = `
-      <div class="hud-dip-header">
-        <div class="hud-dip-title-wrap">
-          <span class="hud-lb-swatch" style="background:${target.colorHex}"></span>
-          <span class="hud-dip-name">${target.name}</span>
+      this.profileEl.style.left = `${this.profileX}px`;
+      this.profileEl.style.top = `${this.profileY}px`;
+      this.profileEl.innerHTML = `
+        <div class="hud-dip-header">
+          <div class="hud-dip-title-wrap">
+            <span class="hud-lb-swatch" style="background:${target.colorHex}"></span>
+            <span class="hud-dip-name">${target.name}</span>
+          </div>
+          <button type="button" class="hud-btn hud-dip-close" data-dip-action="close">✕</button>
         </div>
-        <button type="button" class="hud-btn hud-dip-close" data-dip-action="close">✕</button>
-      </div>
-      <div class="hud-dip-meta">
-        <span>Území: <strong>${pct} %</strong></span>
-        <span class="hud-dip-rel-text ${relClass}">${relationLabel(rel)}</span>
-      </div>
-      ${betrayalInfo}
-      <div class="hud-dip-actions">
-        ${actionsHtml}
-      </div>
-    `;
-    this.profileEl.classList.remove('hidden');
+        <div class="hud-dip-meta">
+          <span>Území: <strong data-dip-el="pct">${pct} %</strong></span>
+          <span class="hud-dip-rel-text ${relClass}">${relationLabel(rel)}</span>
+        </div>
+        ${betrayalInfo}
+        <div class="hud-dip-actions">
+          ${actionsHtml}
+        </div>
+      `;
+      this.profileEl.classList.remove('hidden');
+      return;
+    }
+
+    // Update numeric labels in-place without replacing <button> DOM elements
+    const pctEl = this.profileEl.querySelector<HTMLElement>('[data-dip-el="pct"]');
+    if (pctEl) {
+      pctEl.textContent = `${pct} %`;
+    }
+    if (hasBetrayal) {
+      const betEl = this.profileEl.querySelector<HTMLElement>('[data-dip-el="betrayal"]');
+      if (betEl) {
+        betEl.textContent = `Zrádce aliance: −35 % obrana (${Math.ceil(target.betrayalDebuffTicks / TICK_RATE)}s)`;
+      }
+    }
   }
 }

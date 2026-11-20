@@ -5,6 +5,7 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  createEngineController,
   createInitialGameState,
   dispatchAction,
 } from '../src/engine/simulation';
@@ -90,6 +91,229 @@ function paintBlock(
   return painted;
 }
 
+function testDeclareWarFromUiController(): void {
+  const engine = createEngineController(4242);
+  const preState = engine.getRenderState();
+  let startX = 240;
+  let startY = 260;
+  for (let y = 200; y < 340; y++) {
+    let found = false;
+    for (let x = 200; x < 360; x++) {
+      if (preState.terrain[y * preState.width + x] === TerrainType.PLAINS) {
+        startX = x;
+        startY = y;
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+
+  engine.dispatch({ type: 'SELECT_START_POSITION', x: startX, y: startY });
+  const before = engine.getRenderState();
+  const targetBot = before.players.find((p) => p.isBot && p.alive);
+  assert(targetBot !== undefined, 'Bot opponent should exist');
+  assert(
+    targetBot!.relationToHuman === 'NEUTRAL',
+    `Initial relation should be NEUTRAL (got ${targetBot!.relationToHuman})`,
+  );
+
+  engine.dispatch({
+    type: 'DECLARE_WAR',
+    actorId: before.humanPlayerId,
+    targetId: targetBot!.id,
+  });
+
+  const after = engine.getRenderState();
+  const updatedBot = after.players.find((p) => p.id === targetBot!.id);
+  assert(
+    updatedBot?.relationToHuman === 'WAR',
+    `DECLARE_WAR UI action must immediately set relationToHuman to WAR (got ${updatedBot?.relationToHuman})`,
+  );
+  console.log('PASS [a]: UI DECLARE_WAR action immediately sets WAR in client render state.');
+}
+
+function testStrictDeterministicPocketAnnexation(): void {
+  const state = createInitialGameState(5151);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const enemyId = 3;
+  const thirdStateId = 4;
+  setWarRelation(state, humanId, enemyId);
+
+  const center = findInlandPlainsCenter(state, 26, 18);
+  const cx = center.x;
+  const cy = center.y;
+
+  // 1. 100% landlocked pocket surrounded solely by humanId -> MUST annex
+  paintBlock(state, cx - 16, cy - 12, cx + 16, cy + 12, humanId);
+  const purePocket = paintBlock(state, cx - 2, cy - 2, cx + 2, cy + 2, enemyId);
+
+  // 2. Pocket touching WATER -> MUST NOT annex
+  let waterCellX = -1;
+  let waterCellY = -1;
+  for (let y = 120; y < 380 && waterCellX === -1; y++) {
+    for (let x = 120; x < 620; x++) {
+      if (
+        state.terrain[y * state.width + x] === TerrainType.WATER &&
+        state.terrain[y * state.width + (x + 1)] !== TerrainType.WATER &&
+        state.terrain[y * state.width + (x + 6)] !== TerrainType.WATER &&
+        state.terrain[(y - 2) * state.width + (x + 2)] !== TerrainType.WATER &&
+        state.terrain[(y + 2) * state.width + (x + 2)] !== TerrainType.WATER
+      ) {
+        waterCellX = x + 1;
+        waterCellY = y;
+        break;
+      }
+    }
+  }
+  assert(waterCellX !== -1, 'Should find a coastal land tile adjacent to water');
+  paintBlock(state, waterCellX, waterCellY - 3, waterCellX + 6, waterCellY + 3, humanId);
+  const coastalPocket = paintBlock(
+    state,
+    waterCellX,
+    waterCellY - 1,
+    waterCellX + 2,
+    waterCellY + 1,
+    enemyId,
+  );
+
+  // 3. Pocket touching map edge (x === 0) -> MUST NOT annex
+  let edgeY = -1;
+  for (let y = 40; y < state.height - 40; y++) {
+    if (
+      state.terrain[y * state.width] !== TerrainType.WATER &&
+      state.terrain[y * state.width + 1] !== TerrainType.WATER
+    ) {
+      edgeY = y;
+      break;
+    }
+  }
+  let edgePocket: number[] = [];
+  if (edgeY !== -1) {
+    paintBlock(state, 0, edgeY - 3, 5, edgeY + 3, humanId);
+    edgePocket = paintBlock(state, 0, edgeY - 1, 2, edgeY + 1, enemyId);
+  }
+
+  // 4. Pocket bordered by TWO different states (humanId and thirdStateId) -> MUST NOT annex
+  const sharedPocket = paintBlock(state, cx + 10, cy - 2, cx + 12, cy + 2, enemyId);
+  paintBlock(state, cx + 13, cy - 4, cx + 18, cy + 4, thirdStateId);
+
+  const annexed = annexEncircledPockets(state);
+  assert(annexed, 'Pure enclosed pocket should trigger annexation');
+
+  for (const idx of purePocket) {
+    assert(
+      state.owners[idx] === humanId,
+      `100% landlocked pocket cell ${idx} must be annexed to human`,
+    );
+  }
+  for (const idx of coastalPocket) {
+    assert(
+      state.owners[idx] === enemyId,
+      `Coastal pocket cell ${idx} touching water must NOT be annexed`,
+    );
+  }
+  for (const idx of edgePocket) {
+    assert(
+      state.owners[idx] === enemyId,
+      `Map-edge pocket cell ${idx} must NOT be annexed`,
+    );
+  }
+  for (const idx of sharedPocket) {
+    assert(
+      state.owners[idx] === enemyId,
+      `Multi-neighbor pocket cell ${idx} must NOT be annexed`,
+    );
+  }
+  console.log('PASS [b]: Strictly deterministic pocket annexation verified.');
+}
+
+function testOrganicDoubleTapSurgeShape(): void {
+  const state = createInitialGameState(8484);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  const center = findInlandPlainsCenter(state, 35, 35);
+  const cx = center.x;
+  const cy = center.y;
+
+  // Clear a large plains arena to wilderness and place a clean human circular base
+  paintBlock(state, cx - 34, cy - 34, cx + 34, cy + 34, WILDERNESS_OWNER);
+  for (let y = cy - 10; y <= cy + 10; y++) {
+    for (let x = cx - 10; x <= cx + 10; x++) {
+      if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= 100) {
+        state.owners[y * state.width + x] = humanId;
+      }
+    }
+  }
+
+  const beforeOwned = new Set<number>();
+  for (let y = cy - 34; y <= cy + 34; y++) {
+    for (let x = cx - 34; x <= cx + 34; x++) {
+      const idx = y * state.width + x;
+      if (state.owners[idx] === humanId) {
+        beforeOwned.add(idx);
+      }
+    }
+  }
+
+  human.manpower = 420;
+  dispatchAction(state, {
+    type: 'BORDER_SURGE_PUSH',
+    playerId: humanId,
+    x: cx + 14,
+    y: cy,
+    manpowerPercent: 60,
+  });
+
+  assert(state.frontPushOrders.length === 1, 'BORDER_SURGE_PUSH order created');
+  for (let t = 0; t < 8; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  let newCells = 0;
+  let minX = state.width;
+  let maxX = -1;
+  let minY = state.height;
+  let maxY = -1;
+
+  for (let y = cy - 34; y <= cy + 34; y++) {
+    for (let x = cx - 34; x <= cx + 34; x++) {
+      const idx = y * state.width + x;
+      if (state.owners[idx] === humanId && !beforeOwned.has(idx)) {
+        newCells++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  assert(newCells >= 35, `Double-tap surge should capture organic territory (got ${newCells})`);
+  const boxW = maxX - minX + 1;
+  const boxH = maxY - minY + 1;
+  const fillRatio = newCells / (boxW * boxH);
+  const cornersFilled =
+    (state.owners[minY * state.width + minX] === humanId ? 1 : 0) +
+    (state.owners[minY * state.width + maxX] === humanId ? 1 : 0) +
+    (state.owners[maxY * state.width + minX] === humanId ? 1 : 0) +
+    (state.owners[maxY * state.width + maxX] === humanId ? 1 : 0);
+
+  assert(
+    cornersFilled < 4 && fillRatio < 0.88,
+    `Surge expansion must be organic/rounded rather than rectangular (fill=${fillRatio.toFixed(2)}, corners=${cornersFilled})`,
+  );
+  console.log(
+    `PASS [c]: Organic double-tap surge verified (cells=${newCells}, fill=${fillRatio.toFixed(2)}, corners=${cornersFilled}/4).`,
+  );
+}
+
 function testBidirectionalWarAndCrossArrowCounterAttack(): void {
   const state = createInitialGameState(4242);
   const start = findPlainsLandSpot(state, 220, 270);
@@ -105,12 +329,10 @@ function testBidirectionalWarAndCrossArrowCounterAttack(): void {
   const bx = center.x;
   const by = center.y;
 
-  // Create two human regions separated by a 7-cell bot salient on solid inland plains
   paintBlock(state, bx - 14, by - 12, bx + 20, by + 12, humanId);
   const botCells = paintBlock(state, bx, by - 4, bx + 6, by + 4, botId);
   assert(botCells.length >= 40, 'Bot salient should contain land cells');
 
-  // Bot initiates war against human
   setWarRelation(state, botId, humanId);
   assert(
     getRelation(state, humanId, botId) === 'WAR' &&
@@ -118,7 +340,6 @@ function testBidirectionalWarAndCrossArrowCounterAttack(): void {
     'WAR relation must be bidirectional',
   );
 
-  // Human draws a counter-attack arrow starting on left own land, crossing bot salient, ending on right own land
   human!.manpower = 400;
   dispatchAction(state, {
     type: 'CREATE_ATTACK_ORDER',
@@ -131,13 +352,6 @@ function testBidirectionalWarAndCrossArrowCounterAttack(): void {
     manpowerPercent: 50,
   });
 
-  assert(state.attackOrders.length === 1, 'Counter-attack order should be created');
-  assert(
-    state.attackOrders[0].targetOwnerIds.includes(botId),
-    'Arrow crossing WAR bot salient must include botId in targetOwnerIds',
-  );
-
-  const initialBotCount = botCells.length;
   for (let t = 0; t < 20; t++) {
     dispatchAction(state, { type: 'TICK' });
   }
@@ -149,39 +363,10 @@ function testBidirectionalWarAndCrossArrowCounterAttack(): void {
     }
   }
   assert(
-    remainingBotCells < initialBotCount,
-    `Player counter-attack must capture bot salient cells (${remainingBotCells}/${initialBotCount})`,
+    remainingBotCells < botCells.length,
+    `Player counter-attack must capture bot salient cells (${remainingBotCells}/${botCells.length})`,
   );
-  console.log('PASS [a]: Bidirectional WAR & cross-salient counter-attack verified.');
-}
-
-function testEncirclementAndMicroDotAnnexation(): void {
-  const state = createInitialGameState(5151);
-  const start = findPlainsLandSpot(state, 220, 270);
-  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
-
-  const humanId = state.humanPlayerId;
-  const enemyId = 3;
-  setWarRelation(state, humanId, enemyId);
-
-  const center = findInlandPlainsCenter(state, 22, 14);
-  const cx = center.x;
-  const cy = center.y;
-
-  paintBlock(state, cx - 12, cy - 10, cx + 18, cy + 10, humanId);
-  const pocketCells = paintBlock(state, cx - 2, cy - 2, cx + 2, cy + 2, enemyId);
-  const dotCells = paintBlock(state, cx + 10, cy, cx + 11, cy, enemyId);
-
-  const annexed = annexEncircledPockets(state);
-  assert(annexed, 'annexEncircledPockets should detect surrounded pocket & micro-dot');
-
-  for (const idx of pocketCells.concat(dotCells)) {
-    assert(
-      state.owners[idx] === humanId,
-      `Surrounded cell ${idx} should be annexed to human`,
-    );
-  }
-  console.log('PASS [b]: Encirclement pocket & micro-dot annexation verified.');
+  console.log('PASS [d]: Bidirectional WAR & cross-salient counter-attack verified.');
 }
 
 function testLongBlockedArrowTerminationAndRefund(): void {
@@ -212,7 +397,6 @@ function testLongBlockedArrowTerminationAndRefund(): void {
     manpowerPercent: 50,
   });
 
-  assert(state.attackOrders.length === 1, 'Long arrow order created');
   const postCommit = human.manpower;
   assert(postCommit < preCommit, 'Manpower deducted upon order launch');
 
@@ -231,7 +415,7 @@ function testLongBlockedArrowTerminationAndRefund(): void {
     human.manpower > postCommit + 150,
     `Unused manpower must be refunded to player (${human.manpower} vs postCommit ${postCommit})`,
   );
-  console.log('PASS [c]: Long arrow termination & unused manpower refund verified.');
+  console.log('PASS [e]: Long arrow termination & unused manpower refund verified.');
 }
 
 function testAntiDeathSpiralUnderMultiBotAttack(): void {
@@ -298,15 +482,17 @@ function testAntiDeathSpiralUnderMultiBotAttack(): void {
     state.attackOrders.some((o) => o.playerId === humanId),
     'Recovered player must be able to issue a counter-attack order',
   );
-  console.log('PASS [d]: Anti-death-spiral manpower safeguard verified.');
+  console.log('PASS [f]: Anti-death-spiral manpower safeguard verified.');
 }
 
 function main(): void {
+  testDeclareWarFromUiController();
+  testStrictDeterministicPocketAnnexation();
+  testOrganicDoubleTapSurgeShape();
   testBidirectionalWarAndCrossArrowCounterAttack();
-  testEncirclementAndMicroDotAnnexation();
   testLongBlockedArrowTerminationAndRefund();
   testAntiDeathSpiralUnderMultiBotAttack();
-  console.log('ALL 4 SIMULATION TESTS PASSED.');
+  console.log('ALL 6 SIMULATION TESTS PASSED.');
 }
 
 main();

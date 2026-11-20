@@ -102,6 +102,8 @@ export interface FrontPushOrder {
   playerId: number;
   frontierCells: number[];
   readonly targetOwnerId: number;
+  readonly originCenter: Point;
+  readonly focalPoint?: Point;
   dirX: number;
   dirY: number;
   manpowerCommitted: number;

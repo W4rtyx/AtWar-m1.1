@@ -3,7 +3,6 @@ import {
   MAX_ARROW_PATH_LENGTH,
   MAX_ORDER_TICKS,
   MIN_ACTIVE_ORDER_MANPOWER,
-  annexEncircledPockets,
   buildSmoothAttackWaypoints,
   canOrderCaptureCell,
   claimInitialTerritory,
@@ -539,6 +538,7 @@ function handleCreateFrontPushOrder(
   dirY: number,
   manpowerPercent: number,
   explicitTargetOwnerId?: number,
+  focalPoint?: Point,
 ): void {
   if (state.phase !== 'PLAYING') {
     return;
@@ -571,6 +571,19 @@ function handleCreateFrontPushOrder(
   }
 
   const cellList = Array.from(validCells);
+  let sumX = 0;
+  let sumY = 0;
+  for (const idx of cellList) {
+    const cx = idx % state.width;
+    const cy = (idx - cx) / state.width;
+    sumX += cx + 0.5;
+    sumY += cy + 0.5;
+  }
+  const originCenter: Point = {
+    x: sumX / cellList.length,
+    y: sumY / cellList.length,
+  };
+
   const targetOwnerId = inferFrontTargetOwner(
     state,
     playerId,
@@ -594,6 +607,8 @@ function handleCreateFrontPushOrder(
     playerId,
     frontierCells: cellList,
     targetOwnerId,
+    originCenter,
+    focalPoint,
     dirX: ux,
     dirY: uy,
     manpowerCommitted: committed,
@@ -629,29 +644,26 @@ function handleBorderSurgePush(
   ) {
     targetOwnerId = clickedOwner;
   } else {
-    for (let dy = -5; dy <= 5 && targetOwnerId === WILDERNESS_OWNER; dy++) {
+    let bestDistSq = Infinity;
+    for (let dy = -6; dy <= 6; dy++) {
       const ny = iy + dy;
       if (ny < 0 || ny >= height) continue;
-      for (let dx = -5; dx <= 5; dx++) {
+      for (let dx = -6; dx <= 6; dx++) {
+        const dSq = dx * dx + dy * dy;
+        if (dSq > 36 || dSq >= bestDistSq) continue;
         const nx = ix + dx;
         if (nx < 0 || nx >= width) continue;
         const o = owners[ny * width + nx];
         if (o >= 0 && o !== playerId && getRelation(state, playerId, o) === 'WAR') {
+          bestDistSq = dSq;
           targetOwnerId = o;
-          break;
         }
       }
     }
   }
 
-  // Immediately absorb any stray enclosed micro-dots before launching the surge wave
-  if (annexEncircledPockets(state)) {
-    recalculateTerritoryAndCapitals(state);
-    state.stateVersion++;
-  }
-
   const allowedEnemyIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
-  const radius = 16;
+  const radius = 18;
   const rSq = radius * radius;
   const frontierCells: number[] = [];
   let sumDirX = 0;
@@ -705,6 +717,7 @@ function handleBorderSurgePush(
     dirY,
     manpowerPercent,
     targetOwnerId,
+    { x, y },
   );
 }
 

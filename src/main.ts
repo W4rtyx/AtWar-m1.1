@@ -154,6 +154,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
+      hud.update(engine.getRenderState(), selectedFrontierCells.length);
     },
     onMakePeace: (targetId) => {
       const state = engine.getRenderState();
@@ -162,6 +163,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
+      hud.update(engine.getRenderState(), selectedFrontierCells.length);
     },
     onToggleAlliance: (targetId) => {
       const state = engine.getRenderState();
@@ -170,6 +172,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
+      hud.update(engine.getRenderState(), selectedFrontierCells.length);
     },
   });
 
