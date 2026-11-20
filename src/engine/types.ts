@@ -7,6 +7,11 @@ export const BETRAYAL_DEBUFF_TICKS = 600;
 export const BETRAYAL_MONEY_PENALTY_RATIO = 0.25;
 export const MIN_BUILDING_SPACING = 9;
 export const BARRACKS_DEFENSE_RADIUS = 18;
+export const MAX_STACK_PER_NODE = 50;
+export const DEMOLISH_REFUND_RATIO = 0.5;
+export const BUILDING_COST_SCALING_PER_UNIT = 0.14;
+
+export type BuildBatchSize = 1 | 5 | 10 | 'MAX';
 
 export enum TerrainType {
   WATER = 0,
@@ -69,6 +74,7 @@ export interface BuildingSpec {
   readonly baseMaxManpowerBonus: number;
   readonly baseManpowerIncomeBonus: number;
   readonly energyReserveBonus: number;
+  readonly constructionTicks: number;
   readonly requiresCoast: boolean;
   readonly resourceZoneType: ResourceType | null;
 }
@@ -80,7 +86,14 @@ export interface Building {
   readonly x: number;
   readonly y: number;
   readonly isCapital: boolean;
-  readonly revealedEfficiencyPct: number;
+  revealedEfficiencyPct: number | null;
+  stackCount: number;
+  underConstructionCount: number;
+  constructionTicksRemaining: number;
+  readonly constructionTicksTotal: number;
+  totalInvestedMoney: number;
+  totalInvestedMaterial: number;
+  totalInvestedIndustry: number;
   occupancyOverride: number | null;
   effectiveOccupancyPct: number;
   effectiveOutputPct: number;
@@ -96,7 +109,14 @@ export interface PublicBuildingInfo {
   readonly x: number;
   readonly y: number;
   readonly isCapital: boolean;
-  readonly revealedEfficiencyPct: number;
+  readonly revealedEfficiencyPct: number | null;
+  readonly stackCount: number;
+  readonly underConstructionCount: number;
+  readonly constructionTicksRemaining: number;
+  readonly constructionTicksTotal: number;
+  readonly totalInvestedMoney: number;
+  readonly totalInvestedMaterial: number;
+  readonly totalInvestedIndustry: number;
   readonly occupancyOverride: number | null;
   readonly effectiveOccupancyPct: number;
   readonly effectiveOutputPct: number;
@@ -159,7 +179,7 @@ export interface PlayerState {
   industry: number;
   industryIncomePerSec: number;
   energyReserve: number;
-  energyReserveMax: number;
+  energyReserveMax: number | null;
   energyProductionPerSec: number;
   energyConsumptionPerSec: number;
   energyNetPerSec: number;
@@ -204,7 +224,7 @@ export interface PublicPlayerInfo {
   readonly industry?: number;
   readonly industryIncomePerSec?: number;
   readonly energyReserve?: number;
-  readonly energyReserveMax?: number;
+  readonly energyReserveMax?: number | null;
   readonly energyProductionPerSec?: number;
   readonly energyConsumptionPerSec?: number;
   readonly energyNetPerSec?: number;
@@ -239,6 +259,8 @@ export interface FrontPushOrder {
   readonly targetOwnerId: number;
   readonly originCenter: Point;
   readonly focalPoint?: Point;
+  readonly sweepAllBorders?: boolean;
+  readonly fullAttack?: boolean;
   dirX: number;
   dirY: number;
   manpowerCommitted: number;
@@ -343,6 +365,28 @@ export type Action =
       readonly buildingType: BuildingType;
       readonly x: number;
       readonly y: number;
+      readonly batchSize?: BuildBatchSize;
+    }
+  | {
+      readonly type: 'STACK_BUILDING';
+      readonly playerId: number;
+      readonly buildingId: number;
+      readonly batchSize: BuildBatchSize;
+    }
+  | {
+      readonly type: 'DEMOLISH_BUILDING';
+      readonly playerId: number;
+      readonly buildingId: number;
+      readonly demolishAll: boolean;
+    }
+  | {
+      readonly type: 'TARGETED_ATTACK';
+      readonly playerId: number;
+      readonly targetOwnerId: number;
+      readonly anchorX: number;
+      readonly anchorY: number;
+      readonly manpowerPercent: number;
+      readonly fullAttack: boolean;
     }
   | {
       readonly type: 'SET_BUILDING_TYPE_OCCUPANCY';

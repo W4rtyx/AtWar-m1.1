@@ -26,6 +26,8 @@ const ENEMY_BORDER_BASE_COST = 3.0;
 
 const annexVisited = new Uint8Array(MAP_WIDTH * MAP_HEIGHT);
 const annexQueue = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
+const sweepSeen = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
+let sweepStamp = 1;
 
 const NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
@@ -482,21 +484,25 @@ function computeCellCaptureCost(
   const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
 
   let bestBarracksEff = 0;
+  let bestBarracksStack = 0;
   for (const building of state.buildings) {
     if (
       building.ownerId === prevOwner &&
       building.type === 'BARRACKS' &&
+      building.stackCount > 0 &&
       building.effectiveOutputPct > 0 &&
       Math.hypot(building.x - nx, building.y - ny) <= BARRACKS_DEFENSE_RADIUS
     ) {
       const eff = building.effectiveOutputPct / 100;
-      if (eff > bestBarracksEff) {
-        bestBarracksEff = eff;
+      const weighted = eff * (0.3 + 0.08 * Math.min(3, building.stackCount - 1));
+      if (weighted > bestBarracksEff) {
+        bestBarracksEff = weighted;
+        bestBarracksStack = building.stackCount;
       }
     }
   }
   const barracksDefenseFactor =
-    bestBarracksEff > 0 ? 1 + Math.min(0.45, bestBarracksEff * 0.35) : 1;
+    bestBarracksStack > 0 ? 1 + Math.min(0.55, bestBarracksEff) : 1;
 
   let effectiveCost =
     ENEMY_BORDER_BASE_COST *
@@ -520,15 +526,20 @@ function computeCellCaptureCost(
   };
 }
 
+interface ApplyExpansionResult {
+  readonly claimed: boolean;
+  readonly capturedForeign: boolean;
+}
+
 function applyExpansionCandidates(
   state: GameState,
   order: ExpandableOrder,
   allowedEnemyIds: ReadonlyArray<number>,
   candidates: ExpansionCandidate[],
   onClaim?: (claimedIdx: number) => void,
-): boolean {
+): ApplyExpansionResult {
   if (candidates.length === 0) {
-    return false;
+    return { claimed: false, capturedForeign: false };
   }
 
   candidates.sort((a, b) => b.score - a.score);
@@ -539,6 +550,7 @@ function applyExpansionCandidates(
   );
   let budgetSpent = 0;
   let anyClaimed = false;
+  let anyForeignCaptured = false;
 
   for (const cand of candidates) {
     if (order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER) {
@@ -606,6 +618,7 @@ function applyExpansionCandidates(
     anyClaimed = true;
 
     if (isForeign) {
+      anyForeignCaptured = true;
       const defender: PlayerState | undefined = state.players.get(prevOwner);
       if (defender) {
         applyDefenderAttrition(defender, defenderLoss);
@@ -617,7 +630,7 @@ function applyExpansionCandidates(
     }
   }
 
-  return anyClaimed;
+  return { claimed: anyClaimed, capturedForeign: anyForeignCaptured };
 }
 
 interface CurveProjection {
@@ -729,9 +742,17 @@ function refundRemainingManpower(player: PlayerState, remaining: number): void {
   }
 }
 
-function stepAttackOrders(state: GameState): boolean {
+interface ExpansionStepResult {
+  readonly mapChanged: boolean;
+  readonly capturedForeign: boolean;
+  readonly anyTerminated: boolean;
+}
+
+function stepAttackOrders(state: GameState): ExpansionStepResult {
   const { width, height, owners, terrain } = state;
   let mapChanged = false;
+  let capturedForeign = false;
+  let anyTerminated = false;
   const remainingOrders = [];
 
   for (const order of state.attackOrders) {
@@ -925,14 +946,15 @@ function stepAttackOrders(state: GameState): boolean {
       candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
-    const claimed = applyExpansionCandidates(
+    const res = applyExpansionCandidates(
       state,
       order,
       order.targetOwnerIds,
       candidates,
     );
-    if (claimed) {
+    if (res.claimed) {
       mapChanged = true;
+      if (res.capturedForeign) capturedForeign = true;
       order.stagnantTicks = 0;
     } else {
       order.stagnantTicks++;
@@ -945,6 +967,7 @@ function stepAttackOrders(state: GameState): boolean {
       candidates.length === 0;
 
     if (shouldTerminate) {
+      anyTerminated = true;
       refundRemainingManpower(player, order.manpowerRemaining);
     } else {
       remainingOrders.push(order);
@@ -952,12 +975,142 @@ function stepAttackOrders(state: GameState): boolean {
   }
 
   state.attackOrders = remainingOrders;
-  return mapChanged;
+  return { mapChanged, capturedForeign, anyTerminated };
 }
 
-function stepFrontPushOrders(state: GameState): boolean {
+function addEnemyAdjacentFrontierCells(
+  state: GameState,
+  playerId: number,
+  targetOwnerId: number,
+  intoSet: Set<number>,
+): void {
+  const { width, height, owners, terrain } = state;
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = row + x;
+      if (owners[idx] !== playerId) continue;
+      if (
+        (owners[idx - 1] === targetOwnerId && terrain[idx - 1] !== TerrainType.WATER) ||
+        (owners[idx + 1] === targetOwnerId && terrain[idx + 1] !== TerrainType.WATER) ||
+        (owners[idx - width] === targetOwnerId && terrain[idx - width] !== TerrainType.WATER) ||
+        (owners[idx + width] === targetOwnerId && terrain[idx + width] !== TerrainType.WATER)
+      ) {
+        intoSet.add(idx);
+      }
+    }
+  }
+}
+
+/**
+ * Absorbs tiny isolated residual enemy fragments (<= 16 land cells with 0 buildings,
+ * touching only attacker land or water) encountered during strong or FULL assaults.
+ */
+function sweepMicroPocketsForAttacker(
+  state: GameState,
+  attackerId: number,
+  targetOwnerId: number,
+  order: ExpandableOrder,
+  seedSources: ReadonlyArray<number>,
+): number {
+  if (targetOwnerId < 0 || seedSources.length === 0) return 0;
+  const { width, height, owners, terrain } = state;
+  const total = width * height;
+  const seen = total <= sweepSeen.length ? sweepSeen : new Int32Array(total);
+
+  const buildingCells = new Set<number>();
+  for (const b of state.buildings) {
+    buildingCells.add(b.y * width + b.x);
+  }
+
+  const candidateSeeds: number[] = [];
+  for (const srcIdx of seedSources) {
+    const x = srcIdx % width;
+    const y = (srcIdx - x) / width;
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx;
+        if (nx < 0 || nx >= width) continue;
+        const nIdx = ny * width + nx;
+        if (owners[nIdx] === targetOwnerId && terrain[nIdx] !== TerrainType.WATER) {
+          candidateSeeds.push(nIdx);
+        }
+      }
+    }
+  }
+
+  let sweptTotal = 0;
+  for (const seedIdx of candidateSeeds) {
+    if (order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER) break;
+    if (owners[seedIdx] !== targetOwnerId) continue;
+
+    sweepStamp++;
+    if (sweepStamp >= 0x70000000) {
+      seen.fill(0, 0, total);
+      sweepStamp = 1;
+    }
+
+    const comp: number[] = [seedIdx];
+    seen[seedIdx] = sweepStamp;
+    let valid = true;
+
+    for (let head = 0; head < comp.length && valid; head++) {
+      const idx = comp[head];
+      if (buildingCells.has(idx)) {
+        valid = false;
+        break;
+      }
+      const cx = idx % width;
+      const cy = (idx - cx) / width;
+      if (cx === 0 || cx === width - 1 || cy === 0 || cy === height - 1) {
+        valid = false;
+        break;
+      }
+
+      for (let dy = -1; dy <= 1 && valid; dy++) {
+        const ny = cy + dy;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nIdx = ny * width + (cx + dx);
+          if (terrain[nIdx] === TerrainType.WATER) continue;
+          const nOwner = owners[nIdx];
+          if (nOwner === targetOwnerId) {
+            if (seen[nIdx] !== sweepStamp) {
+              seen[nIdx] = sweepStamp;
+              if (comp.length >= 16) {
+                valid = false;
+                break;
+              }
+              comp.push(nIdx);
+            }
+          } else if (nOwner !== attackerId) {
+            valid = false;
+            break;
+          }
+        }
+      }
+    }
+
+    if (valid && comp.length > 0 && comp.length <= 16) {
+      for (const idx of comp) {
+        owners[idx] = attackerId;
+      }
+      order.manpowerRemaining = Math.max(0, order.manpowerRemaining - comp.length * 0.7);
+      sweptTotal += comp.length;
+    }
+  }
+
+  return sweptTotal;
+}
+
+function stepFrontPushOrders(state: GameState): ExpansionStepResult {
   const { width, height, owners, terrain } = state;
   let mapChanged = false;
+  let capturedForeign = false;
+  let anyTerminated = false;
   const remainingOrders = [];
 
   for (const order of state.frontPushOrders) {
@@ -971,9 +1124,10 @@ function stepFrontPushOrders(state: GameState): boolean {
       order.targetOwnerId >= 0 ? [order.targetOwnerId] : [];
     const activeFrontierSet = new Set<number>(order.frontierCells);
 
-    // For organic double-tap surge, also recruit nearby owned border cells inside an Euclidean circle
-    if (order.focalPoint) {
-      const recruitRadius = 22;
+    if (order.sweepAllBorders && order.targetOwnerId >= 0) {
+      addEnemyAdjacentFrontierCells(state, order.playerId, order.targetOwnerId, activeFrontierSet);
+    } else if (order.focalPoint) {
+      const recruitRadius = order.fullAttack ? 30 : 22;
       const recruitRSq = recruitRadius * recruitRadius;
       const fx = Math.round(order.focalPoint.x);
       const fy = Math.round(order.focalPoint.y);
@@ -984,7 +1138,8 @@ function stepFrontPushOrders(state: GameState): boolean {
 
       for (let cy = minRy; cy <= maxRy; cy++) {
         for (let cx = minRx; cx <= maxRx; cx++) {
-          const dSq = (cx - order.focalPoint.x) * (cx - order.focalPoint.x) +
+          const dSq =
+            (cx - order.focalPoint.x) * (cx - order.focalPoint.x) +
             (cy - order.focalPoint.y) * (cy - order.focalPoint.y);
           if (dSq <= recruitRSq && isBorderCell(state, cx, cy, order.playerId)) {
             activeFrontierSet.add(cy * width + cx);
@@ -1033,7 +1188,7 @@ function stepFrontPushOrders(state: GameState): boolean {
           const localDirX = focalLen > 3 ? toFocalX / focalLen : order.dirX;
           const localDirY = focalLen > 3 ? toFocalY / focalLen : order.dirY;
           const localDot = (dx * localDirX + dy * localDirY) / stepLen;
-          if (localDot < -0.15 && friendly < 3) {
+          if (!order.sweepAllBorders && localDot < -0.15 && friendly < 3) {
             continue;
           }
 
@@ -1045,11 +1200,11 @@ function stepFrontPushOrders(state: GameState): boolean {
             nx + 0.5 - order.originCenter.x,
             ny + 0.5 - order.originCenter.y,
           );
+          const anchorPenalty = order.sweepAllBorders ? distFocal * 0.04 : distFocal * 0.22 + distOrigin * 0.08;
           score =
-            localDot * 1.9 -
-            distFocal * 0.22 -
-            distOrigin * 0.08 +
-            friendly * 0.32 +
+            localDot * (order.sweepAllBorders ? 0.8 : 1.9) -
+            anchorPenalty +
+            friendly * (order.fullAttack ? 0.55 : 0.32) +
             terrainBonus +
             wildernessBonus +
             cleanupBonus +
@@ -1088,18 +1243,41 @@ function stepFrontPushOrders(state: GameState): boolean {
       candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
-    const claimed = applyExpansionCandidates(
+    const claimedCells: number[] = [];
+    const res = applyExpansionCandidates(
       state,
       order,
       allowedEnemyIds,
       candidates,
       (claimedIdx) => {
         prunedFrontierSet.add(claimedIdx);
+        claimedCells.push(claimedIdx);
       },
     );
-    if (claimed) {
+    if (res.claimed) {
       mapChanged = true;
+      if (res.capturedForeign) capturedForeign = true;
       order.stagnantTicks = 0;
+
+      if (
+        order.targetOwnerId >= 0 &&
+        (order.fullAttack || order.manpowerCommitted >= 60)
+      ) {
+        const sweepSeeds =
+          order.fullAttack && claimedCells.length < 40
+            ? claimedCells.concat(order.frontierCells.slice(0, 60))
+            : claimedCells;
+        const swept = sweepMicroPocketsForAttacker(
+          state,
+          order.playerId,
+          order.targetOwnerId,
+          order,
+          sweepSeeds,
+        );
+        if (swept > 0) {
+          capturedForeign = true;
+        }
+      }
     } else {
       order.stagnantTicks++;
     }
@@ -1114,6 +1292,7 @@ function stepFrontPushOrders(state: GameState): boolean {
       candidates.length === 0;
 
     if (shouldTerminate) {
+      anyTerminated = true;
       refundRemainingManpower(player, order.manpowerRemaining);
     } else {
       remainingOrders.push(order);
@@ -1121,17 +1300,19 @@ function stepFrontPushOrders(state: GameState): boolean {
   }
 
   state.frontPushOrders = remainingOrders;
-  return mapChanged;
+  return { mapChanged, capturedForeign, anyTerminated };
 }
 
 /**
- * Strictly deterministic pocket annexation:
+ * Strictly deterministic pocket annexation (unrolled flat-index BFS):
  * Annexes a connected land component ONLY when 100% enclosed by one single state
  * and NEVER touching water, map edges, wilderness, or any third state.
  */
 export function annexEncircledPockets(state: GameState): boolean {
   const { width, height, terrain, owners } = state;
   const total = width * height;
+  const maxX = width - 1;
+  const maxY = height - 1;
   const visited = total <= annexVisited.length ? annexVisited : new Uint8Array(total);
   const queue = total <= annexQueue.length ? annexQueue : new Int32Array(total);
   visited.fill(0, 0, total);
@@ -1148,9 +1329,7 @@ export function annexEncircledPockets(state: GameState): boolean {
     queue[tail++] = startIdx;
     visited[startIdx] = 1;
 
-    let touchesMapEdge = false;
-    let touchesWater = false;
-    let touchesWildernessOrMultiple = false;
+    let disqualified = false;
     let singleEncloser: number | null = null;
 
     while (head < tail) {
@@ -1158,52 +1337,181 @@ export function annexEncircledPockets(state: GameState): boolean {
       const x = idx % width;
       const y = (idx - x) / width;
 
-      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
-        touchesMapEdge = true;
+      if (x === 0 || x === maxX || y === 0 || y === maxY) {
+        disqualified = true;
       }
 
-      // 8-neighbor check ensures even diagonal touches with water/map edge/3rd state block annexation
-      for (const [dx, dy] of NEIGHBOR_OFFSETS) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-          touchesMapEdge = true;
-          continue;
-        }
-        const nIdx = ny * width + nx;
-        if (terrain[nIdx] === TerrainType.WATER) {
-          touchesWater = true;
-          continue;
-        }
-        const nOwner = owners[nIdx];
-        if (nOwner !== regionOwner) {
-          if (nOwner === WILDERNESS_OWNER) {
-            touchesWildernessOrMultiple = true;
+      if (!disqualified) {
+        const left = idx - 1;
+        const right = idx + 1;
+        const up = idx - width;
+        const down = idx + width;
+
+        // 4 cardinal neighbors: validate water/encloser AND push same-owner cells
+        if (terrain[left] === TerrainType.WATER) {
+          disqualified = true;
+        } else {
+          const o = owners[left];
+          if (o === regionOwner) {
+            if (!visited[left]) {
+              visited[left] = 1;
+              queue[tail++] = left;
+            }
+          } else if (o === WILDERNESS_OWNER) {
+            disqualified = true;
           } else if (singleEncloser === null) {
-            singleEncloser = nOwner;
-          } else if (singleEncloser !== nOwner) {
-            touchesWildernessOrMultiple = true;
+            singleEncloser = o;
+          } else if (singleEncloser !== o) {
+            disqualified = true;
           }
         }
-      }
 
-      // 4-connected BFS traversal for same-owner region cells
-      for (const [dx, dy] of CARDINAL_OFFSETS) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-        const nIdx = ny * width + nx;
-        if (!visited[nIdx] && terrain[nIdx] !== TerrainType.WATER && owners[nIdx] === regionOwner) {
-          visited[nIdx] = 1;
-          queue[tail++] = nIdx;
+        if (terrain[right] === TerrainType.WATER) {
+          disqualified = true;
+        } else {
+          const o = owners[right];
+          if (o === regionOwner) {
+            if (!visited[right]) {
+              visited[right] = 1;
+              queue[tail++] = right;
+            }
+          } else if (o === WILDERNESS_OWNER) {
+            disqualified = true;
+          } else if (singleEncloser === null) {
+            singleEncloser = o;
+          } else if (singleEncloser !== o) {
+            disqualified = true;
+          }
+        }
+
+        if (terrain[up] === TerrainType.WATER) {
+          disqualified = true;
+        } else {
+          const o = owners[up];
+          if (o === regionOwner) {
+            if (!visited[up]) {
+              visited[up] = 1;
+              queue[tail++] = up;
+            }
+          } else if (o === WILDERNESS_OWNER) {
+            disqualified = true;
+          } else if (singleEncloser === null) {
+            singleEncloser = o;
+          } else if (singleEncloser !== o) {
+            disqualified = true;
+          }
+        }
+
+        if (terrain[down] === TerrainType.WATER) {
+          disqualified = true;
+        } else {
+          const o = owners[down];
+          if (o === regionOwner) {
+            if (!visited[down]) {
+              visited[down] = 1;
+              queue[tail++] = down;
+            }
+          } else if (o === WILDERNESS_OWNER) {
+            disqualified = true;
+          } else if (singleEncloser === null) {
+            singleEncloser = o;
+          } else if (singleEncloser !== o) {
+            disqualified = true;
+          }
+        }
+
+        // 4 diagonal neighbors (disqualification only)
+        if (!disqualified) {
+          const ul = up - 1;
+          if (terrain[ul] === TerrainType.WATER) {
+            disqualified = true;
+          } else {
+            const o = owners[ul];
+            if (o !== regionOwner) {
+              if (o === WILDERNESS_OWNER) disqualified = true;
+              else if (singleEncloser === null) singleEncloser = o;
+              else if (singleEncloser !== o) disqualified = true;
+            }
+          }
+        }
+        if (!disqualified) {
+          const ur = up + 1;
+          if (terrain[ur] === TerrainType.WATER) {
+            disqualified = true;
+          } else {
+            const o = owners[ur];
+            if (o !== regionOwner) {
+              if (o === WILDERNESS_OWNER) disqualified = true;
+              else if (singleEncloser === null) singleEncloser = o;
+              else if (singleEncloser !== o) disqualified = true;
+            }
+          }
+        }
+        if (!disqualified) {
+          const dl = down - 1;
+          if (terrain[dl] === TerrainType.WATER) {
+            disqualified = true;
+          } else {
+            const o = owners[dl];
+            if (o !== regionOwner) {
+              if (o === WILDERNESS_OWNER) disqualified = true;
+              else if (singleEncloser === null) singleEncloser = o;
+              else if (singleEncloser !== o) disqualified = true;
+            }
+          }
+        }
+        if (!disqualified) {
+          const dr = down + 1;
+          if (terrain[dr] === TerrainType.WATER) {
+            disqualified = true;
+          } else {
+            const o = owners[dr];
+            if (o !== regionOwner) {
+              if (o === WILDERNESS_OWNER) disqualified = true;
+              else if (singleEncloser === null) singleEncloser = o;
+              else if (singleEncloser !== o) disqualified = true;
+            }
+          }
+        }
+      } else {
+        // Fast flood-fill of visited cells once the component is already disqualified
+        if (x > 0) {
+          const left = idx - 1;
+          if (!visited[left] && terrain[left] !== TerrainType.WATER && owners[left] === regionOwner) {
+            visited[left] = 1;
+            queue[tail++] = left;
+          }
+        }
+        if (x < maxX) {
+          const right = idx + 1;
+          if (
+            !visited[right] &&
+            terrain[right] !== TerrainType.WATER &&
+            owners[right] === regionOwner
+          ) {
+            visited[right] = 1;
+            queue[tail++] = right;
+          }
+        }
+        if (y > 0) {
+          const up = idx - width;
+          if (!visited[up] && terrain[up] !== TerrainType.WATER && owners[up] === regionOwner) {
+            visited[up] = 1;
+            queue[tail++] = up;
+          }
+        }
+        if (y < maxY) {
+          const down = idx + width;
+          if (!visited[down] && terrain[down] !== TerrainType.WATER && owners[down] === regionOwner) {
+            visited[down] = 1;
+            queue[tail++] = down;
+          }
         }
       }
     }
 
     if (
-      !touchesMapEdge &&
-      !touchesWater &&
-      !touchesWildernessOrMultiple &&
+      !disqualified &&
       singleEncloser !== null &&
       singleEncloser >= 0 &&
       singleEncloser !== regionOwner &&
@@ -1221,10 +1529,18 @@ export function annexEncircledPockets(state: GameState): boolean {
 }
 
 export function stepFrontExpansion(state: GameState): void {
-  const changedByAttacks = stepAttackOrders(state);
-  const changedByPushes = stepFrontPushOrders(state);
-  if (changedByAttacks || changedByPushes) {
-    annexEncircledPockets(state);
+  const attackRes = stepAttackOrders(state);
+  const pushRes = stepFrontPushOrders(state);
+  if (attackRes.mapChanged || pushRes.mapChanged) {
+    if (
+      attackRes.capturedForeign ||
+      pushRes.capturedForeign ||
+      attackRes.anyTerminated ||
+      pushRes.anyTerminated ||
+      state.tick % 4 === 0
+    ) {
+      annexEncircledPockets(state);
+    }
     state.stateVersion++;
   }
 }

@@ -1,7 +1,10 @@
 import { spawnBots, stepBots } from './bots';
 import {
   createCapitalCityBuilding,
+  demolishBuilding,
   placeBuilding,
+  stackBuilding,
+  stepBuildingConstruction,
   syncBuildingOwnership,
 } from './buildings';
 import {
@@ -10,6 +13,7 @@ import {
   computeTradePairIncomePerSec,
   createInitialPlayerState,
   recomputeNeighborPairs,
+  syncTerritoriesCapitalsAndNeighbors,
   updateAllPlayersEconomy,
 } from './economy';
 import {
@@ -67,9 +71,9 @@ export function planSimulationTicks(
   simSpeed: number,
 ): SpeedStepPlan {
   const clampedDt = Math.min(0.1, Math.max(0, dtSec));
-  const maxAccumulator = Math.max(1.0, simSpeed * 0.25);
+  const maxAccumulator = Math.max(1.0, simSpeed * 0.35);
   const added = Math.min(maxAccumulator, Math.max(0, currentAccumulatorSec) + clampedDt * simSpeed);
-  const maxTicksPerFrame = Math.min(60, Math.max(2, Math.ceil(simSpeed * 1.2)));
+  const maxTicksPerFrame = Math.min(100, Math.max(2, Math.ceil(simSpeed * 1.8)));
   const availableTicks = Math.floor(added / TICK_DT + 1e-9);
   const ticksToRun = Math.min(availableTicks, maxTicksPerFrame);
   const nextAccumulatorSec = Math.max(0, added - ticksToRun * TICK_DT);
@@ -584,6 +588,8 @@ function handleCreateFrontPushOrder(
   manpowerPercent: number,
   explicitTargetOwnerId?: number,
   focalPoint?: Point,
+  sweepAllBorders?: boolean,
+  fullAttack?: boolean,
 ): void {
   if (state.phase !== 'PLAYING') {
     return;
@@ -655,6 +661,8 @@ function handleCreateFrontPushOrder(
     targetOwnerId,
     originCenter,
     focalPoint,
+    sweepAllBorders,
+    fullAttack,
     dirX: ux,
     dirY: uy,
     manpowerCommitted: committed,
@@ -664,6 +672,172 @@ function handleCreateFrontPushOrder(
     stagnantTicks: 0,
     mountainAccum: 0,
   });
+}
+
+function handleTargetedAttack(
+  state: GameState,
+  playerId: number,
+  targetOwnerId: number,
+  anchorX: number,
+  anchorY: number,
+  manpowerPercent: number,
+  fullAttack: boolean,
+): void {
+  if (state.phase !== 'PLAYING') return;
+  const player = state.players.get(playerId);
+  if (!player || !player.alive) return;
+
+  if (targetOwnerId >= 0) {
+    if (targetOwnerId === playerId || getRelation(state, playerId, targetOwnerId) !== 'WAR') {
+      return;
+    }
+  }
+
+  const { width, height, owners, terrain } = state;
+  const nearbyCells: number[] = [];
+  const allEnemyFrontierCells: number[] = [];
+  let sumDirX = 0;
+  let sumDirY = 0;
+
+  if (targetOwnerId >= 0) {
+    const rSq = 45 * 45;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        if (owners[idx] !== playerId) continue;
+
+        let touchesEnemy = false;
+        let localDx = 0;
+        let localDy = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            const nIdx = ny * width + nx;
+            if (terrain[nIdx] !== TerrainType.WATER && owners[nIdx] === targetOwnerId) {
+              touchesEnemy = true;
+              localDx += dx;
+              localDy += dy;
+            }
+          }
+        }
+        if (!touchesEnemy) continue;
+
+        allEnemyFrontierCells.push(idx);
+        const dSq = (x + 0.5 - anchorX) * (x + 0.5 - anchorX) + (y + 0.5 - anchorY) * (y + 0.5 - anchorY);
+        if (fullAttack || dSq <= rSq) {
+          nearbyCells.push(idx);
+          sumDirX += localDx;
+          sumDirY += localDy;
+        }
+      }
+    }
+  } else {
+    const rad = fullAttack ? 65 : 36;
+    const rSq = rad * rad;
+    const minX = Math.max(0, Math.floor(anchorX - rad));
+    const maxX = Math.min(width - 1, Math.ceil(anchorX + rad));
+    const minY = Math.max(0, Math.floor(anchorY - rad));
+    const maxY = Math.min(height - 1, Math.ceil(anchorY + rad));
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dSq = (x + 0.5 - anchorX) * (x + 0.5 - anchorX) + (y + 0.5 - anchorY) * (y + 0.5 - anchorY);
+        if (dSq > rSq) continue;
+        const idx = y * width + x;
+        if (owners[idx] !== playerId) continue;
+
+        let touchesWild = false;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            const nIdx = ny * width + nx;
+            if (terrain[nIdx] !== TerrainType.WATER && owners[nIdx] === WILDERNESS_OWNER) {
+              touchesWild = true;
+              sumDirX += dx;
+              sumDirY += dy;
+            }
+          }
+        }
+        if (touchesWild) {
+          nearbyCells.push(idx);
+        }
+      }
+    }
+
+    if (nearbyCells.length === 0) {
+      const wildCandidates: Array<{ readonly idx: number; readonly x: number; readonly y: number; readonly dSq: number }> = [];
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = y * width + x;
+          if (owners[idx] !== playerId) continue;
+
+          let touchesWild = false;
+          for (let dy = -1; dy <= 1 && !touchesWild; dy++) {
+            const ny = y + dy;
+            if (ny < 0 || ny >= height) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = x + dx;
+              if (nx < 0 || nx >= width) continue;
+              const nIdx = ny * width + nx;
+              if (terrain[nIdx] !== TerrainType.WATER && owners[nIdx] === WILDERNESS_OWNER) {
+                touchesWild = true;
+                break;
+              }
+            }
+          }
+          if (touchesWild) {
+            const dSq =
+              (x + 0.5 - anchorX) * (x + 0.5 - anchorX) +
+              (y + 0.5 - anchorY) * (y + 0.5 - anchorY);
+            wildCandidates.push({ idx, x, y, dSq });
+          }
+        }
+      }
+
+      wildCandidates.sort((a, b) => a.dSq - b.dSq);
+      const picked = wildCandidates.slice(0, 32);
+      for (const c of picked) {
+        nearbyCells.push(c.idx);
+        sumDirX += anchorX - (c.x + 0.5);
+        sumDirY += anchorY - (c.y + 0.5);
+      }
+    }
+  }
+
+  const chosenCells = nearbyCells.length > 0 ? nearbyCells : allEnemyFrontierCells;
+  if (chosenCells.length === 0) {
+    return;
+  }
+
+  const dirLen = Math.hypot(sumDirX, sumDirY);
+  const rawDx = anchorX - player.capitalX;
+  const rawDy = anchorY - player.capitalY;
+  const fallbackLen = Math.hypot(rawDx, rawDy);
+  const dirX = dirLen > 0.01 ? sumDirX / dirLen : fallbackLen > 0.01 ? rawDx / fallbackLen : 1;
+  const dirY = dirLen > 0.01 ? sumDirY / dirLen : fallbackLen > 0.01 ? rawDy / fallbackLen : 0;
+
+  const effectivePct = fullAttack ? 95 : Math.max(10, Math.min(100, manpowerPercent));
+  handleCreateFrontPushOrder(
+    state,
+    playerId,
+    chosenCells,
+    dirX,
+    dirY,
+    effectivePct,
+    targetOwnerId,
+    { x: anchorX, y: anchorY },
+    fullAttack && targetOwnerId >= 0,
+    fullAttack,
+  );
 }
 
 function handleBorderSurgePush(
@@ -800,6 +974,7 @@ function handleTick(state: GameState): void {
 
   state.tick++;
   const versionBefore = state.stateVersion;
+  stepBuildingConstruction(state);
   stepFrontExpansion(state);
   if (syncBuildingOwnership(state)) {
     state.stateVersion++;
@@ -808,10 +983,9 @@ function handleTick(state: GameState): void {
   if (
     state.stateVersion !== versionBefore ||
     state.lastTerritorySyncVersion !== state.stateVersion ||
-    state.tick % 10 === 1
+    state.tick % 4 === 1
   ) {
-    recalculateTerritoryAndCapitals(state);
-    recomputeNeighborPairs(state);
+    syncTerritoriesCapitalsAndNeighbors(state);
     state.lastTerritorySyncVersion = state.stateVersion;
   }
 
@@ -938,12 +1112,48 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.buildingType,
         action.x,
         action.y,
+        action.batchSize ?? 1,
       );
       if (placed) {
         updateAllPlayersEconomy(state, false);
       }
       break;
     }
+    case 'STACK_BUILDING': {
+      const added = stackBuilding(
+        state,
+        action.playerId,
+        action.buildingId,
+        action.batchSize,
+      );
+      if (added > 0) {
+        updateAllPlayersEconomy(state, false);
+      }
+      break;
+    }
+    case 'DEMOLISH_BUILDING': {
+      const removed = demolishBuilding(
+        state,
+        action.playerId,
+        action.buildingId,
+        action.demolishAll,
+      );
+      if (removed) {
+        updateAllPlayersEconomy(state, false);
+      }
+      break;
+    }
+    case 'TARGETED_ATTACK':
+      handleTargetedAttack(
+        state,
+        action.playerId,
+        action.targetOwnerId,
+        action.anchorX,
+        action.anchorY,
+        action.manpowerPercent,
+        action.fullAttack,
+      );
+      break;
     case 'SET_BUILDING_TYPE_OCCUPANCY':
       handleSetBuildingTypeOccupancy(
         state,
@@ -1029,6 +1239,13 @@ function toPublicBuilding(b: Building): PublicBuildingInfo {
     y: b.y,
     isCapital: b.isCapital,
     revealedEfficiencyPct: b.revealedEfficiencyPct,
+    stackCount: b.stackCount,
+    underConstructionCount: b.underConstructionCount,
+    constructionTicksRemaining: b.constructionTicksRemaining,
+    constructionTicksTotal: b.constructionTicksTotal,
+    totalInvestedMoney: b.totalInvestedMoney,
+    totalInvestedMaterial: b.totalInvestedMaterial,
+    totalInvestedIndustry: b.totalInvestedIndustry,
     occupancyOverride: b.occupancyOverride,
     effectiveOccupancyPct: b.effectiveOccupancyPct,
     effectiveOutputPct: b.effectiveOutputPct,
@@ -1266,7 +1483,7 @@ export function createEngineController(seed?: number): EngineController {
           surviving.push(idx);
         }
       }
-      if (surviving.length < 2 || surviving.length < originalCount * 0.5) {
+      if (surviving.length < 3 || surviving.length < originalCount * 0.65) {
         return [];
       }
       return surviving;

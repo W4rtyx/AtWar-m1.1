@@ -7,11 +7,13 @@ import {
 import { createEngineController, planSimulationTicks } from './engine/simulation';
 import {
   ALL_BUILDING_TYPES,
+  BuildBatchSize,
   BuildingType,
   ClientRenderState,
   Point,
   PublicBuildingInfo,
   TICK_DT,
+  TerrainType,
   WILDERNESS_OWNER,
 } from './engine/types';
 import { Camera } from './render/camera';
@@ -21,6 +23,7 @@ import {
   BuildPlacementPreview,
   CanvasRenderer,
   FrontPushPreview,
+  SelectedTarget,
 } from './render/canvasRenderer';
 import { HudController, SimSpeed, TacticalMode } from './ui/hud';
 
@@ -46,8 +49,10 @@ function bootstrap(): void {
   let tacticalMode: TacticalMode = 'ARROW';
   let manpowerPercent = 35;
   let simSpeed: SimSpeed = 1;
+  let buildBatchSize: BuildBatchSize = 1;
   let selectedBuildType: BuildingType | null = null;
   let selectedBuildingId: number | null = null;
+  let selectedTarget: SelectedTarget | null = null;
   let selectedFrontierCells: number[] = [];
   let initialSelectedCount = 0;
   let frontLassoPoints: Point[] = [];
@@ -102,6 +107,17 @@ function bootstrap(): void {
     resetAmbush();
   }
 
+  function syncHud(stateOverride?: ClientRenderState): void {
+    hud.update(
+      stateOverride ?? engine.getRenderState(),
+      selectedFrontierCells.length,
+      selectedBuildType,
+      selectedBuildingId,
+      buildBatchSize,
+      selectedTarget,
+    );
+  }
+
   const hud = new HudController(hudRoot, {
     onTogglePause: () => {
       accumulatorSec = 0;
@@ -113,6 +129,7 @@ function bootstrap(): void {
       lastFrameMs = performance.now();
       selectedBuildType = null;
       selectedBuildingId = null;
+      selectedTarget = null;
       clearFrontSelection();
       clearInteractionPreviews();
       engine.dispatch({ type: 'RESTART_GAME' });
@@ -164,12 +181,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onMakePeace: (targetId) => {
       const state = engine.getRenderState();
@@ -178,12 +190,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onToggleAlliance: (targetId) => {
       const state = engine.getRenderState();
@@ -192,12 +199,7 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onToggleTrade: (targetId) => {
       const state = engine.getRenderState();
@@ -206,25 +208,49 @@ function bootstrap(): void {
         actorId: state.humanPlayerId,
         targetId,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onSelectBuildType: (bType) => {
       selectedBuildType = bType;
       if (bType !== null) {
+        selectedTarget = null;
         clearFrontSelection();
         clearInteractionPreviews();
       }
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
+    },
+    onBatchSizeChange: (batch) => {
+      buildBatchSize = batch;
+      syncHud();
+    },
+    onStackBuilding: (buildingId, batch) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'STACK_BUILDING',
+        playerId: state.humanPlayerId,
+        buildingId,
+        batchSize: batch,
+      });
+      syncHud();
+    },
+    onDemolishBuilding: (buildingId, demolishAll) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'DEMOLISH_BUILDING',
+        playerId: state.humanPlayerId,
+        buildingId,
+        demolishAll,
+      });
+      const post = engine.getRenderState();
+      if (selectedBuildingId !== null && !post.buildings.some((b) => b.id === selectedBuildingId)) {
+        selectedBuildingId = null;
+      }
+      syncHud(post);
+    },
+    onInspectBuilding: (buildingId) => {
+      selectedBuildingId = buildingId;
+      hud.manpowerPanel.setCollapsed(false);
+      syncHud();
     },
     onSetTypeOccupancy: (buildingType, occupancyPct) => {
       const state = engine.getRenderState();
@@ -234,12 +260,7 @@ function bootstrap(): void {
         buildingType,
         occupancyPct,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onSetBuildingOccupancy: (buildingId, occupancyPct) => {
       const state = engine.getRenderState();
@@ -249,12 +270,7 @@ function bootstrap(): void {
         buildingId,
         occupancyPct,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onSetAllOccupancy: (occupancyPct) => {
       const state = engine.getRenderState();
@@ -263,21 +279,32 @@ function bootstrap(): void {
         playerId: state.humanPlayerId,
         occupancyPct,
       });
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
     },
     onCloseBuildingInspector: () => {
       selectedBuildingId = null;
-      hud.update(
-        engine.getRenderState(),
-        selectedFrontierCells.length,
-        selectedBuildType,
-        selectedBuildingId,
-      );
+      syncHud();
+    },
+    onLaunchTargetAttack: (fullAttack) => {
+      if (!selectedTarget) return;
+      const state = engine.getRenderState();
+      const targetOwnerId =
+        selectedTarget.kind === 'STATE' ? selectedTarget.ownerId : WILDERNESS_OWNER;
+      engine.dispatch({
+        type: 'TARGETED_ATTACK',
+        playerId: state.humanPlayerId,
+        targetOwnerId,
+        anchorX: selectedTarget.anchorX,
+        anchorY: selectedTarget.anchorY,
+        manpowerPercent,
+        fullAttack,
+      });
+      clearFrontSelection();
+      syncHud();
+    },
+    onClearTarget: () => {
+      selectedTarget = null;
+      syncHud();
     },
   });
 
@@ -436,6 +463,7 @@ function bootstrap(): void {
     }
 
     hud.leaderboard.closeProfile();
+    hud.buildingMenu.close();
 
     if (state.phase === 'SELECT_START') {
       engine.dispatch({
@@ -447,26 +475,40 @@ function bootstrap(): void {
     }
 
     if (selectedBuildType !== null) {
-      const prevLastId =
-        state.buildings.length > 0 ? state.buildings[state.buildings.length - 1].id : 0;
+      const ix = Math.floor(worldPt.x);
+      const iy = Math.floor(worldPt.y);
       engine.dispatch({
         type: 'PLACE_BUILDING',
         playerId: state.humanPlayerId,
         buildingType: selectedBuildType,
-        x: Math.floor(worldPt.x),
-        y: Math.floor(worldPt.y),
+        x: ix,
+        y: iy,
+        batchSize: buildBatchSize,
       });
       const post = engine.getRenderState();
-      const newest =
-        post.buildings.length > 0 ? post.buildings[post.buildings.length - 1] : undefined;
-      if (newest && newest.id > prevLastId) {
-        selectedBuildingId = newest.id;
-        hud.manpowerPanel.setCollapsed(false);
+      if (post.stateVersion !== state.stateVersion) {
+        let matched: PublicBuildingInfo | undefined = post.buildings.find(
+          (b) => b.x === ix && b.y === iy,
+        );
+        if (!matched) {
+          let bestDist = 7;
+          for (const b of post.buildings) {
+            const d = Math.hypot(b.x - ix, b.y - iy);
+            if (d <= bestDist && b.type === selectedBuildType) {
+              bestDist = d;
+              matched = b;
+            }
+          }
+        }
+        if (matched) {
+          selectedBuildingId = matched.id;
+          hud.manpowerPanel.setCollapsed(false);
+        }
         if (!e.shiftKey) {
           selectedBuildType = null;
         }
       }
-      hud.update(post, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
+      syncHud(post);
       return;
     }
 
@@ -501,7 +543,7 @@ function bootstrap(): void {
     if (clickedBuilding) {
       selectedBuildingId = clickedBuilding.id;
       hud.manpowerPanel.setCollapsed(false);
-      hud.update(state, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
+      syncHud(state);
       return;
     }
 
@@ -525,6 +567,7 @@ function bootstrap(): void {
       y: worldPt.y,
       manpowerPercent: Math.max(manpowerPercent, 65),
     });
+    clearFrontSelection();
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -600,14 +643,26 @@ function bootstrap(): void {
           selectedBuildType = null;
           return;
         }
+        if (selectedTarget !== null) {
+          selectedTarget = null;
+          return;
+        }
+        const hitBuilding = findHumanBuildingAtScreen(state, e.clientX, e.clientY);
+        if (hitBuilding) {
+          hud.leaderboard.closeProfile();
+          hud.buildingMenu.open(hitBuilding.id, e.clientX + 8, e.clientY + 8);
+          return;
+        }
         const ix = Math.floor(worldPt.x);
         const iy = Math.floor(worldPt.y);
         if (ix >= 0 && ix < state.width && iy >= 0 && iy < state.height) {
           const owner = state.owners[iy * state.width + ix];
           if (owner >= 0 && owner !== state.humanPlayerId) {
+            hud.buildingMenu.close();
             hud.leaderboard.openProfile(owner, e.clientX + 8, e.clientY + 8);
           } else {
             hud.leaderboard.closeProfile();
+            hud.buildingMenu.close();
           }
         }
       }
@@ -661,14 +716,21 @@ function bootstrap(): void {
 
       const pathLen = computePolylineLength(rawArrowPoints);
       if (pathLen < 6) {
-        // Short click on/near border triggers a targeted local surge
-        engine.dispatch({
-          type: 'BORDER_SURGE_PUSH',
-          playerId: state.humanPlayerId,
-          x: worldPt.x,
-          y: worldPt.y,
-          manpowerPercent,
-        });
+        const ix = Math.floor(worldPt.x);
+        const iy = Math.floor(worldPt.y);
+        if (ix >= 0 && ix < state.width && iy >= 0 && iy < state.height) {
+          const cellTerrain = state.terrain[iy * state.width + ix];
+          const owner = state.owners[iy * state.width + ix];
+          if (cellTerrain === TerrainType.WATER) {
+            selectedTarget = null;
+          } else if (owner === WILDERNESS_OWNER) {
+            selectedTarget = { kind: 'WILDERNESS', anchorX: ix, anchorY: iy };
+          } else if (owner >= 0 && owner !== state.humanPlayerId) {
+            selectedTarget = { kind: 'STATE', ownerId: owner, anchorX: ix, anchorY: iy };
+          } else {
+            selectedTarget = null;
+          }
+        }
       } else {
         const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
         if (waypoints.length >= 2 && computePolylineLength(waypoints) >= 6) {
@@ -681,6 +743,7 @@ function bootstrap(): void {
             manpowerPercent,
             targetOwnerId: spineNonWar ? WILDERNESS_OWNER : undefined,
           });
+          clearFrontSelection();
         }
       }
 
@@ -723,9 +786,11 @@ function bootstrap(): void {
     if (e.code === 'Escape') {
       selectedBuildType = null;
       selectedBuildingId = null;
+      selectedTarget = null;
       clearFrontSelection();
       clearInteractionPreviews();
       hud.leaderboard.closeProfile();
+      hud.buildingMenu.close();
       return;
     }
 
@@ -809,14 +874,15 @@ function bootstrap(): void {
     );
 
     if (engine.isPlayingAndUnpaused()) {
-      const maxAccumulator = Math.max(1.0, simSpeed * 0.25);
+      const maxAccumulator = Math.max(1.0, simSpeed * 0.35);
       const preAccum = Math.min(maxAccumulator, accumulatorSec + dtSec * simSpeed);
       const plan = planSimulationTicks(accumulatorSec, dtSec, simSpeed);
+      const frameTickBudgetMs = simSpeed >= 50 ? 28 : simSpeed >= 10 ? 20 : 12;
       const tickBudgetStart = performance.now();
       let ticksRun = 0;
 
       while (ticksRun < plan.ticksToRun) {
-        if (ticksRun > 0 && performance.now() - tickBudgetStart >= 12) {
+        if (ticksRun > 0 && performance.now() - tickBudgetStart >= frameTickBudgetMs) {
           break;
         }
         engine.dispatch({ type: 'TICK' });
@@ -828,6 +894,30 @@ function bootstrap(): void {
     }
 
     const renderState = engine.getRenderState();
+
+    if (selectedTarget) {
+      if (selectedTarget.kind === 'STATE') {
+        const targetOwnerId = selectedTarget.ownerId;
+        const stillAlive = renderState.players.some(
+          (p) => p.id === targetOwnerId && p.alive,
+        );
+        if (!stillAlive) {
+          selectedTarget = null;
+        }
+      } else {
+        const ax = Math.floor(selectedTarget.anchorX);
+        const ay = Math.floor(selectedTarget.anchorY);
+        if (
+          ax >= 0 &&
+          ax < renderState.width &&
+          ay >= 0 &&
+          ay < renderState.height &&
+          renderState.owners[ay * renderState.width + ax] === renderState.humanPlayerId
+        ) {
+          selectedTarget = null;
+        }
+      }
+    }
 
     // Auto-clear stale front selection when borders advance or disappear
     if (
@@ -868,6 +958,7 @@ function bootstrap(): void {
               waypoints,
               manpowerPercent,
             });
+            clearFrontSelection();
             ambushTriggered = true;
           }
           rawArrowPoints = [];
@@ -898,6 +989,12 @@ function bootstrap(): void {
     ) {
       selectedBuildingId = null;
     }
+    if (selectedTarget !== null && selectedTarget.kind === 'STATE') {
+      const targetOwner = selectedTarget.ownerId;
+      if (!finalState.players.some((p) => p.id === targetOwner && p.alive)) {
+        selectedTarget = null;
+      }
+    }
 
     let buildPreview: BuildPlacementPreview | null = null;
     if (finalState.phase === 'PLAYING' && selectedBuildType !== null && hoverCell) {
@@ -910,6 +1007,7 @@ function bootstrap(): void {
         selectedBuildType,
         ix,
         iy,
+        buildBatchSize,
       );
       buildPreview = {
         buildingType: selectedBuildType,
@@ -919,10 +1017,12 @@ function bootstrap(): void {
         reasonCs: check.reasonCs,
         inMatchingZone: check.inMatchingZone,
         isFreePowerPlant: check.isFreePowerPlant,
+        stackTargetId: check.stackTargetId,
+        plannedUnits: check.plannedUnits,
       };
     }
 
-    hud.update(finalState, selectedFrontierCells.length, selectedBuildType, selectedBuildingId);
+    syncHud(finalState);
     renderer.render(finalState, camera, {
       hoverCell,
       arrowPreview,
@@ -933,6 +1033,7 @@ function bootstrap(): void {
       ambush: ambushOverlay,
       buildPreview,
       selectedBuildingId,
+      selectedTarget,
     });
 
     requestAnimationFrame(frame);

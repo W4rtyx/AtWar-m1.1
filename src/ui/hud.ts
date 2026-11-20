@@ -1,5 +1,17 @@
-import { BuildingType, ClientRenderState, PublicPlayerInfo, TICK_RATE } from '../engine/types';
-import { BuildMenuCallbacks, BuildMenuController } from './buildMenu';
+import {
+  BuildBatchSize,
+  BuildingType,
+  ClientRenderState,
+  PublicPlayerInfo,
+  TICK_RATE,
+} from '../engine/types';
+import { SelectedTarget } from '../render/canvasRenderer';
+import {
+  BuildMenuCallbacks,
+  BuildMenuController,
+  BuildingContextCallbacks,
+  BuildingContextMenuController,
+} from './buildMenu';
 import { DiplomacyCallbacks, LeaderboardController } from './leaderboard';
 import { ManpowerPanelCallbacks, ManpowerPanelController } from './manpowerPanel';
 
@@ -9,6 +21,7 @@ export type SimSpeed = 1 | 2 | 5 | 10 | 50;
 export interface HudCallbacks
   extends DiplomacyCallbacks,
     BuildMenuCallbacks,
+    BuildingContextCallbacks,
     ManpowerPanelCallbacks {
   readonly onTogglePause: () => void;
   readonly onRestart: () => void;
@@ -18,6 +31,8 @@ export interface HudCallbacks
   readonly onClearFrontSelection: () => void;
   readonly onCancelOrders: () => void;
   readonly onSpeedChange: (speed: SimSpeed) => void;
+  readonly onLaunchTargetAttack: (fullAttack: boolean) => void;
+  readonly onClearTarget: () => void;
 }
 
 function formatGameTimer(tick: number): string {
@@ -38,6 +53,7 @@ export class HudController {
   public readonly leaderboard: LeaderboardController;
   public readonly manpowerPanel: ManpowerPanelController;
   public readonly buildMenu: BuildMenuController;
+  public readonly buildingMenu: BuildingContextMenuController;
 
   private phaseBadge!: HTMLElement;
   private statsGroup!: HTMLElement;
@@ -54,9 +70,9 @@ export class HudController {
   private energyPillEl!: HTMLElement;
   private manpowerValueEl!: HTMLElement;
   private manpowerIncomeEl!: HTMLElement;
-  private allocBadgeEl!: HTMLElement;
   private optimumBadgeEl!: HTMLElement;
   private allocToggleBtn!: HTMLButtonElement;
+  private buildingsValueEl!: HTMLElement;
   private territoryValueEl!: HTMLElement;
   private ordersValueEl!: HTMLElement;
   private betrayalAlertEl!: HTMLElement;
@@ -73,6 +89,14 @@ export class HudController {
   private modeArrowBtn!: HTMLButtonElement;
   private modeFrontBtn!: HTMLButtonElement;
   private cancelOrdersBtn!: HTMLButtonElement;
+
+  private targetBarEl!: HTMLElement;
+  private targetTitleEl!: HTMLElement;
+  private targetWarBtn!: HTMLButtonElement;
+  private targetAttackBtn!: HTMLButtonElement;
+  private targetFullBtn!: HTMLButtonElement;
+  private targetCancelBtn!: HTMLButtonElement;
+  private currentTargetOwnerId: number | null = null;
 
   private frontPadEl!: HTMLElement;
   private frontCountEl!: HTMLElement;
@@ -91,6 +115,8 @@ export class HudController {
       onSetBuildingOccupancy: callbacks.onSetBuildingOccupancy,
       onSetAllOccupancy: callbacks.onSetAllOccupancy,
       onCloseBuildingInspector: callbacks.onCloseBuildingInspector,
+      onStackBuilding: callbacks.onStackBuilding,
+      onDemolishBuilding: callbacks.onDemolishBuilding,
     });
 
     this.leaderboard = new LeaderboardController(this.root, {
@@ -102,6 +128,13 @@ export class HudController {
 
     this.buildMenu = new BuildMenuController({
       onSelectBuildType: callbacks.onSelectBuildType,
+      onBatchSizeChange: callbacks.onBatchSizeChange,
+    });
+
+    this.buildingMenu = new BuildingContextMenuController(this.root, {
+      onStackBuilding: callbacks.onStackBuilding,
+      onDemolishBuilding: callbacks.onDemolishBuilding,
+      onInspectBuilding: callbacks.onInspectBuilding,
     });
 
     const middleSlot = this.query('[data-el="middle-slot"]');
@@ -109,6 +142,7 @@ export class HudController {
     middleSlot.appendChild(this.leaderboard.getPanelElement());
 
     this.bottomStack.insertBefore(this.buildMenu.getPanelElement(), this.bottomRow);
+    this.bottomStack.insertBefore(this.targetBarEl, this.buildMenu.getPanelElement());
   }
 
   private buildDom(): void {
@@ -157,18 +191,21 @@ export class HudController {
           </div>
           <div class="hud-res-pill" data-el="energy-pill">
             <span class="hud-stat-label">Energie</span>
-            <span class="hud-stat-value" data-el="energy-val">0 / 0</span>
+            <span class="hud-stat-value" data-el="energy-val">0</span>
             <span class="hud-stat-sub" data-el="energy-rate">+0.0/s</span>
           </div>
           <div class="hud-res-pill hud-res-pill-mp">
-            <span class="hud-stat-label">Manpower (Akt/Celk)</span>
-            <span class="hud-stat-value" data-el="manpower-val">0 / 0</span>
+            <span class="hud-stat-label">MP (Ready · Assg · Max)</span>
+            <span class="hud-stat-value" data-el="manpower-val">0 (0 %) · 0 · 0</span>
             <span class="hud-stat-sub" data-el="manpower-inc">+0.0/s</span>
-            <span class="hud-alloc-badge" data-el="alloc-badge">Bud: 0</span>
             <span class="hud-optimum-badge" data-el="optimum-badge">Opt 100 %</span>
             <button type="button" class="hud-btn hud-alloc-toggle-btn" data-action="toggle-alloc">
               Alokace
             </button>
+          </div>
+          <div class="hud-res-pill">
+            <span class="hud-stat-label">Budovy</span>
+            <span class="hud-stat-value" data-el="buildings-val">1</span>
           </div>
           <div class="hud-res-pill">
             <span class="hud-stat-label">Území</span>
@@ -190,6 +227,24 @@ export class HudController {
 
       <div class="hud-bottom-row">
         <div class="hud-bottom-stack" data-el="bottom-stack">
+          <div class="hud-panel hud-target-bar hidden" data-el="target-bar">
+            <span class="hud-target-title" data-el="target-title">Cíl: -</span>
+            <div class="hud-target-actions">
+              <button type="button" class="hud-btn hud-btn-danger hidden" data-target-action="war">
+                Vyhlásit válku
+              </button>
+              <button type="button" class="hud-btn" data-target-action="attack">
+                Útok (35 %)
+              </button>
+              <button type="button" class="hud-btn hud-btn-full-attack" data-target-action="full">
+                FULL ÚTOK (95 %)
+              </button>
+              <button type="button" class="hud-btn" data-target-action="cancel">
+                Zrušit (RMB)
+              </button>
+            </div>
+          </div>
+
           <div class="hud-panel hud-tactical-bar hidden" data-el="tactical-bar">
             <div class="hud-control-group">
               <label class="hud-stat-label" for="mp-slider">Nasazení</label>
@@ -239,20 +294,20 @@ export class HudController {
 
         <div class="hud-panel hud-legend">
           <div class="hud-legend-row">
-            <span class="hud-legend-key">LMB tažení / 2s držení</span>
-            <span>Útok (2s Ambush vyhlásí válku)</span>
+            <span class="hud-legend-key">LMB klik / tažení</span>
+            <span>Označit cíl (FULL) / kreslit šipku (2s Ambush)</span>
           </div>
           <div class="hud-legend-row">
             <span class="hud-legend-key">Klávesy 1–8 / Stavba</span>
-            <span>Umístit budovu · LMB detail budovy</span>
+            <span>Stavět či stackovat · RMB na budovu: Správa/Demontáž</span>
           </div>
           <div class="hud-legend-row">
-            <span class="hud-legend-key">RMB na stát / Tabulka</span>
-            <span>Diplomacie: Válka, Mír, Aliance, Obchod</span>
+            <span class="hud-legend-key">RMB bez tahu</span>
+            <span>Zrušit cíl / Diplomacie a obchodní dohody</span>
           </div>
           <div class="hud-legend-row">
-            <span class="hud-legend-key">Shift + LMB / RMB tah</span>
-            <span>Výběr fronty a posun mapy</span>
+            <span class="hud-legend-key">Shift + LMB / 2×LMB</span>
+            <span>Výběr fronty · Organický nápor</span>
           </div>
         </div>
       </div>
@@ -273,9 +328,9 @@ export class HudController {
     this.energyPillEl = this.query('[data-el="energy-pill"]');
     this.manpowerValueEl = this.query('[data-el="manpower-val"]');
     this.manpowerIncomeEl = this.query('[data-el="manpower-inc"]');
-    this.allocBadgeEl = this.query('[data-el="alloc-badge"]');
     this.optimumBadgeEl = this.query('[data-el="optimum-badge"]');
     this.allocToggleBtn = this.query<HTMLButtonElement>('[data-action="toggle-alloc"]');
+    this.buildingsValueEl = this.query('[data-el="buildings-val"]');
     this.territoryValueEl = this.query('[data-el="territory-val"]');
     this.ordersValueEl = this.query('[data-el="orders-val"]');
     this.betrayalAlertEl = this.query('[data-el="betrayal-alert"]');
@@ -294,6 +349,13 @@ export class HudController {
     this.frontPadEl = this.query('[data-el="front-pad"]');
     this.frontCountEl = this.query('[data-el="front-count"]');
 
+    this.targetBarEl = this.query('[data-el="target-bar"]');
+    this.targetTitleEl = this.query('[data-el="target-title"]');
+    this.targetWarBtn = this.query<HTMLButtonElement>('[data-target-action="war"]');
+    this.targetAttackBtn = this.query<HTMLButtonElement>('[data-target-action="attack"]');
+    this.targetFullBtn = this.query<HTMLButtonElement>('[data-target-action="full"]');
+    this.targetCancelBtn = this.query<HTMLButtonElement>('[data-target-action="cancel"]');
+
     this.pauseBtn.addEventListener('click', () => this.callbacks.onTogglePause());
     this.restartBtn.addEventListener('click', () => this.callbacks.onRestart());
     this.cancelOrdersBtn.addEventListener('click', () => this.callbacks.onCancelOrders());
@@ -302,6 +364,36 @@ export class HudController {
       e.preventDefault();
       e.stopPropagation();
       this.manpowerPanel.setCollapsed(!this.manpowerPanel.isCollapsed());
+    });
+
+    this.targetBarEl.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+    });
+    this.targetWarBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.currentTargetOwnerId !== null) {
+        this.callbacks.onDeclareWar(this.currentTargetOwnerId);
+      }
+    });
+    this.targetAttackBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onLaunchTargetAttack(false);
+    });
+    this.targetFullBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onLaunchTargetAttack(true);
+    });
+    this.targetCancelBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onClearTarget();
     });
 
     for (const btn of this.speedButtons) {
@@ -373,6 +465,8 @@ export class HudController {
     selectedFrontierCount: number,
     selectedBuildType: BuildingType | null = null,
     selectedBuildingId: number | null = null,
+    buildBatchSize: BuildBatchSize = 1,
+    selectedTarget: SelectedTarget | null = null,
   ): void {
     const isPlaying = state.phase === 'PLAYING';
 
@@ -394,10 +488,12 @@ export class HudController {
 
     this.leaderboard.update(state);
     this.manpowerPanel.update(state, selectedBuildingId);
-    this.buildMenu.update(state, selectedBuildType);
+    this.buildMenu.update(state, selectedBuildType, buildBatchSize);
+    this.buildingMenu.update(state);
 
     if (!isPlaying) {
       this.betrayalAlertEl.classList.add('hidden');
+      this.targetBarEl.classList.add('hidden');
       return;
     }
 
@@ -414,17 +510,24 @@ export class HudController {
     const industry = human?.industry ?? 0;
     const industryRate = human?.industryIncomePerSec ?? 0;
     const energyRes = human?.energyReserve ?? 0;
-    const energyResMax = human?.energyReserveMax ?? 0;
     const energyNet = human?.energyNetPerSec ?? 0;
 
-    const totalManpower = human?.manpower ?? 0;
-    const activeManpower = human?.activeManpower ?? 0;
-    const allocatedManpower = human?.allocatedManpower ?? 0;
-    const maxManpower = human?.maxManpower ?? 0;
+    const totalManpower = Math.max(1, Math.floor(human?.manpower ?? 0));
+    const readyManpower = Math.floor(human?.activeManpower ?? 0);
+    const assignedManpower = Math.round(human?.allocatedManpower ?? 0);
+    const maxManpower = Math.round(human?.maxManpower ?? 0);
+    const readyPct = Math.round((readyManpower / totalManpower) * 100);
     const income = human?.manpowerIncomePerSec ?? 0;
     const efficiency = human?.manpowerGrowthEfficiency ?? 0;
     const cells = human?.territoryCells ?? 0;
     const pctLand = state.totalLandCells > 0 ? (cells / state.totalLandCells) * 100 : 0;
+
+    let completedBuildings = 0;
+    let queuedBuildings = 0;
+    for (const b of state.buildings) {
+      completedBuildings += b.stackCount;
+      queuedBuildings += b.underConstructionCount;
+    }
 
     const activeHumanOrders =
       state.attackOrders.filter((o) => o.playerId === state.humanPlayerId).length +
@@ -442,14 +545,13 @@ export class HudController {
     this.industryValueEl.textContent = `${Math.floor(industry)}`;
     this.industryRateEl.textContent = formatSignedRate(industryRate);
 
-    this.energyValueEl.textContent = `${Math.floor(energyRes)}/${Math.round(energyResMax)}`;
+    this.energyValueEl.textContent = `${Math.floor(energyRes)}`;
     this.energyRateEl.textContent = formatSignedRate(energyNet);
     this.energyRateEl.classList.toggle('rate-negative', energyNet < 0);
     this.energyPillEl.classList.toggle('energy-deficit', energyNet < 0);
 
-    this.manpowerValueEl.textContent = `${Math.floor(activeManpower)} / ${Math.floor(totalManpower)} (${Math.round(maxManpower)})`;
+    this.manpowerValueEl.textContent = `${readyManpower} (${readyPct} %) · ${assignedManpower} · ${maxManpower}`;
     this.manpowerIncomeEl.textContent = `+${income.toFixed(1)}/s`;
-    this.allocBadgeEl.textContent = `Bud: ${Math.round(allocatedManpower)}`;
 
     const optPct = Math.round(efficiency * 100);
     this.optimumBadgeEl.textContent = `Opt ${optPct} %`;
@@ -457,6 +559,8 @@ export class HudController {
     this.optimumBadgeEl.classList.toggle('optimum-low', optPct < 45);
     this.allocToggleBtn.classList.toggle('active', !this.manpowerPanel.isCollapsed());
 
+    this.buildingsValueEl.textContent =
+      queuedBuildings > 0 ? `${completedBuildings} (+${queuedBuildings})` : `${completedBuildings}`;
     this.territoryValueEl.textContent = `${cells} (${pctLand.toFixed(1)} %)`;
     this.ordersValueEl.textContent = `${activeHumanOrders}`;
     this.cancelOrdersBtn.disabled = activeHumanOrders === 0;
@@ -467,7 +571,7 @@ export class HudController {
       this.betrayalAlertEl.textContent = `ZRÁDCE −35 % obrana (${Math.ceil(betrayalTicks / TICK_RATE)}s)`;
     }
 
-    const commitAmount = Math.round(activeManpower * (this.currentPercent / 100));
+    const commitAmount = Math.round(readyManpower * (this.currentPercent / 100));
     this.sliderReadoutEl.textContent = `${this.currentPercent} % (${commitAmount} MP)`;
 
     const hasFront = selectedFrontierCount > 0;
@@ -475,5 +579,55 @@ export class HudController {
     if (hasFront) {
       this.frontCountEl.textContent = `Úsek: ${selectedFrontierCount} b.`;
     }
+
+    this.syncTargetActionBar(state, selectedTarget);
+  }
+
+  private syncTargetActionBar(
+    state: ClientRenderState,
+    selectedTarget: SelectedTarget | null,
+  ): void {
+    if (!selectedTarget) {
+      this.currentTargetOwnerId = null;
+      this.targetBarEl.classList.add('hidden');
+      return;
+    }
+
+    if (selectedTarget.kind === 'WILDERNESS') {
+      this.currentTargetOwnerId = null;
+      this.targetTitleEl.textContent = `Cíl: Volné území [${Math.floor(selectedTarget.anchorX)}, ${Math.floor(selectedTarget.anchorY)}]`;
+      this.targetWarBtn.classList.add('hidden');
+      this.targetAttackBtn.classList.remove('hidden');
+      this.targetFullBtn.classList.remove('hidden');
+      this.targetAttackBtn.textContent = `Útok (${this.currentPercent} %)`;
+      this.targetBarEl.classList.remove('hidden');
+      return;
+    }
+
+    const targetPlayer = state.players.find(
+      (p) => p.id === selectedTarget.ownerId && p.alive,
+    );
+    if (!targetPlayer) {
+      this.currentTargetOwnerId = null;
+      this.targetBarEl.classList.add('hidden');
+      return;
+    }
+
+    this.currentTargetOwnerId = targetPlayer.id;
+    const isWar = targetPlayer.relationToHuman === 'WAR';
+    const isAllied = targetPlayer.relationToHuman === 'ALLIED';
+    const relLabel = isWar ? 'VÁLKA' : isAllied ? 'SPOJENEC' : 'NEUTRÁLNÍ';
+
+    this.targetTitleEl.textContent = `Cíl: ${targetPlayer.name} [${relLabel}]`;
+    this.targetWarBtn.classList.toggle('hidden', isWar);
+    this.targetWarBtn.textContent = isAllied
+      ? 'Zradit a vyhlásit válku'
+      : 'Vyhlásit válku';
+    this.targetAttackBtn.classList.toggle('hidden', !isWar);
+    this.targetFullBtn.classList.toggle('hidden', !isWar);
+    if (isWar) {
+      this.targetAttackBtn.textContent = `Útok (${this.currentPercent} %)`;
+    }
+    this.targetBarEl.classList.remove('hidden');
   }
 }

@@ -10,7 +10,6 @@ import {
 
 export const OPTIMUM_FILL_RATIO = 0.5;
 export const CAPITAL_BASE_MATERIAL_PER_SEC = 0.4;
-const BASE_ENERGY_RESERVE_MAX = 120;
 
 export interface OccupancyCurveResult {
   readonly occupancyPct: number;
@@ -98,6 +97,69 @@ export function recomputeNeighborPairs(state: GameState): void {
   }
 }
 
+/** Single-pass territory, capital relocation, and neighbor-pair sync over the map grid. */
+export function syncTerritoriesCapitalsAndNeighbors(state: GameState): void {
+  const { width, height, owners, terrain, players } = state;
+  state.neighborPairs.clear();
+
+  for (const player of players.values()) {
+    player.territoryCells = 0;
+  }
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    for (let x = 0; x < width; x++) {
+      const idx = rowOffset + x;
+      if (terrain[idx] === TerrainType.WATER) continue;
+      const o1 = owners[idx];
+      if (o1 < 0) continue;
+
+      const p1 = players.get(o1);
+      if (p1) {
+        p1.territoryCells++;
+      }
+
+      if (x + 1 < width) {
+        const rightIdx = idx + 1;
+        if (terrain[rightIdx] !== TerrainType.WATER) {
+          const o2 = owners[rightIdx];
+          if (o2 >= 0 && o2 !== o1) {
+            state.neighborPairs.add(getRelationKey(o1, o2));
+          }
+        }
+      }
+
+      if (y + 1 < height) {
+        const downIdx = idx + width;
+        if (terrain[downIdx] !== TerrainType.WATER) {
+          const o2 = owners[downIdx];
+          if (o2 >= 0 && o2 !== o1) {
+            state.neighborPairs.add(getRelationKey(o1, o2));
+          }
+        }
+      }
+    }
+  }
+
+  for (const player of players.values()) {
+    if (player.territoryCells === 0) {
+      player.alive = false;
+      continue;
+    }
+
+    const capIdx = player.capitalY * width + player.capitalX;
+    if (owners[capIdx] !== player.id) {
+      for (let i = 0; i < owners.length; i++) {
+        if (owners[i] === player.id) {
+          player.capitalX = i % width;
+          player.capitalY = (i - player.capitalX) / width;
+          break;
+        }
+      }
+    }
+  }
+}
+
 /** Returns true if states a and b share a land border. */
 export function areNeighbors(state: GameState, a: number, b: number): boolean {
   if (a === b || a < 0 || b < 0) return false;
@@ -124,9 +186,10 @@ export function computeTradePairIncomePerSec(
   for (const building of state.buildings) {
     if (
       building.type === 'FACTORY' &&
+      building.stackCount > 0 &&
       (building.ownerId === aId || building.ownerId === bId)
     ) {
-      factoriesCount++;
+      factoriesCount += building.stackCount;
     }
   }
 
@@ -166,17 +229,17 @@ export function createInitialPlayerState(params: {
     manpowerGrowthEfficiency: 1,
     allocatedManpower: 0,
     activeManpower: 240,
-    money: 260,
+    money: 280,
     moneyIncomePerSec: 6,
     tradeIncomePerSec: 0,
     knowledge: 0,
     knowledgeIncomePerSec: 0,
-    buildingMaterial: 120,
-    buildingMaterialIncomePerSec: 0.4,
+    buildingMaterial: 150,
+    buildingMaterialIncomePerSec: CAPITAL_BASE_MATERIAL_PER_SEC,
     industry: 0,
     industryIncomePerSec: 0,
-    energyReserve: 80,
-    energyReserveMax: BASE_ENERGY_RESERVE_MAX,
+    energyReserve: 100,
+    energyReserveMax: null,
     energyProductionPerSec: 0,
     energyConsumptionPerSec: 0,
     energyNetPerSec: 0,
@@ -245,15 +308,16 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
 
     for (let i = 0; i < ownedBuildings.length; i++) {
       const b = ownedBuildings[i];
+      const units = b.stackCount;
       const spec = BUILDING_SPECS[b.type];
-      if (spec.baseManpowerRequired <= 0) {
-        buildingTargetPcts.push(100);
+      if (units <= 0 || spec.baseManpowerRequired <= 0) {
+        buildingTargetPcts.push(units > 0 ? 100 : 0);
         buildingDesiredMps.push(0);
         continue;
       }
       const rawPct = b.occupancyOverride ?? player.buildingOccupancyByType[b.type] ?? 100;
       const clampedPct = Math.max(0, Math.min(200, rawPct));
-      const desiredMp = spec.baseManpowerRequired * (clampedPct / 100);
+      const desiredMp = spec.baseManpowerRequired * (clampedPct / 100) * units;
       buildingTargetPcts.push(clampedPct);
       buildingDesiredMps.push(desiredMp);
       totalDesiredMp += desiredMp;
@@ -265,38 +329,46 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
 
     for (let i = 0; i < ownedBuildings.length; i++) {
       const b = ownedBuildings[i];
+      const units = b.stackCount;
       const assignedMp = buildingDesiredMps[i] * staffingFulfillment;
       b.allocatedManpower = assignedMp;
       b.effectiveOccupancyPct =
-        BUILDING_SPECS[b.type].baseManpowerRequired > 0
-          ? buildingTargetPcts[i] * staffingFulfillment
-          : 100;
+        units <= 0
+          ? 0
+          : BUILDING_SPECS[b.type].baseManpowerRequired > 0
+            ? buildingTargetPcts[i] * staffingFulfillment
+            : 100;
       allocatedManpower += assignedMp;
     }
 
     player.allocatedManpower = allocatedManpower;
     player.activeManpower = Math.max(0, player.manpower - allocatedManpower);
 
-    // Step B: Energy balance & reserve
+    // Step B: Energy balance & unlimited reserve
     let energyProd = 0;
     let energyCons = 0;
-    let powerPlantCount = 0;
 
     for (const b of ownedBuildings) {
+      const units = b.stackCount;
+      if (units <= 0) {
+        b.currentEnergyProd = 0;
+        b.currentEnergyUse = 0;
+        continue;
+      }
       const spec = BUILDING_SPECS[b.type];
       const curve = computeOccupancyCurve(b.effectiveOccupancyPct);
+      const effPct = b.revealedEfficiencyPct ?? 100;
       let prod = 0;
       let cons = 0;
 
       if (b.type === 'POWER_PLANT') {
-        powerPlantCount++;
-        prod = spec.baseEnergyProduction * (b.revealedEfficiencyPct / 100) * curve.outputMultiplier;
+        prod = spec.baseEnergyProduction * (effPct / 100) * curve.outputMultiplier * units;
         energyProd += prod;
       } else if (spec.baseEnergyConsumption > 0) {
         cons =
-          spec.baseManpowerRequired > 0
+          (spec.baseManpowerRequired > 0
             ? spec.baseEnergyConsumption * curve.energyMultiplier
-            : spec.baseEnergyConsumption;
+            : spec.baseEnergyConsumption) * units;
         energyCons += cons;
       }
 
@@ -304,17 +376,12 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       b.currentEnergyUse = cons;
     }
 
-    const energyReserveMax =
-      BASE_ENERGY_RESERVE_MAX + powerPlantCount * BUILDING_SPECS.POWER_PLANT.energyReserveBonus;
     const energyNet = energyProd - energyCons;
 
     if (applyTickGrowth) {
-      player.energyReserve = Math.max(
-        0,
-        Math.min(energyReserveMax, player.energyReserve + energyNet * TICK_DT),
-      );
+      player.energyReserve = Math.max(0, player.energyReserve + energyNet * TICK_DT);
     } else {
-      player.energyReserve = Math.max(0, Math.min(energyReserveMax, player.energyReserve));
+      player.energyReserve = Math.max(0, player.energyReserve);
     }
 
     const energySupplyRatio =
@@ -322,7 +389,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
         ? 1
         : Math.max(0.25, Math.min(1, energyProd / Math.max(0.01, energyCons)));
 
-    player.energyReserveMax = energyReserveMax;
+    player.energyReserveMax = null;
     player.energyProductionPerSec = energyProd;
     player.energyConsumptionPerSec = energyCons;
     player.energyNetPerSec = energyNet;
@@ -339,34 +406,41 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     let barracksIncomeBonus = 0;
 
     for (const b of ownedBuildings) {
+      const units = b.stackCount;
+      if (units <= 0) {
+        b.effectiveOutputPct = 0;
+        continue;
+      }
       const spec = BUILDING_SPECS[b.type];
       const curve = computeOccupancyCurve(b.effectiveOccupancyPct);
-      const siteScale = b.revealedEfficiencyPct / 100;
+      const effPct = b.revealedEfficiencyPct ?? 100;
+      const siteScale = effPct / 100;
       const energyFactor = spec.baseEnergyConsumption > 0 ? energySupplyRatio : 1;
 
       if (b.type === 'CITY') {
-        cityCount++;
-        moneyIncome += spec.baseMoneyPerSec * (0.5 + 0.5 * energySupplyRatio);
+        cityCount += units;
+        moneyIncome += spec.baseMoneyPerSec * (0.5 + 0.5 * energySupplyRatio) * units;
         b.effectiveOutputPct = Math.round((0.5 + 0.5 * energySupplyRatio) * 100);
       } else if (b.type === 'MINE') {
-        materialIncome += spec.baseMaterialPerSec * siteScale * curve.outputMultiplier * energyFactor;
-        b.effectiveOutputPct = Math.round(b.revealedEfficiencyPct * curve.outputMultiplier * energyFactor);
+        materialIncome +=
+          spec.baseMaterialPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
+        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * energyFactor);
       } else if (b.type === 'POWER_PLANT') {
-        b.effectiveOutputPct = Math.round(b.revealedEfficiencyPct * curve.outputMultiplier);
+        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier);
       } else if (b.type === 'FACTORY') {
-        industryIncome += spec.baseIndustryPerSec * curve.outputMultiplier * energyFactor;
+        industryIncome += spec.baseIndustryPerSec * curve.outputMultiplier * energyFactor * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
       } else if (b.type === 'LAB') {
-        knowledgeIncome += spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor;
+        knowledgeIncome += spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
       } else if (b.type === 'BARRACKS') {
         const barracksEnergyScale = 0.7 + 0.3 * energySupplyRatio;
-        barracksMaxBonus += spec.baseMaxManpowerBonus * curve.outputMultiplier;
+        barracksMaxBonus += spec.baseMaxManpowerBonus * curve.outputMultiplier * units;
         barracksIncomeBonus +=
-          spec.baseManpowerIncomeBonus * curve.outputMultiplier * barracksEnergyScale;
+          spec.baseManpowerIncomeBonus * curve.outputMultiplier * barracksEnergyScale * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * barracksEnergyScale);
       } else if (b.type === 'PORT') {
-        moneyIncome += spec.baseMoneyPerSec * curve.outputMultiplier * energyFactor;
+        moneyIncome += spec.baseMoneyPerSec * curve.outputMultiplier * energyFactor * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
       } else {
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
@@ -428,12 +502,15 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     let finalAllocated = 0;
     for (let i = 0; i < ownedBuildings.length; i++) {
       const b = ownedBuildings[i];
+      const units = b.stackCount;
       const assigned = buildingDesiredMps[i] * finalFulfillment;
       b.allocatedManpower = assigned;
       b.effectiveOccupancyPct =
-        BUILDING_SPECS[b.type].baseManpowerRequired > 0
-          ? buildingTargetPcts[i] * finalFulfillment
-          : 100;
+        units <= 0
+          ? 0
+          : BUILDING_SPECS[b.type].baseManpowerRequired > 0
+            ? buildingTargetPcts[i] * finalFulfillment
+            : 100;
       finalAllocated += assigned;
     }
     player.allocatedManpower = finalAllocated;

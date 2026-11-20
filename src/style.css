@@ -905,6 +905,170 @@ body {
   font-weight: 600;
 }
 
+.hud-mp-always-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 10px;
+  border-bottom: 1px solid #26303b;
+  background: rgba(24, 31, 39, 0.72);
+  font-size: 10.5px;
+  color: #a9b4c0;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-mp-always-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+
+.hud-mp-always-metrics strong {
+  color: #e6e1d4;
+}
+
+.hud-mp-always-buildings {
+  font-size: 10px;
+  color: #97b5c9;
+}
+
+.hud-insp-constr,
+.hud-bm-constr {
+  padding: 3px 6px;
+  font-size: 10.5px;
+  border-radius: 3px;
+  background: rgba(44, 82, 102, 0.34);
+  border: 1px solid #44748c;
+  color: #a7d9ee;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-insp-sub {
+  font-size: 10px;
+  color: #98a9b8;
+}
+
+.hud-insp-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.hud-build-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-batch-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.hud-batch-btn {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-building-popover {
+  position: fixed;
+  z-index: 42;
+  width: 256px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.52);
+}
+
+.hud-bm-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #adb8c4;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-bm-meta strong {
+  color: #e9e4d7;
+}
+
+.hud-bm-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8f9ba7;
+}
+
+.hud-bm-stack-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.hud-bm-stack-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 4px 7px;
+  gap: 1px;
+}
+
+.hud-bm-stack-lbl {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hud-bm-stack-cost {
+  font-size: 9.5px;
+  color: #a6b2bd;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-bm-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 4px;
+  border-top: 1px solid #2b3642;
+}
+
+.hud-target-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-color: #546677;
+}
+
+.hud-target-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ebd79a;
+}
+
+.hud-target-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-btn-full-attack {
+  background: #662d28;
+  border-color: #a34d45;
+  color: #f4dad6;
+}
+
+.hud-btn-full-attack:hover {
+  background: #7c3630;
+  border-color: #c25c53;
+}
+
 .hidden {
   display: none !important;
 }
