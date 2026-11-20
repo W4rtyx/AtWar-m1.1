@@ -1,10 +1,25 @@
-import { GameState, PlayerState, TerrainType } from './types';
+import {
+  DiplomaticRelation,
+  GameState,
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  PlayerState,
+  Point,
+  TerrainType,
+  WILDERNESS_OWNER,
+  getRelationKey,
+} from './types';
 
 export const PLAINS_SPEED = 1.0;
 export const MOUNTAINS_SPEED = 0.35;
 
-const WILDERNESS_BASE_COST = 1.4;
-const ENEMY_BASE_COST = 3.2;
+export const MAX_ARROW_PATH_LENGTH = 250;
+export const MIN_ACTIVE_ORDER_MANPOWER = 5;
+export const MAX_ORDER_TICKS = 110;
+export const MAX_STAGNANT_TICKS = 12;
+
+const WILDERNESS_BASE_COST = 0.62;
+const ENEMY_BORDER_BASE_COST = 3.2;
 
 const NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
@@ -23,6 +38,209 @@ const CARDINAL_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [0, 1],
   [0, -1],
 ];
+
+export function getRelation(
+  state: GameState,
+  a: number,
+  b: number,
+): DiplomaticRelation {
+  if (a === b || a < 0 || b < 0) {
+    return 'NEUTRAL';
+  }
+  return state.relations.get(getRelationKey(a, b)) ?? 'NEUTRAL';
+}
+
+export function canAttackOwner(
+  state: GameState,
+  attackerId: number,
+  targetOwner: number,
+): boolean {
+  if (targetOwner === WILDERNESS_OWNER) {
+    return true;
+  }
+  if (targetOwner === attackerId || targetOwner < 0) {
+    return false;
+  }
+  return getRelation(state, attackerId, targetOwner) === 'WAR';
+}
+
+export function computePolylineLength(points: ReadonlyArray<Point>): number {
+  let len = 0;
+  for (let i = 1; i < points.length; i++) {
+    len += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  return len;
+}
+
+export function clampPolylineLength(
+  points: ReadonlyArray<Point>,
+  maxLength: number,
+): Point[] {
+  if (points.length === 0) return [];
+  const out: Point[] = [{ x: points[0].x, y: points[0].y }];
+  let accum = 0;
+
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const segLen = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+    if (segLen < 1e-6) continue;
+
+    if (accum + segLen >= maxLength) {
+      const remain = maxLength - accum;
+      const t = remain / segLen;
+      out.push({
+        x: prev.x + (curr.x - prev.x) * t,
+        y: prev.y + (curr.y - prev.y) * t,
+      });
+      break;
+    }
+
+    out.push({ x: curr.x, y: curr.y });
+    accum += segLen;
+  }
+
+  return out;
+}
+
+function perpDistToLine(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-8) {
+    return Math.hypot(p.x - a.x, p.y - a.y);
+  }
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+export function simplifyWaypointsRDP(
+  points: ReadonlyArray<Point>,
+  epsilon: number,
+): Point[] {
+  if (points.length <= 2) {
+    return points.map((p) => ({ x: p.x, y: p.y }));
+  }
+
+  let maxDist = 0;
+  let index = 0;
+  const first = points[0];
+  const last = points[points.length - 1];
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = perpDistToLine(points[i], first, last);
+    if (d > maxDist) {
+      maxDist = d;
+      index = i;
+    }
+  }
+
+  if (maxDist > epsilon) {
+    const left = simplifyWaypointsRDP(points.slice(0, index + 1), epsilon);
+    const right = simplifyWaypointsRDP(points.slice(index), epsilon);
+    return left.slice(0, left.length - 1).concat(right);
+  }
+
+  return [
+    { x: first.x, y: first.y },
+    { x: last.x, y: last.y },
+  ];
+}
+
+function resamplePolyline(points: ReadonlyArray<Point>, targetCount: number): Point[] {
+  if (points.length <= 1 || targetCount <= 1) {
+    return points.map((p) => ({ x: p.x, y: p.y }));
+  }
+  const totalLen = computePolylineLength(points);
+  if (totalLen < 1e-4) {
+    return [{ x: points[0].x, y: points[0].y }];
+  }
+
+  const cum: number[] = [0];
+  for (let i = 1; i < points.length; i++) {
+    cum.push(
+      cum[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y),
+    );
+  }
+
+  const result: Point[] = [];
+  let seg = 0;
+  for (let k = 0; k < targetCount; k++) {
+    const targetDist = (k / (targetCount - 1)) * totalLen;
+    while (seg < cum.length - 2 && cum[seg + 1] < targetDist) {
+      seg++;
+    }
+    const segStart = cum[seg];
+    const segEnd = cum[seg + 1];
+    const span = segEnd - segStart;
+    const t = span > 1e-6 ? (targetDist - segStart) / span : 0;
+    result.push({
+      x: points[seg].x + (points[seg + 1].x - points[seg].x) * t,
+      y: points[seg].y + (points[seg + 1].y - points[seg].y) * t,
+    });
+  }
+  return result;
+}
+
+function clampPointToMap(p: Point): Point {
+  return {
+    x: Math.max(0, Math.min(MAP_WIDTH - 1, p.x)),
+    y: Math.max(0, Math.min(MAP_HEIGHT - 1, p.y)),
+  };
+}
+
+/**
+ * Simplifies raw mouse drag points via Ramer-Douglas-Peucker into 4..10 smooth control points,
+ * optionally applying a perpendicular arc bend offset and clamping total length.
+ */
+export function buildSmoothAttackWaypoints(
+  rawPoints: ReadonlyArray<Point>,
+  bendOffset = 0,
+): Point[] {
+  if (rawPoints.length < 2) {
+    return rawPoints.map(clampPointToMap);
+  }
+
+  const clampedInput = clampPolylineLength(rawPoints, MAX_ARROW_PATH_LENGTH);
+  let simplified = simplifyWaypointsRDP(clampedInput, 3.5);
+
+  if (simplified.length > 10) {
+    let eps = 6.0;
+    while (simplified.length > 10 && eps < 40) {
+      simplified = simplifyWaypointsRDP(clampedInput, eps);
+      eps += 2.5;
+    }
+  }
+
+  if (simplified.length > 10) {
+    simplified = resamplePolyline(simplified, 8);
+  } else if (simplified.length < 4) {
+    simplified = resamplePolyline(simplified, 5);
+  }
+
+  if (Math.abs(bendOffset) > 0.25 && simplified.length >= 3) {
+    const start = simplified[0];
+    const end = simplified[simplified.length - 1];
+    const chordX = end.x - start.x;
+    const chordY = end.y - start.y;
+    const chordLen = Math.hypot(chordX, chordY);
+    if (chordLen > 2) {
+      const nx = -chordY / chordLen;
+      const ny = chordX / chordLen;
+      simplified = simplified.map((pt, idx) => {
+        const t = idx / (simplified.length - 1);
+        const weight = Math.sin(Math.PI * t);
+        return {
+          x: pt.x + nx * bendOffset * weight,
+          y: pt.y + ny * bendOffset * weight,
+        };
+      });
+    }
+  }
+
+  const bounded = simplified.map(clampPointToMap);
+  return clampPolylineLength(bounded, MAX_ARROW_PATH_LENGTH);
+}
 
 export function isBorderCell(
   state: GameState,
@@ -88,7 +306,7 @@ export function claimInitialTerritory(
     centerY < 0 ||
     centerY >= height ||
     terrain[startIdx] === TerrainType.WATER ||
-    owners[startIdx] !== 0
+    owners[startIdx] !== WILDERNESS_OWNER
   ) {
     return 0;
   }
@@ -114,7 +332,9 @@ export function claimInitialTerritory(
       if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
       const nIdx = ny * width + nx;
       if (visited[nIdx]) continue;
-      if (terrain[nIdx] === TerrainType.WATER || owners[nIdx] !== 0) continue;
+      if (terrain[nIdx] === TerrainType.WATER || owners[nIdx] !== WILDERNESS_OWNER) {
+        continue;
+      }
       const distSq = (nx - centerX) * (nx - centerX) + (ny - centerY) * (ny - centerY);
       if (distSq <= rSq) {
         visited[nIdx] = 1;
@@ -131,6 +351,8 @@ export function claimInitialTerritory(
 
 interface ExpansionCandidate {
   readonly idx: number;
+  readonly nx: number;
+  readonly ny: number;
   readonly score: number;
 }
 
@@ -139,7 +361,49 @@ interface ExpandableOrder {
   manpowerCommitted: number;
   manpowerRemaining: number;
   ticksRemaining: number;
+  stagnantTicks: number;
   mountainAccum: number;
+}
+
+function computeCellCaptureCost(
+  state: GameState,
+  nx: number,
+  ny: number,
+  cellTerrain: TerrainType,
+  prevOwner: number,
+): { readonly effectiveCost: number; readonly defenderLoss: number; readonly isForeign: boolean } {
+  const terrainFactor = cellTerrain === TerrainType.MOUNTAINS ? 1 / MOUNTAINS_SPEED : 1 / PLAINS_SPEED;
+
+  if (prevOwner === WILDERNESS_OWNER) {
+    return {
+      effectiveCost: WILDERNESS_BASE_COST * terrainFactor,
+      defenderLoss: 0,
+      isForeign: false,
+    };
+  }
+
+  const defender = state.players.get(prevOwner);
+  const defenderRatio = defender
+    ? defender.manpower / Math.max(100, defender.maxManpower)
+    : 0;
+  const defenderStrength = 0.75 + 0.85 * Math.min(1, defenderRatio / 0.55);
+  const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
+  const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
+
+  let effectiveCost =
+    ENEMY_BORDER_BASE_COST * defenderStrength * cohesionFactor * terrainFactor;
+  let defenderLoss = ENEMY_BORDER_BASE_COST * 0.72 * cohesionFactor;
+
+  if (defender && defender.betrayalDebuffTicks > 0) {
+    effectiveCost *= 0.65;
+    defenderLoss *= 1.4;
+  }
+
+  return {
+    effectiveCost,
+    defenderLoss,
+    isForeign: true,
+  };
 }
 
 function applyExpansionCandidates(
@@ -156,18 +420,18 @@ function applyExpansionCandidates(
 
   const tickBudget = Math.min(
     order.manpowerRemaining,
-    Math.max(2.6, order.manpowerCommitted * 0.13),
+    Math.max(4.5, order.manpowerCommitted * 0.16),
   );
   let budgetSpent = 0;
   let anyClaimed = false;
 
   for (const cand of candidates) {
-    if (order.manpowerRemaining < WILDERNESS_BASE_COST) {
+    if (order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER) {
       break;
     }
 
     const prevOwner = state.owners[cand.idx];
-    if (prevOwner === order.playerId) {
+    if (!canAttackOwner(state, order.playerId, prevOwner)) {
       continue;
     }
 
@@ -176,17 +440,36 @@ function applyExpansionCandidates(
       continue;
     }
 
-    const baseCost = prevOwner === 0 ? WILDERNESS_BASE_COST : ENEMY_BASE_COST;
-    const terrainSpeed =
-      cellTerrain === TerrainType.MOUNTAINS ? MOUNTAINS_SPEED : PLAINS_SPEED;
-    const effectiveCost = baseCost / terrainSpeed;
+    const { effectiveCost, defenderLoss, isForeign } = computeCellCaptureCost(
+      state,
+      cand.nx,
+      cand.ny,
+      cellTerrain,
+      prevOwner,
+    );
 
     if (budgetSpent + effectiveCost > tickBudget) {
-      // Allow mountain accumulation when the remaining tick budget can't cover a full mountain step
-      if (cellTerrain === TerrainType.MOUNTAINS && budgetSpent === 0) {
+      if (budgetSpent === 0 && (cellTerrain === TerrainType.MOUNTAINS || isForeign)) {
         const stepCharge = Math.min(tickBudget, order.manpowerRemaining);
         order.mountainAccum += stepCharge;
-        if (order.mountainAccum >= effectiveCost && order.manpowerRemaining >= effectiveCost) {
+
+        if (isForeign) {
+          const skirmishAttackerLoss = Math.min(order.manpowerRemaining, stepCharge * 0.35);
+          order.manpowerRemaining -= skirmishAttackerLoss;
+          const defender = state.players.get(prevOwner);
+          if (defender && defender.alive) {
+            const betrayalMul = defender.betrayalDebuffTicks > 0 ? 1.4 : 1.0;
+            defender.manpower = Math.max(
+              0,
+              defender.manpower - stepCharge * 0.25 * betrayalMul,
+            );
+          }
+        }
+
+        if (
+          order.mountainAccum >= effectiveCost &&
+          order.manpowerRemaining >= effectiveCost
+        ) {
           order.mountainAccum -= effectiveCost;
         } else {
           break;
@@ -205,10 +488,10 @@ function applyExpansionCandidates(
     budgetSpent += effectiveCost;
     anyClaimed = true;
 
-    if (prevOwner > 0) {
+    if (isForeign) {
       const defender: PlayerState | undefined = state.players.get(prevOwner);
       if (defender && defender.alive) {
-        defender.manpower = Math.max(0, defender.manpower - 0.85);
+        defender.manpower = Math.max(0, defender.manpower - defenderLoss);
       }
     }
 
@@ -218,6 +501,59 @@ function applyExpansionCandidates(
   }
 
   return anyClaimed;
+}
+
+interface CurveProjection {
+  readonly arcDist: number;
+  readonly perpDist: number;
+  readonly tanX: number;
+  readonly tanY: number;
+}
+
+function projectPointOntoWaypoints(
+  px: number,
+  py: number,
+  waypoints: ReadonlyArray<Point>,
+  cumDist: ReadonlyArray<number>,
+): CurveProjection {
+  let bestPerp = Infinity;
+  let bestArc = 0;
+  let bestTanX = 1;
+  let bestTanY = 0;
+
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const a = waypoints[i];
+    const b = waypoints[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-8) continue;
+    const len = Math.sqrt(lenSq);
+    const t = Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / lenSq));
+    const projX = a.x + t * dx;
+    const projY = a.y + t * dy;
+    const dist = Math.hypot(px - projX, py - projY);
+
+    if (dist < bestPerp) {
+      bestPerp = dist;
+      bestArc = cumDist[i] + t * len;
+      bestTanX = dx / len;
+      bestTanY = dy / len;
+    }
+  }
+
+  return {
+    arcDist: bestArc,
+    perpDist: bestPerp,
+    tanX: bestTanX,
+    tanY: bestTanY,
+  };
+}
+
+function refundRemainingManpower(player: PlayerState, remaining: number): void {
+  if (remaining > 0) {
+    player.manpower = Math.min(player.maxManpower, player.manpower + remaining);
+  }
 }
 
 function stepAttackOrders(state: GameState): boolean {
@@ -231,28 +567,80 @@ function stepAttackOrders(state: GameState): boolean {
       continue;
     }
 
+    if (order.waypoints.length < 2) {
+      refundRemainingManpower(player, order.manpowerRemaining);
+      continue;
+    }
+
     order.ticksRemaining--;
-    const arrowLength = Math.hypot(order.toX - order.fromX, order.toY - order.fromY);
-    const maxProj = Math.max(arrowLength + 28, 44);
-    const halfCorridor = Math.max(12, Math.min(20, arrowLength * 0.35));
 
-    const candidateBestScore = new Map<number, number>();
+    const cumDist: number[] = [0];
+    for (let i = 1; i < order.waypoints.length; i++) {
+      cumDist.push(
+        cumDist[i - 1] +
+          Math.hypot(
+            order.waypoints[i].x - order.waypoints[i - 1].x,
+            order.waypoints[i].y - order.waypoints[i - 1].y,
+          ),
+      );
+    }
+    const totalLen = cumDist[cumDist.length - 1];
+    order.totalPathLength = totalLen;
 
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
+    const halfCorridor = 11;
+    const scanPad = halfCorridor + 6;
+
+    let minX = width - 1;
+    let maxX = 0;
+    let minY = height - 1;
+    let maxY = 0;
+    for (const wp of order.waypoints) {
+      minX = Math.min(minX, Math.floor(wp.x - scanPad));
+      maxX = Math.max(maxX, Math.ceil(wp.x + scanPad));
+      minY = Math.min(minY, Math.floor(wp.y - scanPad));
+      maxY = Math.max(maxY, Math.ceil(wp.y + scanPad));
+    }
+    minX = Math.max(0, minX);
+    maxX = Math.min(width - 1, maxX);
+    minY = Math.max(0, minY);
+    maxY = Math.min(height - 1, maxY);
+
+    // Pass 1: find furthest point along the curve currently reached by owned territory
+    let maxOwnedArc = 0;
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (owners[y * width + x] !== order.playerId) continue;
+        const proj = projectPointOntoWaypoints(x + 0.5, y + 0.5, order.waypoints, cumDist);
+        if (proj.perpDist <= halfCorridor * 0.75 && proj.arcDist > maxOwnedArc) {
+          maxOwnedArc = proj.arcDist;
+        }
+      }
+    }
+
+    const rawProgress = totalLen > 0 ? Math.min(1, maxOwnedArc / totalLen) : 1;
+    order.segmentProgress = Math.max(order.segmentProgress, rawProgress);
+    let segIdx = 0;
+    while (segIdx < cumDist.length - 2 && cumDist[segIdx + 1] < maxOwnedArc) {
+      segIdx++;
+    }
+    order.currentSegmentIndex = segIdx;
+
+    const activeMinArc = Math.max(0, maxOwnedArc - 16);
+    const activeMaxArc = Math.min(totalLen + 8, maxOwnedArc + 16);
+    const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
+
+    // Pass 2: gather strictly bounded expansion targets along the active curve segment
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
         const idx = y * width + x;
-        if (owners[idx] !== order.playerId) {
-          continue;
-        }
+        if (owners[idx] !== order.playerId) continue;
 
-        const relX = x - order.fromX;
-        const relY = y - order.fromY;
-        const proj = relX * order.dirX + relY * order.dirY;
-        if (proj < -6 || proj > maxProj) {
-          continue;
-        }
-        const perp = Math.abs(relX * -order.dirY + relY * order.dirX);
-        if (perp > halfCorridor) {
+        const proj = projectPointOntoWaypoints(x + 0.5, y + 0.5, order.waypoints, cumDist);
+        if (
+          proj.perpDist > halfCorridor ||
+          proj.arcDist < activeMinArc ||
+          proj.arcDist > activeMaxArc
+        ) {
           continue;
         }
 
@@ -261,46 +649,73 @@ function stepAttackOrders(state: GameState): boolean {
           const ny = y + dy;
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
           const nIdx = ny * width + nx;
-          if (terrain[nIdx] === TerrainType.WATER || owners[nIdx] === order.playerId) {
+          const nOwner = owners[nIdx];
+          if (terrain[nIdx] === TerrainType.WATER || !canAttackOwner(state, order.playerId, nOwner)) {
+            continue;
+          }
+
+          const nProj = projectPointOntoWaypoints(
+            nx + 0.5,
+            ny + 0.5,
+            order.waypoints,
+            cumDist,
+          );
+          if (
+            nProj.perpDist > halfCorridor ||
+            nProj.arcDist < activeMinArc - 2 ||
+            nProj.arcDist > totalLen + 6
+          ) {
             continue;
           }
 
           const stepLen = Math.hypot(dx, dy);
-          const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
-          if (dot < -0.15) {
+          const dot = (dx * nProj.tanX + dy * nProj.tanY) / stepLen;
+          if (dot < 0.25) {
             continue;
           }
 
-          const nRelX = nx - order.fromX;
-          const nRelY = ny - order.fromY;
-          const nPerp = Math.abs(nRelX * -order.dirY + nRelY * order.dirX);
           const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
-          const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.45 : 0;
-          const score = dot * 3.0 - nPerp * 0.12 + friendly * 0.45 + terrainBonus;
+          const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
+          const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.25;
+          const arcLeadBonus = Math.min(1.5, Math.max(-0.5, (nProj.arcDist - maxOwnedArc) * 0.06));
+          const score =
+            dot * 3.0 -
+            nProj.perpDist * 0.16 +
+            friendly * 0.45 +
+            arcLeadBonus +
+            terrainBonus +
+            wildernessBonus;
 
-          const existingScore = candidateBestScore.get(nIdx);
-          if (existingScore === undefined || score > existingScore) {
-            candidateBestScore.set(nIdx, score);
+          const existing = candidateBestScore.get(nIdx);
+          if (!existing || score > existing.score) {
+            candidateBestScore.set(nIdx, { nx, ny, score });
           }
         }
       }
     }
 
     const candidates: ExpansionCandidate[] = [];
-    for (const [idx, score] of candidateBestScore) {
-      candidates.push({ idx, score });
+    for (const [idx, val] of candidateBestScore) {
+      candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
     const claimed = applyExpansionCandidates(state, order, candidates);
     if (claimed) {
       mapChanged = true;
+      order.stagnantTicks = 0;
+    } else {
+      order.stagnantTicks++;
     }
 
-    if (
-      order.manpowerRemaining >= WILDERNESS_BASE_COST &&
-      order.ticksRemaining > 0 &&
-      candidates.length > 0
-    ) {
+    const shouldTerminate =
+      order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER ||
+      order.ticksRemaining <= 0 ||
+      order.stagnantTicks >= MAX_STAGNANT_TICKS ||
+      candidates.length === 0;
+
+    if (shouldTerminate) {
+      refundRemainingManpower(player, order.manpowerRemaining);
+    } else {
       remainingOrders.push(order);
     }
   }
@@ -322,7 +737,7 @@ function stepFrontPushOrders(state: GameState): boolean {
 
     order.ticksRemaining--;
     const activeFrontierSet = new Set<number>();
-    const candidateBestScore = new Map<number, number>();
+    const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
 
     for (const cellIdx of order.frontierCells) {
       if (cellIdx < 0 || cellIdx >= width * height) continue;
@@ -337,24 +752,26 @@ function stepFrontPushOrders(state: GameState): boolean {
         const ny = y + dy;
         if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
         const nIdx = ny * width + nx;
-        if (terrain[nIdx] === TerrainType.WATER || owners[nIdx] === order.playerId) {
+        const nOwner = owners[nIdx];
+        if (terrain[nIdx] === TerrainType.WATER || !canAttackOwner(state, order.playerId, nOwner)) {
           continue;
         }
 
         hasTarget = true;
         const stepLen = Math.hypot(dx, dy);
         const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
-        if (dot < 0.2) {
+        if (dot < 0.25) {
           continue;
         }
 
         const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
-        const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.45 : 0;
-        const score = dot * 2.6 + friendly * 0.5 + terrainBonus;
+        const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
+        const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.2;
+        const score = dot * 2.6 + friendly * 0.5 + terrainBonus + wildernessBonus;
 
-        const existingScore = candidateBestScore.get(nIdx);
-        if (existingScore === undefined || score > existingScore) {
-          candidateBestScore.set(nIdx, score);
+        const existing = candidateBestScore.get(nIdx);
+        if (!existing || score > existing.score) {
+          candidateBestScore.set(nIdx, { nx, ny, score });
         }
       }
 
@@ -364,8 +781,8 @@ function stepFrontPushOrders(state: GameState): boolean {
     }
 
     const candidates: ExpansionCandidate[] = [];
-    for (const [idx, score] of candidateBestScore) {
-      candidates.push({ idx, score });
+    for (const [idx, val] of candidateBestScore) {
+      candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
     const claimed = applyExpansionCandidates(state, order, candidates, (claimedIdx) => {
@@ -373,16 +790,23 @@ function stepFrontPushOrders(state: GameState): boolean {
     });
     if (claimed) {
       mapChanged = true;
+      order.stagnantTicks = 0;
+    } else {
+      order.stagnantTicks++;
     }
 
     order.frontierCells = Array.from(activeFrontierSet);
 
-    if (
-      order.manpowerRemaining >= WILDERNESS_BASE_COST &&
-      order.ticksRemaining > 0 &&
-      order.frontierCells.length > 0 &&
-      candidates.length > 0
-    ) {
+    const shouldTerminate =
+      order.manpowerRemaining < MIN_ACTIVE_ORDER_MANPOWER ||
+      order.ticksRemaining <= 0 ||
+      order.stagnantTicks >= MAX_STAGNANT_TICKS ||
+      order.frontierCells.length === 0 ||
+      candidates.length === 0;
+
+    if (shouldTerminate) {
+      refundRemainingManpower(player, order.manpowerRemaining);
+    } else {
       remainingOrders.push(order);
     }
   }

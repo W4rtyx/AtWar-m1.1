@@ -5,6 +5,7 @@ import {
   ResourceZonePublic,
   ResourceZoneSecret,
   TerrainType,
+  WILDERNESS_OWNER,
 } from './types';
 
 export interface GeneratedEuropeMap {
@@ -34,10 +35,10 @@ type LonLat = readonly [number, number];
 type GridPoint = readonly [number, number];
 
 function geoToGrid(lon: number, lat: number): GridPoint {
-  // Smooth latitude compression above 61°N so Scandinavia fits cleanly in 220px height
+  // Smooth latitude compression above 61°N so Scandinavia fits cleanly in 500px height
   const effectiveLat = lat > 61 ? 61 + (lat - 61) * 0.72 : lat;
-  const x = 10 + (lon + 11.0) * 5.56;
-  const y = 212 - (effectiveLat - 35.5) * 6.08;
+  const x = 22 + (lon + 11.0) * 12.52;
+  const y = 482 - (effectiveLat - 35.5) * 13.82;
   return [x, y];
 }
 
@@ -89,284 +90,352 @@ function distToPolyline(px: number, py: number, line: ReadonlyArray<GridPoint>):
   return minDist;
 }
 
-// Continental Europe, peninsulas, and major islands in [lon, lat] degrees
+// High-detail Europe landmass polygons in [lon, lat] degrees
 const MAINLAND_EUROPE_POLY = toGridPolygon([
-  // Iberia SW -> NW -> Pyrenees -> France Atlantic
-  [-9.3, 37.0],
-  [-9.5, 38.7],
-  [-8.9, 41.2],
+  // Iberia SW -> Portugal -> Galicia -> Bay of Biscay
+  [-8.9, 37.0],
+  [-9.1, 38.4],
+  [-9.5, 38.8],
+  [-9.1, 40.1],
+  [-8.8, 41.5],
   [-9.3, 42.9],
-  [-7.5, 43.7],
-  [-4.0, 43.5],
+  [-8.2, 43.7],
+  [-5.8, 43.6],
+  [-3.2, 43.4],
   [-1.7, 43.4],
-  [-1.3, 45.6],
-  [-2.2, 47.2],
-  [-4.6, 48.4],
-  [-1.8, 48.7],
+  // France Atlantic, Brittany, Normandy, Picardy
+  [-1.4, 44.8],
+  [-1.2, 46.2],
+  [-2.3, 47.3],
+  [-4.6, 48.2],
+  [-4.7, 48.6],
+  [-3.1, 48.8],
+  [-1.7, 48.6],
   [-1.9, 49.7],
-  [0.2, 49.5],
-  [1.9, 50.9],
-  [3.4, 51.4],
-  // Low Countries & German North Sea coast
+  [-0.9, 49.4],
+  [0.1, 49.5],
+  [1.6, 50.8],
+  [2.1, 51.0],
+  // Flanders, Netherlands, German North Sea & Jutland
+  [3.5, 51.4],
+  [4.3, 52.1],
   [4.8, 53.0],
-  [7.0, 53.4],
-  [8.6, 54.0],
-  // Jutland (Denmark)
-  [8.1, 55.6],
-  [8.2, 57.0],
-  [10.5, 57.7],
-  [10.6, 56.5],
-  [10.0, 55.4],
-  [9.8, 54.4],
-  // Baltic coast (Germany, Poland, Baltics, Gulf of Finland)
-  [11.2, 54.1],
-  [14.0, 53.9],
-  [16.5, 54.5],
+  [6.1, 53.4],
+  [7.3, 53.5],
+  [8.6, 53.9],
+  [8.5, 55.1],
+  [8.1, 56.1],
+  [8.3, 57.1],
+  [9.5, 57.5],
+  [10.6, 57.7],
+  [10.5, 56.8],
+  [10.8, 56.4],
+  [10.1, 55.8],
+  [9.8, 54.6],
+  // Mecklenburg, Pomerania, Gdansk Bay, Baltics, Gulf of Riga, Estonia
+  [10.9, 54.0],
+  [12.3, 54.4],
+  [13.8, 53.9],
+  [15.4, 54.2],
+  [17.2, 54.7],
   [18.7, 54.7],
-  [19.5, 54.4],
-  [21.0, 55.7],
-  [21.6, 57.6],
-  [22.6, 57.7],
-  [24.1, 57.1],
+  [19.1, 54.4],
+  [20.2, 54.6],
+  [21.1, 55.6],
+  [21.1, 56.8],
+  [21.9, 57.6],
+  [22.7, 57.7],
+  [23.3, 57.1],
+  [24.2, 57.0],
   [24.4, 58.3],
-  [23.5, 59.1],
-  [25.5, 59.5],
-  [28.0, 59.5],
-  [29.8, 60.0],
-  // Karelia, Kola & Eastern Arctic edge
-  [28.6, 60.7],
-  [27.2, 60.5],
-  [24.6, 60.1],
-  [22.2, 60.1],
-  [21.2, 61.3],
-  [21.6, 63.1],
-  [24.5, 65.0],
+  [23.6, 59.1],
+  [24.8, 59.5],
+  [27.0, 59.5],
+  [28.5, 59.5],
+  [30.1, 59.9],
+  // Karelian Isthmus, Finnish Coast, Gulf of Bothnia
+  [29.5, 60.4],
+  [27.8, 60.5],
+  [25.2, 60.2],
+  [22.8, 59.9],
+  [21.4, 60.7],
+  [21.2, 62.1],
+  [21.6, 63.2],
+  [23.2, 64.2],
+  [24.9, 65.2],
   [25.3, 65.8],
-  [23.8, 65.8],
-  [21.8, 65.4],
-  [21.3, 64.5],
-  [19.5, 63.5],
-  [17.8, 62.3],
-  [17.5, 60.6],
-  [18.8, 60.0],
+  [23.9, 65.8],
+  [22.0, 65.5],
+  [21.4, 64.6],
+  [19.8, 63.6],
+  [18.1, 62.5],
+  [17.3, 61.3],
+  [17.7, 60.5],
+  [18.9, 60.1],
   [18.1, 59.3],
-  [16.6, 57.8],
+  [16.8, 58.2],
+  [16.4, 56.8],
   [15.6, 56.1],
-  [13.8, 55.4],
-  [12.8, 55.9],
-  [12.0, 57.5],
-  [11.1, 59.1],
-  [10.4, 59.7],
-  [9.3, 58.9],
-  [7.1, 58.0],
-  [5.4, 59.1],
-  [5.0, 60.8],
-  [5.6, 62.3],
-  [8.4, 63.6],
-  [10.8, 64.9],
-  [12.8, 66.8],
-  [15.4, 68.4],
-  [18.8, 69.8],
-  [23.5, 70.6],
-  [26.2, 71.1],
-  [29.8, 70.8],
-  [31.5, 69.8],
-  [35.2, 69.1],
-  [40.8, 67.6],
-  [41.5, 66.2],
-  [37.2, 66.2],
-  [34.8, 66.9],
-  [36.5, 65.0],
-  [39.5, 64.5],
-  [44.8, 66.2],
-  // Eastern border down to Black Sea / Azov / Caucasus
-  [45.5, 44.0],
-  [40.0, 43.4],
-  [38.5, 45.1],
-  [39.3, 47.1],
-  [37.5, 47.0],
-  [35.2, 46.2],
-  [35.8, 45.3],
-  [36.4, 45.2],
-  [34.8, 44.6],
-  [33.5, 44.4],
-  [33.0, 45.4],
-  [33.5, 46.1],
-  [31.6, 46.6],
-  [30.2, 46.0],
-  [28.6, 44.5],
-  [27.8, 43.0],
-  [28.0, 41.9],
+  [14.2, 55.4],
+  [13.0, 55.4],
+  [12.7, 56.1],
+  [12.0, 57.4],
+  [11.2, 58.9],
+  // Oslo Fjord & Norwegian Coast -> Lofoten -> North Cape -> Kola
+  [10.7, 59.8],
+  [9.8, 59.0],
+  [8.1, 58.1],
+  [6.6, 58.1],
+  [5.4, 59.2],
+  [5.0, 60.5],
+  [5.2, 61.8],
+  [6.4, 62.7],
+  [8.6, 63.7],
+  [10.8, 64.8],
+  [12.4, 66.2],
+  [14.2, 67.5],
+  [15.8, 68.5],
+  [17.9, 69.5],
+  [20.8, 70.2],
+  [23.8, 70.7],
+  [26.0, 71.1],
+  [29.2, 70.9],
+  [31.2, 70.0],
+  [33.4, 69.4],
+  [36.5, 69.0],
+  [40.2, 68.0],
+  [41.4, 66.9],
+  [39.5, 66.1],
+  [36.5, 66.2],
+  [34.5, 66.9],
+  [36.2, 65.2],
+  [39.8, 64.5],
+  [41.8, 65.5],
+  [45.5, 66.4],
+  // Eastern Europe boundary down to Caucasus, Azov, Black Sea
+  [46.0, 43.2],
+  [41.2, 43.3],
+  [39.3, 44.1],
+  [37.5, 44.8],
+  [38.4, 45.4],
+  [39.3, 47.0],
+  [38.0, 47.1],
+  [36.2, 46.6],
+  [34.9, 46.1],
+  [35.6, 45.4],
+  [36.4, 45.3],
+  [35.2, 44.8],
+  [33.7, 44.4],
+  [32.9, 45.4],
+  [33.6, 46.1],
+  [32.1, 46.6],
+  [30.5, 46.2],
+  [29.4, 45.1],
+  [28.6, 44.1],
+  [27.9, 43.1],
+  [27.7, 42.3],
+  [28.1, 41.7],
   [29.1, 41.2],
-  // Thrace, Aegean, Greece & Peloponnese
+  // Thrace, Aegean, Chalkidiki, Greece, Peloponnese
   [26.8, 40.6],
-  [25.6, 40.8],
-  [24.0, 40.2],
-  [22.8, 40.5],
-  [23.4, 39.1],
-  [24.0, 38.0],
-  [23.4, 37.8],
-  [22.5, 38.2],
-  [22.8, 36.7],
+  [25.6, 40.9],
+  [24.0, 40.4],
+  [23.7, 39.9],
+  [22.8, 40.4],
+  [23.0, 39.5],
+  [24.0, 38.2],
+  [23.7, 37.7],
+  [22.9, 37.9],
+  [23.3, 37.4],
+  [22.8, 36.6],
+  [22.1, 36.8],
   [21.6, 36.8],
-  [21.3, 38.0],
-  [20.2, 39.6],
-  // Dalmatia & Adriatic
-  [19.4, 41.4],
-  [18.6, 42.3],
-  [16.2, 43.6],
-  [14.7, 45.0],
-  [13.6, 45.5],
-  [12.3, 45.3],
-  // Italy boot
+  [21.2, 37.9],
+  [20.7, 38.8],
+  [20.1, 39.7],
+  // Albania, Dalmatia, Istria, Venice Lagoon
+  [19.4, 40.9],
+  [19.2, 41.9],
+  [17.5, 42.8],
+  [16.0, 43.6],
+  [14.8, 44.8],
+  [13.9, 44.8],
+  [13.6, 45.6],
+  [12.4, 45.4],
+  // Italy East Coast -> Gargano -> Apulia -> Calabria -> Naples -> Liguria
+  [12.3, 44.8],
   [12.6, 44.0],
-  [14.2, 42.4],
+  [13.8, 43.2],
+  [14.6, 42.1],
   [16.1, 41.9],
-  [16.5, 41.2],
+  [16.0, 41.5],
+  [17.3, 40.9],
   [18.4, 40.1],
   [18.1, 39.8],
-  [17.0, 40.4],
-  [16.7, 39.4],
-  [17.1, 38.9],
-  [16.1, 37.9],
-  [15.6, 38.2],
-  [15.9, 39.4],
-  [14.3, 40.8],
-  [12.4, 41.7],
-  [10.5, 43.4],
-  [9.0, 44.4],
-  [7.6, 43.8],
-  // French Riviera, Gulf of Lion, Spanish Med & Gibraltar
-  [5.4, 43.2],
-  [3.4, 43.2],
+  [17.3, 40.4],
+  [16.6, 39.7],
+  [17.1, 39.0],
+  [16.3, 38.0],
+  [15.6, 38.1],
+  [15.9, 39.3],
+  [15.1, 40.2],
+  [14.2, 40.8],
+  [13.0, 41.3],
+  [11.8, 42.1],
+  [10.4, 43.5],
+  [9.6, 44.1],
+  [8.9, 44.4],
+  [7.7, 43.8],
+  // French Riviera, Gulf of Lion, Catalonia, Valencia, Gibraltar
+  [6.3, 43.1],
+  [5.2, 43.3],
+  [3.6, 43.3],
   [3.2, 42.3],
-  [2.1, 41.3],
-  [0.5, 40.5],
-  [-0.2, 38.9],
-  [-0.8, 37.7],
-  [-2.2, 36.7],
+  [2.2, 41.3],
+  [0.9, 40.8],
+  [0.2, 39.7],
+  [0.2, 38.7],
+  [-0.7, 37.7],
+  [-1.9, 36.8],
+  [-4.4, 36.6],
   [-5.5, 36.0],
-  [-6.4, 36.6],
-  [-7.8, 37.0],
+  [-6.2, 36.5],
+  [-7.5, 37.1],
 ]);
 
-// Gulf of Bothnia & Sea of Azov cutouts are naturally formed by the coastline loop above;
-// Water cutout for Skagerrak/Kattegat/Danish Straits so Sweden & Denmark are clearly separated
+// Water cutout for Danish Straits / Kattegat / Sound so Sweden & Denmark stay cleanly separated
 const BALTIC_STRAITS_CUTOUT = toGridPolygon([
   [10.4, 57.8],
-  [11.3, 57.6],
+  [11.4, 57.6],
   [12.6, 56.1],
   [12.8, 55.4],
   [10.8, 54.4],
-  [10.1, 55.1],
-  [10.5, 56.3],
+  [10.0, 55.0],
+  [10.5, 56.2],
 ]);
 
-// White Sea inner cutout (keep Kola peninsula crisp)
 const WHITE_SEA_CUTOUT = toGridPolygon([
-  [34.6, 66.8],
+  [34.5, 66.8],
   [37.4, 65.8],
   [39.8, 64.8],
   [38.5, 64.1],
-  [36.2, 64.6],
-  [34.5, 65.8],
+  [36.0, 64.6],
+  [34.4, 65.8],
 ]);
 
-// Great Britain (shifted ~0.6° W at Dover so English Channel water is clearly visible)
+const ZEALAND_POLY = toGridPolygon([
+  [11.1, 55.7],
+  [12.3, 56.1],
+  [12.6, 55.5],
+  [11.9, 55.0],
+  [11.2, 55.2],
+]);
+
 const GREAT_BRITAIN_POLY = toGridPolygon([
   [-5.7, 50.1],
-  [-5.2, 51.3],
-  [-4.4, 51.6],
-  [-5.2, 52.0],
+  [-4.8, 50.9],
+  [-4.2, 51.2],
+  [-3.1, 51.4],
+  [-5.2, 51.8],
   [-4.1, 52.7],
   [-4.7, 53.3],
-  [-3.1, 53.4],
-  [-3.5, 54.6],
+  [-3.2, 53.4],
+  [-3.0, 54.0],
+  [-3.6, 54.7],
   [-5.0, 54.8],
-  [-5.6, 55.8],
-  [-6.2, 56.8],
-  [-5.6, 58.2],
-  [-4.8, 58.6],
+  [-5.5, 55.7],
+  [-6.2, 56.9],
+  [-5.7, 58.3],
+  [-4.7, 58.6],
   [-3.1, 58.6],
   [-4.0, 57.6],
   [-1.9, 57.6],
-  [-2.4, 56.2],
-  [-1.6, 55.5],
+  [-2.6, 56.3],
+  [-1.5, 55.4],
   [-0.9, 54.5],
   [0.1, 53.5],
-  [1.6, 52.7],
-  [1.4, 51.9],
-  [0.9, 51.2],
-  [0.7, 51.0],
-  [-0.9, 50.7],
+  [0.4, 52.9],
+  [1.6, 52.6],
+  [1.3, 51.8],
+  [0.8, 51.1],
+  [-0.8, 50.7],
   [-2.6, 50.6],
   [-3.7, 50.2],
 ]);
 
 const IRELAND_POLY = toGridPolygon([
-  [-10.1, 51.7],
-  [-10.4, 52.6],
-  [-9.8, 53.4],
-  [-10.1, 54.2],
-  [-8.5, 54.7],
-  [-7.6, 55.3],
-  [-6.1, 55.2],
-  [-5.5, 54.4],
+  [-9.9, 51.6],
+  [-10.4, 52.3],
+  [-9.7, 53.2],
+  [-10.2, 54.0],
+  [-8.6, 54.6],
+  [-7.5, 55.3],
+  [-6.0, 55.2],
+  [-5.5, 54.3],
   [-6.1, 53.3],
   [-6.2, 52.2],
-  [-7.8, 51.8],
+  [-7.9, 51.8],
 ]);
 
 const SICILY_POLY = toGridPolygon([
-  [12.4, 37.8],
+  [12.4, 37.9],
   [14.2, 38.1],
   [15.5, 38.2],
-  [15.2, 36.8],
-  [13.6, 37.2],
+  [15.2, 36.7],
+  [13.6, 37.1],
 ]);
 
 const SARDINIA_POLY = toGridPolygon([
-  [8.2, 39.2],
-  [8.3, 40.9],
+  [8.2, 39.1],
+  [8.3, 41.0],
   [9.5, 41.2],
-  [9.7, 39.7],
-  [9.1, 39.0],
+  [9.8, 39.7],
+  [9.1, 38.9],
 ]);
 
 const CORSICA_POLY = toGridPolygon([
-  [8.6, 41.6],
+  [8.6, 41.5],
   [8.8, 42.6],
-  [9.4, 42.9],
+  [9.4, 43.0],
   [9.5, 41.7],
-  [9.1, 41.4],
+  [9.1, 41.3],
+]);
+
+const MALLORCA_POLY = toGridPolygon([
+  [2.4, 39.6],
+  [3.1, 39.9],
+  [3.4, 39.6],
+  [3.0, 39.3],
 ]);
 
 const CRETE_POLY = toGridPolygon([
-  [23.5, 35.5],
-  [25.6, 35.4],
+  [23.5, 35.6],
+  [25.4, 35.4],
   [26.3, 35.2],
-  [25.2, 35.0],
+  [25.3, 34.9],
   [23.6, 35.2],
 ]);
 
 const ANATOLIA_NW_POLY = toGridPolygon([
   [26.2, 40.0],
-  [28.5, 40.3],
+  [28.5, 40.4],
   [32.5, 41.6],
   [37.5, 41.0],
-  [42.0, 41.6],
-  [44.0, 35.5],
-  [27.2, 36.5],
-  [26.2, 38.4],
+  [42.2, 41.6],
+  [45.0, 35.4],
+  [27.0, 36.4],
+  [26.1, 38.4],
 ]);
 
 const LAND_POLYGONS: ReadonlyArray<ReadonlyArray<GridPoint>> = [
   MAINLAND_EUROPE_POLY,
+  ZEALAND_POLY,
   GREAT_BRITAIN_POLY,
   IRELAND_POLY,
   SICILY_POLY,
   SARDINIA_POLY,
   CORSICA_POLY,
+  MALLORCA_POLY,
   CRETE_POLY,
   ANATOLIA_NW_POLY,
 ];
@@ -385,76 +454,125 @@ const MOUNTAIN_RIDGES: ReadonlyArray<MountainRidge> = [
   // Alps
   {
     line: toGridPolygon([
-      [6.4, 44.3],
-      [7.1, 45.6],
+      [6.1, 44.2],
+      [7.0, 45.5],
       [9.4, 46.4],
-      [12.1, 46.8],
-      [14.8, 47.2],
+      [12.3, 46.8],
+      [15.2, 47.3],
     ]),
-    halfWidth: 4.1,
+    halfWidth: 9.0,
   },
   // Pyrenees
   {
     line: toGridPolygon([
-      [-1.5, 43.1],
+      [-1.7, 43.1],
       [0.8, 42.7],
-      [2.8, 42.4],
+      [2.9, 42.4],
     ]),
-    halfWidth: 2.8,
+    halfWidth: 6.2,
   },
   // Carpathians
   {
     line: toGridPolygon([
-      [18.5, 49.2],
-      [21.8, 49.0],
-      [24.5, 47.9],
-      [26.0, 46.2],
+      [18.3, 49.2],
+      [21.9, 49.0],
+      [24.6, 47.9],
+      [26.1, 46.2],
       [24.4, 45.4],
       [22.2, 45.3],
     ]),
-    halfWidth: 3.1,
+    halfWidth: 6.9,
   },
   // Scandinavian Mountains (Scandes)
   {
     line: toGridPolygon([
-      [7.2, 60.3],
-      [9.4, 62.2],
+      [7.1, 60.2],
+      [9.5, 62.3],
       [13.4, 65.2],
       [16.8, 67.8],
       [20.2, 69.2],
     ]),
-    halfWidth: 3.8,
+    halfWidth: 8.6,
   },
-  // Dinaric Alps & Balkan Mountains
+  // Dinaric Alps & Pindus
   {
     line: toGridPolygon([
-      [15.2, 44.8],
+      [15.1, 44.8],
       [17.8, 43.2],
       [20.2, 41.2],
       [21.6, 39.2],
     ]),
-    halfWidth: 2.3,
+    halfWidth: 5.2,
+  },
+  // Balkan / Stara Planina
+  {
+    line: toGridPolygon([
+      [22.6, 43.4],
+      [24.8, 42.8],
+      [27.1, 42.7],
+    ]),
+    halfWidth: 4.0,
   },
   // Apennines
   {
     line: toGridPolygon([
-      [9.8, 44.2],
+      [9.6, 44.2],
       [11.8, 43.4],
-      [13.6, 42.1],
-      [15.6, 40.4],
+      [13.7, 42.1],
+      [15.7, 40.3],
     ]),
-    halfWidth: 1.9,
+    halfWidth: 4.3,
   },
   // Caucasus (far SE edge)
   {
     line: toGridPolygon([
       [39.8, 44.0],
       [43.2, 43.0],
-      [45.5, 42.2],
+      [45.8, 42.1],
     ]),
-    halfWidth: 3.2,
+    halfWidth: 7.4,
   },
 ];
+
+function smoothCoastlinePass(
+  terrain: Uint8Array,
+  width: number,
+  height: number,
+): number {
+  const copy = new Uint8Array(terrain);
+  let totalLand = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      let landNeighbors = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          if (copy[ny * width + nx] !== TerrainType.WATER) {
+            landNeighbors++;
+          }
+        }
+      }
+
+      if (copy[idx] === TerrainType.WATER && landNeighbors >= 6) {
+        terrain[idx] = TerrainType.PLAINS;
+      } else if (copy[idx] !== TerrainType.WATER && landNeighbors <= 2) {
+        terrain[idx] = TerrainType.WATER;
+      }
+
+      if (terrain[idx] !== TerrainType.WATER) {
+        totalLand++;
+      }
+    }
+  }
+
+  return totalLand;
+}
 
 function generateResourceZones(
   terrain: Uint8Array,
@@ -465,23 +583,22 @@ function generateResourceZones(
   publicResourceZones: ResourceZonePublic[];
   secretResourceZones: ResourceZoneSecret[];
 } {
-  const targetZones = 9;
+  const targetZones = 20;
   const publicResourceZones: ResourceZonePublic[] = [];
   const secretResourceZones: ResourceZoneSecret[] = [];
-  const minZoneSeparation = 36;
+  const minZoneSeparation = 52;
 
   let attempts = 0;
-  while (publicResourceZones.length < targetZones && attempts < 2500) {
+  while (publicResourceZones.length < targetZones && attempts < 6000) {
     attempts++;
-    const cx = 18 + Math.floor(nextRandom(rngBox) * (width - 36));
-    const cy = 14 + Math.floor(nextRandom(rngBox) * (height - 28));
+    const cx = 28 + Math.floor(nextRandom(rngBox) * (width - 56));
+    const cy = 22 + Math.floor(nextRandom(rngBox) * (height - 44));
     if (terrain[cy * width + cx] === TerrainType.WATER) {
       continue;
     }
 
-    const radius = 11 + Math.floor(nextRandom(rngBox) * 4); // 11..14
+    const radius = 18 + Math.floor(nextRandom(rngBox) * 6); // 18..23
 
-    // Ensure sufficient spacing from other resource zones
     let tooClose = false;
     for (const existing of publicResourceZones) {
       const dist = Math.hypot(cx - existing.centerX, cy - existing.centerY);
@@ -494,14 +611,14 @@ function generateResourceZones(
       continue;
     }
 
-    // Check that >= 70% of the circle area is valid land
+    // Check that >= 55% of the circle area is valid land (allows islands and peninsulas)
     let totalInCircle = 0;
     let landInCircle = 0;
     const rSq = radius * radius;
-    for (let dy = -radius; dy <= radius; dy++) {
+    for (let dy = -radius; dy <= radius; dy += 2) {
       const ny = cy + dy;
       if (ny < 0 || ny >= height) continue;
-      for (let dx = -radius; dx <= radius; dx++) {
+      for (let dx = -radius; dx <= radius; dx += 2) {
         const nx = cx + dx;
         if (nx < 0 || nx >= width) continue;
         if (dx * dx + dy * dy <= rSq) {
@@ -512,7 +629,7 @@ function generateResourceZones(
         }
       }
     }
-    if (totalInCircle === 0 || landInCircle / totalInCircle < 0.72) {
+    if (totalInCircle === 0 || landInCircle / totalInCircle < 0.55) {
       continue;
     }
 
@@ -570,10 +687,10 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
   const height = MAP_HEIGHT;
   const terrain = new Uint8Array(width * height);
   const owners = new Int16Array(width * height);
+  owners.fill(WILDERNESS_OWNER);
   const rngBox = { rngState: seed || 133742 };
 
-  // Step 1: Rasterize land and water cutout polygons
-  let totalLandCells = 0;
+  // Step 1: Rasterize land polygons and water cutouts
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const px = x + 0.5;
@@ -596,15 +713,12 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
         }
       }
 
-      const idx = y * width + x;
-      if (isLand) {
-        terrain[idx] = TerrainType.PLAINS;
-        totalLandCells++;
-      } else {
-        terrain[idx] = TerrainType.WATER;
-      }
+      terrain[y * width + x] = isLand ? TerrainType.PLAINS : TerrainType.WATER;
     }
   }
+
+  // Smooth jagged polygon raster corners on 720x500
+  const totalLandCells = smoothCoastlinePass(terrain, width, height);
 
   // Step 2: Carve major mountain ranges on land cells
   for (let y = 0; y < height; y++) {
@@ -615,12 +729,13 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
       }
       const px = x + 0.5;
       const py = y + 0.5;
-      // Deterministic spatial wobble so ridge edges look natural rather than tubular
       const wobble =
-        Math.sin(x * 0.45 + y * 0.35) * 0.55 + Math.cos(x * 0.27 - y * 0.51) * 0.45;
+        Math.sin(x * 0.14 + y * 0.11) * 1.15 +
+        Math.cos(x * 0.08 - y * 0.16) * 0.95 +
+        Math.sin(x * 0.25 + y * 0.22) * 0.45;
       for (const ridge of MOUNTAIN_RIDGES) {
         const d = distToPolyline(px, py, ridge.line);
-        if (d <= ridge.halfWidth + wobble * 0.85) {
+        if (d <= ridge.halfWidth + wobble) {
           terrain[idx] = TerrainType.MOUNTAINS;
           break;
         }
@@ -628,7 +743,7 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
     }
   }
 
-  // Step 3: Generate 8-10 circular resource zones (public bounds + hidden optima)
+  // Step 3: Generate circular resource zones (public bounds + hidden optima)
   const { publicResourceZones, secretResourceZones } = generateResourceZones(
     terrain,
     width,

@@ -1,6 +1,20 @@
-import { claimInitialTerritory, isBorderCell } from './frontExpansion';
+import {
+  MAX_ORDER_TICKS,
+  buildSmoothAttackWaypoints,
+  claimInitialTerritory,
+  computePolylineLength,
+  getRelation,
+  isBorderCell,
+} from './frontExpansion';
 import { nextRandom } from './mapGenerator';
-import { GameState, PlayerState, TerrainType } from './types';
+import {
+  GameState,
+  PlayerState,
+  Point,
+  TerrainType,
+  WILDERNESS_OWNER,
+  getRelationKey,
+} from './types';
 
 interface BotIdentity {
   readonly name: string;
@@ -16,6 +30,10 @@ const BOT_IDENTITIES: ReadonlyArray<BotIdentity> = [
   { name: 'Balkánský Svaz', colorHex: '#9c6e44', colorRgb: [156, 110, 68] },
   { name: 'Kaledonie', colorHex: '#4f7a75', colorRgb: [79, 122, 117] },
   { name: 'Panonská Liga', colorHex: '#8a566f', colorRgb: [138, 86, 111] },
+  { name: 'Pobaltí', colorHex: '#59746b', colorRgb: [89, 116, 107] },
+  { name: 'Kyjevská Rus', colorHex: '#7e664b', colorRgb: [126, 102, 75] },
+  { name: 'Italská Liga', colorHex: '#6c7c4e', colorRgb: [108, 124, 78] },
+  { name: 'Akvitánie', colorHex: '#7d5a5a', colorRgb: [125, 90, 90] },
 ];
 
 function countFreeLandInRadius(
@@ -27,15 +45,15 @@ function countFreeLandInRadius(
   const { width, height, terrain, owners } = state;
   const rSq = radius * radius;
   let count = 0;
-  for (let dy = -radius; dy <= radius; dy++) {
+  for (let dy = -radius; dy <= radius; dy += 2) {
     const ny = cy + dy;
     if (ny < 0 || ny >= height) continue;
-    for (let dx = -radius; dx <= radius; dx++) {
+    for (let dx = -radius; dx <= radius; dx += 2) {
       const nx = cx + dx;
       if (nx < 0 || nx >= width) continue;
       if (dx * dx + dy * dy <= rSq) {
         const idx = ny * width + nx;
-        if (terrain[idx] !== TerrainType.WATER && owners[idx] === 0) {
+        if (terrain[idx] !== TerrainType.WATER && owners[idx] === WILDERNESS_OWNER) {
           count++;
         }
       }
@@ -46,29 +64,28 @@ function countFreeLandInRadius(
 
 export function spawnBots(state: GameState, count: number): void {
   const { width, height, terrain, owners } = state;
-  const startRadius = 6;
+  const startRadius = 14;
   const rngBox = { rngState: state.rngState };
 
   for (let i = 0; i < count && i < BOT_IDENTITIES.length; i++) {
     const botId = i + 2;
     const identity = BOT_IDENTITIES[i];
 
-    // Sample candidate land points and pick one with the largest minimum distance to existing capitals
     let bestX = -1;
     let bestY = -1;
     let bestScore = -1;
 
-    for (let attempt = 0; attempt < 260; attempt++) {
-      const x = 14 + Math.floor(nextRandom(rngBox) * (width - 28));
-      const y = 10 + Math.floor(nextRandom(rngBox) * (height - 20));
+    for (let attempt = 0; attempt < 320; attempt++) {
+      const x = 32 + Math.floor(nextRandom(rngBox) * (width - 64));
+      const y = 24 + Math.floor(nextRandom(rngBox) * (height - 48));
       const idx = y * width + x;
 
-      if (terrain[idx] !== TerrainType.PLAINS || owners[idx] !== 0) {
+      if (terrain[idx] !== TerrainType.PLAINS || owners[idx] !== WILDERNESS_OWNER) {
         continue;
       }
 
       const freeLand = countFreeLandInRadius(state, x, y, startRadius);
-      if (freeLand < 26) {
+      if (freeLand < 110) {
         continue;
       }
 
@@ -80,8 +97,7 @@ export function spawnBots(state: GameState, count: number): void {
         }
       }
 
-      // Prefer well-spaced capitals with plenty of surrounding plains
-      const score = Math.min(minDist, 75) + freeLand * 0.15;
+      const score = Math.min(minDist, 145) + freeLand * 0.08;
       if (score > bestScore) {
         bestScore = score;
         bestX = x;
@@ -106,9 +122,11 @@ export function spawnBots(state: GameState, count: number): void {
       colorRgb: identity.colorRgb,
       capitalX: bestX,
       capitalY: bestY,
-      manpower: 160,
-      maxManpower: 300 + claimed * 1.4,
-      manpowerIncomePerSec: 10 + claimed * 0.08,
+      manpower: 240,
+      maxManpower: 480,
+      manpowerIncomePerSec: 14,
+      manpowerGrowthEfficiency: 1,
+      betrayalDebuffTicks: 0,
       territoryCells: claimed,
       alive: true,
     };
@@ -125,6 +143,7 @@ interface BotTargetCandidate {
   readonly dirX: number;
   readonly dirY: number;
   readonly isWilderness: boolean;
+  readonly targetOwnerId: number;
 }
 
 export function stepBots(state: GameState): void {
@@ -136,22 +155,21 @@ export function stepBots(state: GameState): void {
       continue;
     }
 
-    // Stagger AI decisions every 16 ticks (~1.6s)
-    if ((state.tick + player.id * 3) % 16 !== 0) {
+    if ((state.tick + player.id * 3) % 18 !== 0) {
       continue;
     }
 
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
-    if (activeBotOrders >= 2 || player.manpower < 48) {
+    if (activeBotOrders >= 2 || player.manpower < player.maxManpower * 0.42) {
       continue;
     }
 
     const wildernessTargets: BotTargetCandidate[] = [];
-    const enemyTargets: BotTargetCandidate[] = [];
+    const warTargets: BotTargetCandidate[] = [];
+    const neutralTargets: BotTargetCandidate[] = [];
 
-    // Sample border cells to find outward expansion directions
-    for (let y = 0; y < height; y += 2) {
-      for (let x = 0; x < width; x += 2) {
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
         if (!isBorderCell(state, x, y, player.id)) {
           continue;
         }
@@ -159,27 +177,42 @@ export function stepBots(state: GameState): void {
         let sumWildX = 0;
         let sumWildY = 0;
         let wildCount = 0;
-        let sumEnemyX = 0;
-        let sumEnemyY = 0;
-        let enemyCount = 0;
+        let sumWarX = 0;
+        let sumWarY = 0;
+        let warCount = 0;
+        let warOwnerId = -1;
+        let sumNeutralX = 0;
+        let sumNeutralY = 0;
+        let neutralCount = 0;
+        let neutralOwnerId = -1;
 
-        for (let dy = -3; dy <= 3; dy++) {
+        for (let dy = -6; dy <= 6; dy += 2) {
           const ny = y + dy;
           if (ny < 0 || ny >= height) continue;
-          for (let dx = -3; dx <= 3; dx++) {
+          for (let dx = -6; dx <= 6; dx += 2) {
             const nx = x + dx;
             if (nx < 0 || nx >= width || (dx === 0 && dy === 0)) continue;
             const nIdx = ny * width + nx;
             if (terrain[nIdx] === TerrainType.WATER) continue;
             const nOwner = owners[nIdx];
-            if (nOwner === 0) {
+            if (nOwner === WILDERNESS_OWNER) {
               sumWildX += dx;
               sumWildY += dy;
               wildCount++;
-            } else if (nOwner !== player.id) {
-              sumEnemyX += dx;
-              sumEnemyY += dy;
-              enemyCount++;
+            } else if (nOwner >= 0 && nOwner !== player.id) {
+              const rel = getRelation(state, player.id, nOwner);
+              if (rel === 'WAR') {
+                sumWarX += dx;
+                sumWarY += dy;
+                warCount++;
+                warOwnerId = nOwner;
+              } else if (rel === 'NEUTRAL') {
+                sumNeutralX += dx;
+                sumNeutralY += dy;
+                neutralCount++;
+                neutralOwnerId = nOwner;
+              }
+              // Never target ALLIED neighbors
             }
           }
         }
@@ -193,38 +226,85 @@ export function stepBots(state: GameState): void {
               dirX: sumWildX / len,
               dirY: sumWildY / len,
               isWilderness: true,
+              targetOwnerId: WILDERNESS_OWNER,
             });
           }
-        } else if (enemyCount > 0) {
-          const len = Math.hypot(sumEnemyX, sumEnemyY);
+        } else if (warCount > 0 && warOwnerId >= 0) {
+          const len = Math.hypot(sumWarX, sumWarY);
           if (len > 0.1) {
-            enemyTargets.push({
+            warTargets.push({
               bx: x,
               by: y,
-              dirX: sumEnemyX / len,
-              dirY: sumEnemyY / len,
+              dirX: sumWarX / len,
+              dirY: sumWarY / len,
               isWilderness: false,
+              targetOwnerId: warOwnerId,
+            });
+          }
+        } else if (neutralCount > 0 && neutralOwnerId >= 0) {
+          const len = Math.hypot(sumNeutralX, sumNeutralY);
+          if (len > 0.1) {
+            neutralTargets.push({
+              bx: x,
+              by: y,
+              dirX: sumNeutralX / len,
+              dirY: sumNeutralY / len,
+              isWilderness: false,
+              targetOwnerId: neutralOwnerId,
             });
           }
         }
       }
     }
 
-    const pool = wildernessTargets.length > 0 ? wildernessTargets : enemyTargets;
+    let pool: BotTargetCandidate[] = [];
+    if (wildernessTargets.length > 0) {
+      pool = wildernessTargets;
+    } else if (warTargets.length > 0) {
+      pool = warTargets;
+    } else if (
+      neutralTargets.length > 0 &&
+      player.manpower >= player.maxManpower * 0.58 &&
+      nextRandom(rngBox) < 0.18
+    ) {
+      pool = neutralTargets;
+    }
+
     if (pool.length === 0) {
       continue;
     }
 
     const chosen = pool[Math.floor(nextRandom(rngBox) * pool.length)];
-    const pushDist = chosen.isWilderness ? 14 : 11;
-    const toX = Math.max(0, Math.min(width - 1, Math.round(chosen.bx + chosen.dirX * pushDist)));
-    const toY = Math.max(0, Math.min(height - 1, Math.round(chosen.by + chosen.dirY * pushDist)));
+
+    // Respect diplomacy: declare war before attacking a neutral neighbor
+    if (
+      chosen.targetOwnerId >= 0 &&
+      getRelation(state, player.id, chosen.targetOwnerId) === 'NEUTRAL'
+    ) {
+      state.relations.set(getRelationKey(player.id, chosen.targetOwnerId), 'WAR');
+      state.stateVersion++;
+    }
+
+    const pushDist = chosen.isWilderness ? 42 : 30;
+    const rawPts: Point[] = [
+      { x: chosen.bx + 0.5, y: chosen.by + 0.5 },
+      {
+        x: Math.max(0, Math.min(width - 1, chosen.bx + chosen.dirX * pushDist)),
+        y: Math.max(0, Math.min(height - 1, chosen.by + chosen.dirY * pushDist)),
+      },
+    ];
+    const bendOffset = (nextRandom(rngBox) - 0.5) * 14;
+    const waypoints = buildSmoothAttackWaypoints(rawPts, bendOffset);
+    const totalPathLength = computePolylineLength(waypoints);
+    if (totalPathLength < 6) {
+      continue;
+    }
 
     const commitRatio = chosen.isWilderness
-      ? 0.22 + nextRandom(rngBox) * 0.1
-      : 0.28 + nextRandom(rngBox) * 0.12;
+      ? 0.22 + nextRandom(rngBox) * 0.08
+      : 0.26 + nextRandom(rngBox) * 0.10;
     const manpowerCommitted = player.manpower * commitRatio;
-    if (manpowerCommitted < 12) {
+    if (manpowerCommitted < 16) {
       continue;
     }
 
@@ -232,15 +312,15 @@ export function stepBots(state: GameState): void {
     state.attackOrders.push({
       id: state.nextOrderId++,
       playerId: player.id,
-      fromX: chosen.bx,
-      fromY: chosen.by,
-      toX,
-      toY,
-      dirX: chosen.dirX,
-      dirY: chosen.dirY,
+      waypoints,
+      currentSegmentIndex: 0,
+      segmentProgress: 0,
+      totalPathLength,
       manpowerCommitted,
       manpowerRemaining: manpowerCommitted,
-      ticksRemaining: 65,
+      ticksRemaining: MAX_ORDER_TICKS,
+      maxTicks: MAX_ORDER_TICKS,
+      stagnantTicks: 0,
       mountainAccum: 0,
     });
   }

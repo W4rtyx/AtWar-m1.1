@@ -3,10 +3,10 @@ import { MAP_HEIGHT, MAP_WIDTH, Point2D } from '../engine/types';
 export class Camera {
   public offsetX = 0;
   public offsetY = 0;
-  public zoom = 3;
+  public zoom = 1.6;
 
-  private readonly minZoom = 1.4;
-  private readonly maxZoom = 20;
+  private readonly minZoom = 0.75;
+  private readonly maxZoom = 14;
 
   public fitToScreen(
     viewportWidth: number,
@@ -14,8 +14,8 @@ export class Camera {
     mapWidth = MAP_WIDTH,
     mapHeight = MAP_HEIGHT,
   ): void {
-    const padX = 32;
-    const padY = 128; // leave breathing room for top and bottom HUD bars
+    const padX = 28;
+    const padY = 128;
     const availW = Math.max(200, viewportWidth - padX);
     const availH = Math.max(200, viewportHeight - padY);
     const fitZoom = Math.min(availW / mapWidth, availH / mapHeight);
@@ -37,7 +37,7 @@ export class Camera {
   ): void {
     const mapPixelW = mapWidth * this.zoom;
     const mapPixelH = mapHeight * this.zoom;
-    const margin = 80;
+    const margin = 90;
     const minOffsetX = margin - mapPixelW;
     const maxOffsetX = viewportWidth - margin;
     const minOffsetY = margin - mapPixelH;
@@ -83,7 +83,7 @@ export class Camera {
 
     if (vx !== 0 || vy !== 0) {
       const len = Math.hypot(vx, vy);
-      const panSpeed = 540 * dtSec;
+      const panSpeed = 580 * dtSec;
       this.pan((vx / len) * panSpeed, (vy / len) * panSpeed);
       this.clampToViewport(viewportWidth, viewportHeight);
     }

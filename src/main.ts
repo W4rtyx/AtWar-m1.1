@@ -1,13 +1,25 @@
 import './style.css';
+import {
+  buildSmoothAttackWaypoints,
+  computePolylineLength,
+} from './engine/frontExpansion';
 import { createEngineController } from './engine/simulation';
-import { Point2D, TICK_DT } from './engine/types';
+import { ClientRenderState, Point, TICK_DT } from './engine/types';
 import { Camera } from './render/camera';
 import {
+  AmbushOverlay,
   ArrowPreview,
   CanvasRenderer,
   FrontPushPreview,
 } from './render/canvasRenderer';
-import { HudController, TacticalMode } from './ui/hud';
+import { HudController, SimSpeed, TacticalMode } from './ui/hud';
+
+interface BendHandleDrag {
+  readonly orderId: number;
+  readonly waypointIndex: number;
+}
+
+const AMBUSH_HOLD_MS = 2000;
 
 function bootstrap(): void {
   const canvas = document.getElementById('map-canvas');
@@ -23,18 +35,47 @@ function bootstrap(): void {
 
   let tacticalMode: TacticalMode = 'ARROW';
   let manpowerPercent = 35;
+  let simSpeed: SimSpeed = 1;
   let selectedFrontierCells: number[] = [];
-  let frontLassoPoints: Point2D[] = [];
-  let hoverCell: Point2D | null = null;
-  let arrowDragStart: Point2D | null = null;
+  let frontLassoPoints: Point[] = [];
+  let hoverCell: Point | null = null;
+
+  let rawArrowPoints: Point[] = [];
+  let arrowBendOffset = 0;
   let arrowPreview: ArrowPreview | null = null;
-  let frontPushStart: Point2D | null = null;
+  let activeBendDrag: BendHandleDrag | null = null;
+
+  let ambushTargetId: number | null = null;
+  let ambushElapsedMs = 0;
+  let lastMouseScreenX = 0;
+  let lastMouseScreenY = 0;
+
+  let frontPushStart: Point | null = null;
   let frontPushPreview: FrontPushPreview | null = null;
 
   let isPanning = false;
+  let rmbDownScreenX = 0;
+  let rmbDownScreenY = 0;
+  let rmbDragged = false;
   let lastPanX = 0;
   let lastPanY = 0;
   const keysPressed = new Set<string>();
+
+  function resetAmbush(): void {
+    ambushTargetId = null;
+    ambushElapsedMs = 0;
+  }
+
+  function clearInteractionPreviews(): void {
+    rawArrowPoints = [];
+    arrowBendOffset = 0;
+    arrowPreview = null;
+    activeBendDrag = null;
+    frontLassoPoints = [];
+    frontPushStart = null;
+    frontPushPreview = null;
+    resetAmbush();
+  }
 
   const hud = new HudController(hudRoot, {
     onTogglePause: () => {
@@ -42,17 +83,16 @@ function bootstrap(): void {
     },
     onRestart: () => {
       selectedFrontierCells = [];
-      frontLassoPoints = [];
-      arrowDragStart = null;
-      arrowPreview = null;
-      frontPushStart = null;
-      frontPushPreview = null;
+      clearInteractionPreviews();
       engine.dispatch({ type: 'RESTART_GAME' });
     },
     onModeChange: (mode) => {
       tacticalMode = mode;
-      arrowDragStart = null;
+      rawArrowPoints = [];
+      arrowBendOffset = 0;
       arrowPreview = null;
+      activeBendDrag = null;
+      resetAmbush();
     },
     onManpowerPercentChange: (percent) => {
       manpowerPercent = percent;
@@ -76,6 +116,40 @@ function bootstrap(): void {
       frontPushStart = null;
       frontPushPreview = null;
     },
+    onCancelOrders: () => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'CANCEL_PLAYER_ORDERS',
+        playerId: state.humanPlayerId,
+      });
+    },
+    onSpeedChange: (speed) => {
+      simSpeed = speed;
+    },
+    onDeclareWar: (targetId) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'DECLARE_WAR',
+        actorId: state.humanPlayerId,
+        targetId,
+      });
+    },
+    onMakePeace: (targetId) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'MAKE_PEACE',
+        actorId: state.humanPlayerId,
+        targetId,
+      });
+    },
+    onToggleAlliance: (targetId) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'TOGGLE_ALLIANCE',
+        actorId: state.humanPlayerId,
+        targetId,
+      });
+    },
   });
 
   function handleResize(): void {
@@ -97,23 +171,89 @@ function bootstrap(): void {
   window.addEventListener('resize', handleResize);
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  function isNearSelectedFrontier(worldPt: Point2D, mapWidth: number): boolean {
+  function isNearSelectedFrontier(worldPt: Point, mapWidth: number): boolean {
     for (const idx of selectedFrontierCells) {
       const cx = (idx % mapWidth) + 0.5;
       const cy = Math.floor(idx / mapWidth) + 0.5;
-      if (Math.hypot(worldPt.x - cx, worldPt.y - cy) <= 7.5) {
+      if (Math.hypot(worldPt.x - cx, worldPt.y - cy) <= 10) {
         return true;
       }
     }
     return false;
   }
 
+  function findBendHandleAtScreen(
+    state: ClientRenderState,
+    screenX: number,
+    screenY: number,
+  ): BendHandleDrag | null {
+    for (const order of state.attackOrders) {
+      if (order.playerId !== state.humanPlayerId || order.waypoints.length < 3) {
+        continue;
+      }
+      const midIdx = Math.floor(order.waypoints.length / 2);
+      const midPt = order.waypoints[midIdx];
+      const sc = camera.worldToScreen(midPt.x, midPt.y);
+      if (Math.hypot(screenX - sc.x, screenY - sc.y) <= 10) {
+        return { orderId: order.id, waypointIndex: midIdx };
+      }
+    }
+    return null;
+  }
+
+  function getNonWarForeignOwnerAtWorld(
+    state: ClientRenderState,
+    pt: Point,
+  ): { readonly id: number; readonly name: string; readonly isAllied: boolean } | null {
+    const ix = Math.floor(pt.x);
+    const iy = Math.floor(pt.y);
+    if (ix < 0 || ix >= state.width || iy < 0 || iy >= state.height) {
+      return null;
+    }
+    const owner = state.owners[iy * state.width + ix];
+    if (owner < 0 || owner === state.humanPlayerId) {
+      return null;
+    }
+    const target = state.players.find((p) => p.id === owner);
+    if (!target || !target.alive) {
+      return null;
+    }
+    if (target.relationToHuman === 'WAR') {
+      return null;
+    }
+    return {
+      id: target.id,
+      name: target.name,
+      isAllied: target.relationToHuman === 'ALLIED',
+    };
+  }
+
+  function refreshArrowPreview(state: ClientRenderState): void {
+    if (rawArrowPoints.length < 2) {
+      arrowPreview = null;
+      return;
+    }
+    const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
+    const human = state.players.find((p) => p.id === state.humanPlayerId);
+    const committed = (human?.manpower ?? 0) * (manpowerPercent / 100);
+    arrowPreview = {
+      waypoints,
+      committedManpower: committed,
+      manpowerPercent,
+    };
+  }
+
   canvas.addEventListener('mousedown', (e) => {
     const state = engine.getRenderState();
     const worldPt = camera.screenToWorld(e.clientX, e.clientY);
+    lastMouseScreenX = e.clientX;
+    lastMouseScreenY = e.clientY;
 
     if (e.button === 2 || e.button === 1) {
       isPanning = true;
+      rmbDownScreenX = e.clientX;
+      rmbDownScreenY = e.clientY;
+      rmbDragged = false;
       lastPanX = e.clientX;
       lastPanY = e.clientY;
       return;
@@ -122,6 +262,8 @@ function bootstrap(): void {
     if (e.button !== 0) {
       return;
     }
+
+    hud.leaderboard.closeProfile();
 
     if (state.phase === 'SELECT_START') {
       engine.dispatch({
@@ -152,25 +294,26 @@ function bootstrap(): void {
       return;
     }
 
-    // Attack arrow drag start
-    arrowDragStart = {
-      x: Math.floor(worldPt.x),
-      y: Math.floor(worldPt.y),
-    };
-    const human = state.players.find((p) => p.id === state.humanPlayerId);
-    const committed = (human?.manpower ?? 0) * (manpowerPercent / 100);
-    arrowPreview = {
-      fromX: arrowDragStart.x,
-      fromY: arrowDragStart.y,
-      toX: arrowDragStart.x,
-      toY: arrowDragStart.y,
-      committedManpower: committed,
-      manpowerPercent,
-    };
+    const bendHandle = findBendHandleAtScreen(state, e.clientX, e.clientY);
+    if (bendHandle) {
+      activeBendDrag = bendHandle;
+      return;
+    }
+
+    rawArrowPoints = [worldPt];
+    arrowBendOffset = 0;
+    arrowPreview = null;
+    resetAmbush();
   });
 
   window.addEventListener('mousemove', (e) => {
+    lastMouseScreenX = e.clientX;
+    lastMouseScreenY = e.clientY;
+
     if (isPanning) {
+      if (Math.hypot(e.clientX - rmbDownScreenX, e.clientY - rmbDownScreenY) > 5) {
+        rmbDragged = true;
+      }
       const dx = e.clientX - lastPanX;
       const dy = e.clientY - lastPanY;
       lastPanX = e.clientX;
@@ -182,6 +325,19 @@ function bootstrap(): void {
 
     const worldPt = camera.screenToWorld(e.clientX, e.clientY);
     hoverCell = worldPt;
+
+    if (activeBendDrag) {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'BEND_ATTACK_ORDER',
+        playerId: state.humanPlayerId,
+        orderId: activeBendDrag.orderId,
+        waypointIndex: activeBendDrag.waypointIndex,
+        x: worldPt.x,
+        y: worldPt.y,
+      });
+      return;
+    }
 
     if (frontPushStart) {
       frontPushPreview = {
@@ -195,31 +351,40 @@ function bootstrap(): void {
 
     if (frontLassoPoints.length > 0) {
       const last = frontLassoPoints[frontLassoPoints.length - 1];
-      if (Math.hypot(worldPt.x - last.x, worldPt.y - last.y) >= 0.7) {
+      if (Math.hypot(worldPt.x - last.x, worldPt.y - last.y) >= 1.2) {
         frontLassoPoints.push(worldPt);
         selectedFrontierCells = engine.findHumanBorderCellsFromLasso(frontLassoPoints);
       }
       return;
     }
 
-    if (arrowDragStart) {
-      const state = engine.getRenderState();
-      const human = state.players.find((p) => p.id === state.humanPlayerId);
-      const committed = (human?.manpower ?? 0) * (manpowerPercent / 100);
-      arrowPreview = {
-        fromX: arrowDragStart.x,
-        fromY: arrowDragStart.y,
-        toX: Math.floor(worldPt.x),
-        toY: Math.floor(worldPt.y),
-        committedManpower: committed,
-        manpowerPercent,
-      };
+    if (rawArrowPoints.length > 0) {
+      const last = rawArrowPoints[rawArrowPoints.length - 1];
+      if (Math.hypot(worldPt.x - last.x, worldPt.y - last.y) >= 2.2) {
+        rawArrowPoints.push(worldPt);
+      }
+      refreshArrowPreview(engine.getRenderState());
     }
   });
 
   window.addEventListener('mouseup', (e) => {
+    const state = engine.getRenderState();
+    const worldPt = camera.screenToWorld(e.clientX, e.clientY);
+
     if ((e.button === 2 || e.button === 1) && isPanning) {
       isPanning = false;
+      if (e.button === 2 && !rmbDragged && state.phase === 'PLAYING') {
+        const ix = Math.floor(worldPt.x);
+        const iy = Math.floor(worldPt.y);
+        if (ix >= 0 && ix < state.width && iy >= 0 && iy < state.height) {
+          const owner = state.owners[iy * state.width + ix];
+          if (owner >= 0 && owner !== state.humanPlayerId) {
+            hud.leaderboard.openProfile(owner, e.clientX + 8, e.clientY + 8);
+          } else {
+            hud.leaderboard.closeProfile();
+          }
+        }
+      }
       return;
     }
 
@@ -227,13 +392,15 @@ function bootstrap(): void {
       return;
     }
 
-    const state = engine.getRenderState();
-    const worldPt = camera.screenToWorld(e.clientX, e.clientY);
+    if (activeBendDrag) {
+      activeBendDrag = null;
+      return;
+    }
 
     if (frontPushStart) {
       const dx = worldPt.x - frontPushStart.x;
       const dy = worldPt.y - frontPushStart.y;
-      if (Math.hypot(dx, dy) >= 2.5 && selectedFrontierCells.length > 0) {
+      if (Math.hypot(dx, dy) >= 4 && selectedFrontierCells.length > 0) {
         engine.dispatch({
           type: 'CREATE_FRONT_PUSH_ORDER',
           playerId: state.humanPlayerId,
@@ -244,7 +411,6 @@ function bootstrap(): void {
         });
         selectedFrontierCells = [];
       } else {
-        // Short click near frontier re-seeds a fresh lasso selection
         selectedFrontierCells = engine.findHumanBorderCellsFromLasso([worldPt]);
       }
       frontPushStart = null;
@@ -259,22 +425,30 @@ function bootstrap(): void {
       return;
     }
 
-    if (arrowDragStart) {
-      const toX = Math.floor(worldPt.x);
-      const toY = Math.floor(worldPt.y);
-      if (Math.hypot(toX - arrowDragStart.x, toY - arrowDragStart.y) >= 3) {
-        engine.dispatch({
-          type: 'CREATE_ATTACK_ORDER',
-          playerId: state.humanPlayerId,
-          fromX: arrowDragStart.x,
-          fromY: arrowDragStart.y,
-          toX,
-          toY,
-          manpowerPercent,
-        });
+    if (rawArrowPoints.length > 0) {
+      const last = rawArrowPoints[rawArrowPoints.length - 1];
+      if (Math.hypot(worldPt.x - last.x, worldPt.y - last.y) >= 1.0) {
+        rawArrowPoints.push(worldPt);
       }
-      arrowDragStart = null;
+
+      // If released over a NEUTRAL or ALLIED state before 2s ambush completes, cancel safely
+      const tipNonWar = getNonWarForeignOwnerAtWorld(state, worldPt);
+      if (tipNonWar === null) {
+        const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
+        if (waypoints.length >= 2 && computePolylineLength(waypoints) >= 6) {
+          engine.dispatch({
+            type: 'CREATE_ATTACK_ORDER',
+            playerId: state.humanPlayerId,
+            waypoints,
+            manpowerPercent,
+          });
+        }
+      }
+
+      rawArrowPoints = [];
+      arrowBendOffset = 0;
       arrowPreview = null;
+      resetAmbush();
     }
   });
 
@@ -282,6 +456,13 @@ function bootstrap(): void {
     'wheel',
     (e) => {
       e.preventDefault();
+      if (rawArrowPoints.length >= 2) {
+        const delta = e.deltaY < 0 ? 5.5 : -5.5;
+        arrowBendOffset = Math.max(-70, Math.min(70, arrowBendOffset + delta));
+        refreshArrowPreview(engine.getRenderState());
+        return;
+      }
+
       const factor = e.deltaY < 0 ? 1.14 : 1 / 1.14;
       camera.zoomAtScreenPoint(factor, e.clientX, e.clientY);
       camera.clampToViewport(window.innerWidth, window.innerHeight);
@@ -300,11 +481,8 @@ function bootstrap(): void {
 
     if (e.code === 'Escape') {
       selectedFrontierCells = [];
-      frontLassoPoints = [];
-      arrowDragStart = null;
-      arrowPreview = null;
-      frontPushStart = null;
-      frontPushPreview = null;
+      clearInteractionPreviews();
+      hud.leaderboard.closeProfile();
       return;
     }
 
@@ -312,6 +490,22 @@ function bootstrap(): void {
       const next: TacticalMode =
         hud.getMode() === 'ARROW' ? 'FRONT_SELECT' : 'ARROW';
       hud.setMode(next);
+      return;
+    }
+
+    if (e.code === 'KeyX') {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'CANCEL_PLAYER_ORDERS',
+        playerId: state.humanPlayerId,
+      });
+      return;
+    }
+
+    if (rawArrowPoints.length >= 2 && (e.code === 'KeyQ' || e.code === 'KeyE')) {
+      const delta = e.code === 'KeyQ' ? -6 : 6;
+      arrowBendOffset = Math.max(-70, Math.min(70, arrowBendOffset + delta));
+      refreshArrowPreview(engine.getRenderState());
       return;
     }
 
@@ -347,7 +541,8 @@ function bootstrap(): void {
   let accumulatorSec = 0;
 
   function frame(nowMs: number): void {
-    const dtSec = Math.min(0.1, Math.max(0, (nowMs - lastFrameMs) / 1000));
+    const rawDtMs = Math.min(100, Math.max(0, nowMs - lastFrameMs));
+    const dtSec = rawDtMs / 1000;
     lastFrameMs = nowMs;
 
     camera.updateKeyboardPan(
@@ -359,23 +554,81 @@ function bootstrap(): void {
 
     const preState = engine.getRenderState();
     if (preState.phase === 'PLAYING' && !preState.paused) {
-      accumulatorSec = Math.min(0.5, accumulatorSec + dtSec);
-      while (accumulatorSec >= TICK_DT) {
+      accumulatorSec = Math.min(2.6, accumulatorSec + dtSec * simSpeed);
+      const maxTicksPerFrame = Math.min(25, Math.max(4, Math.ceil(simSpeed * 0.5)));
+      const tickBudgetStart = performance.now();
+      let ticksRun = 0;
+
+      while (
+        accumulatorSec >= TICK_DT &&
+        ticksRun < maxTicksPerFrame &&
+        performance.now() - tickBudgetStart < 11
+      ) {
         engine.dispatch({ type: 'TICK' });
         accumulatorSec -= TICK_DT;
+        ticksRun++;
       }
     } else {
       accumulatorSec = 0;
     }
 
     const renderState = engine.getRenderState();
-    hud.update(renderState, selectedFrontierCells.length);
-    renderer.render(renderState, camera, {
+
+    // Update 2.0s Ambush hold countdown if arrow tip hovers over NEUTRAL or ALLIED state
+    let ambushOverlay: AmbushOverlay | null = null;
+    if (renderState.phase === 'PLAYING' && rawArrowPoints.length >= 2) {
+      const tipWorld = camera.screenToWorld(lastMouseScreenX, lastMouseScreenY);
+      const nonWarTarget = getNonWarForeignOwnerAtWorld(renderState, tipWorld);
+      if (nonWarTarget) {
+        if (ambushTargetId !== nonWarTarget.id) {
+          ambushTargetId = nonWarTarget.id;
+          ambushElapsedMs = 0;
+        } else {
+          ambushElapsedMs += rawDtMs;
+        }
+
+        if (ambushElapsedMs >= AMBUSH_HOLD_MS) {
+          const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
+          if (waypoints.length >= 2 && computePolylineLength(waypoints) >= 6) {
+            engine.dispatch({
+              type: 'AMBUSH_ATTACK',
+              playerId: renderState.humanPlayerId,
+              targetId: nonWarTarget.id,
+              waypoints,
+              manpowerPercent,
+            });
+          }
+          rawArrowPoints = [];
+          arrowBendOffset = 0;
+          arrowPreview = null;
+          resetAmbush();
+        } else {
+          ambushOverlay = {
+            screenX: lastMouseScreenX,
+            screenY: lastMouseScreenY,
+            targetName: nonWarTarget.name,
+            isBetrayal: nonWarTarget.isAllied,
+            progress: ambushElapsedMs / AMBUSH_HOLD_MS,
+            remainingSec: Math.max(0, (AMBUSH_HOLD_MS - ambushElapsedMs) / 1000),
+          };
+        }
+      } else {
+        resetAmbush();
+      }
+    } else {
+      resetAmbush();
+    }
+
+    const finalState = engine.getRenderState();
+    hud.update(finalState, selectedFrontierCells.length);
+    renderer.render(finalState, camera, {
       hoverCell,
       arrowPreview,
       frontLassoPoints,
       selectedFrontierCells,
       frontPushPreview,
+      activeBendOrderId: activeBendDrag?.orderId ?? null,
+      ambush: ambushOverlay,
     });
 
     requestAnimationFrame(frame);

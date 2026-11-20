@@ -116,6 +116,40 @@ body {
   color: #93b09c;
 }
 
+.hud-optimum-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+  border: 1px solid #3c4f44;
+  background: #1f3027;
+  color: #9dc8ad;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-optimum-badge.optimum-mid {
+  border-color: #5b5338;
+  background: #302b1d;
+  color: #d3c088;
+}
+
+.hud-optimum-badge.optimum-low {
+  border-color: #633e3a;
+  background: #34211f;
+  color: #d69c95;
+}
+
+.hud-btn-danger {
+  border-color: #62403c;
+  color: #dfc3be;
+}
+
+.hud-btn-danger:hover:not(:disabled) {
+  background: #422926;
+  border-color: #82534d;
+}
+
 .hud-actions {
   display: flex;
   align-items: center;
@@ -161,13 +195,265 @@ body {
   cursor: not-allowed;
 }
 
+.hud-timer {
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  border-radius: 3px;
+  background: #1b222a;
+  border: 1px solid #35414f;
+  color: #e4dfd2;
+}
+
+.hud-speed-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.hud-speed-btn {
+  padding: 4px 7px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-betrayal-pill {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 3px;
+  background: #3d211d;
+  border: 1px solid #9c4a3f;
+  color: #f0b9b1;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-middle-slot {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 10px 0;
+  pointer-events: none;
+}
+
 .hud-prompt-banner {
-  align-self: center;
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
   padding: 8px 16px;
   font-size: 13px;
   font-weight: 500;
   color: #e4dfd2;
   letter-spacing: 0.02em;
+}
+
+.hud-leaderboard {
+  width: 268px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hud-lb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-bottom: 1px solid #2e3844;
+}
+
+.hud-lb-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #aeb8c2;
+}
+
+.hud-lb-toggle {
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.hud-lb-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.hud-lb-row {
+  display: grid;
+  grid-template-columns: 22px 10px 1fr 46px 56px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  border-left: 3px solid transparent;
+}
+
+.hud-lb-row-clickable {
+  cursor: pointer;
+}
+
+.hud-lb-row-clickable:hover {
+  background: rgba(58, 72, 88, 0.35);
+}
+
+.hud-lb-row-self {
+  background: rgba(59, 110, 140, 0.16);
+}
+
+.hud-lb-row.rel-war {
+  border-left-color: #b84a42;
+}
+
+.hud-lb-row.rel-allied {
+  border-left-color: #499664;
+}
+
+.hud-lb-rank {
+  color: #8b96a3;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-lb-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.hud-lb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e2ddd0;
+}
+
+.hud-betrayal-tag {
+  margin-left: 5px;
+  padding: 0 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  border-radius: 2px;
+  background: #46231e;
+  color: #eba9a0;
+  border: 1px solid #8a4339;
+}
+
+.hud-lb-pct {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #c8c4b8;
+}
+
+.hud-lb-rel {
+  text-align: center;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px;
+}
+
+.hud-lb-rel.rel-war {
+  background: rgba(168, 60, 54, 0.28);
+  color: #ebaba4;
+  border: 1px solid rgba(186, 74, 66, 0.55);
+}
+
+.hud-lb-rel.rel-allied {
+  background: rgba(71, 139, 94, 0.28);
+  color: #a9dbb8;
+  border: 1px solid rgba(82, 162, 108, 0.55);
+}
+
+.hud-lb-rel.rel-neutral {
+  background: rgba(54, 65, 78, 0.35);
+  color: #aeb7c0;
+  border: 1px solid rgba(82, 96, 112, 0.45);
+}
+
+.hud-lb-rel.rel-self {
+  background: rgba(59, 110, 140, 0.3);
+  color: #a8d4ee;
+  border: 1px solid rgba(84, 148, 186, 0.5);
+}
+
+.hud-diplomacy-popover {
+  position: fixed;
+  z-index: 40;
+  width: 242px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.48);
+}
+
+.hud-dip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hud-dip-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.hud-dip-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: #ece7da;
+}
+
+.hud-dip-close {
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.hud-dip-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #aeb8c2;
+}
+
+.hud-dip-warning {
+  padding: 4px 7px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: rgba(130, 48, 38, 0.32);
+  border: 1px solid #8a4238;
+  color: #ebb3ab;
+}
+
+.hud-dip-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hud-btn-ally {
+  border-color: #3f6a4e;
+  color: #bde2c9;
+}
+
+.hud-btn-ally:hover:not(:disabled) {
+  background: #24402e;
+  border-color: #548c67;
+}
+
+.hud-prompt-banner.hidden {
+  display: none;
 }
 
 .hud-bottom-row {
