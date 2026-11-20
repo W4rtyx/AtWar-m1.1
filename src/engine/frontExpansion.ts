@@ -1,4 +1,5 @@
 import {
+  AttackOrder,
   DiplomaticRelation,
   GameState,
   MAP_HEIGHT,
@@ -19,7 +20,7 @@ export const MAX_ORDER_TICKS = 110;
 export const MAX_STAGNANT_TICKS = 12;
 
 const WILDERNESS_BASE_COST = 0.62;
-const ENEMY_BORDER_BASE_COST = 3.2;
+const ENEMY_BORDER_BASE_COST = 3.0;
 
 const NEIGHBOR_OFFSETS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
@@ -50,10 +51,19 @@ export function getRelation(
   return state.relations.get(getRelationKey(a, b)) ?? 'NEUTRAL';
 }
 
+export function setWarRelation(state: GameState, a: number, b: number): void {
+  if (a === b || a < 0 || b < 0) return;
+  const key = getRelationKey(a, b);
+  if (state.relations.get(key) !== 'WAR') {
+    state.relations.set(key, 'WAR');
+    state.stateVersion++;
+  }
+}
+
 export function canOrderCaptureCell(
   state: GameState,
   playerId: number,
-  targetOwnerId: number,
+  allowedEnemyIds: ReadonlyArray<number>,
   cellOwner: number,
 ): boolean {
   if (cellOwner === playerId || cellOwner < WILDERNESS_OWNER) {
@@ -62,10 +72,63 @@ export function canOrderCaptureCell(
   if (cellOwner === WILDERNESS_OWNER) {
     return true;
   }
-  if (targetOwnerId === WILDERNESS_OWNER) {
+  if (!allowedEnemyIds.includes(cellOwner)) {
     return false;
   }
-  return cellOwner === targetOwnerId && getRelation(state, playerId, cellOwner) === 'WAR';
+  return getRelation(state, playerId, cellOwner) === 'WAR';
+}
+
+export function collectCenterlineWarEnemies(
+  state: GameState,
+  playerId: number,
+  waypoints: ReadonlyArray<Point>,
+): number[] {
+  if (waypoints.length < 2) return [];
+  const { width, height, owners } = state;
+  const found = new Set<number>();
+
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const a = waypoints[i];
+    const b = waypoints[i + 1];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(1, Math.ceil(segLen / 1.5));
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const px = Math.max(0, Math.min(width - 1, Math.floor(a.x + (b.x - a.x) * t)));
+      const py = Math.max(0, Math.min(height - 1, Math.floor(a.y + (b.y - a.y) * t)));
+      const owner = owners[py * width + px];
+      if (
+        owner >= 0 &&
+        owner !== playerId &&
+        getRelation(state, playerId, owner) === 'WAR'
+      ) {
+        found.add(owner);
+      }
+    }
+  }
+
+  // Also inspect immediate 2-cell neighborhood of the tip for border clicks/targets
+  const tip = waypoints[waypoints.length - 1];
+  const tx = Math.floor(tip.x);
+  const ty = Math.floor(tip.y);
+  for (let dy = -2; dy <= 2; dy++) {
+    const ny = ty + dy;
+    if (ny < 0 || ny >= height) continue;
+    for (let dx = -2; dx <= 2; dx++) {
+      const nx = tx + dx;
+      if (nx < 0 || nx >= width) continue;
+      const owner = owners[ny * width + nx];
+      if (
+        owner >= 0 &&
+        owner !== playerId &&
+        getRelation(state, playerId, owner) === 'WAR'
+      ) {
+        found.add(owner);
+      }
+    }
+  }
+
+  return Array.from(found);
 }
 
 export function computePolylineLength(points: ReadonlyArray<Point>): number {
@@ -193,10 +256,6 @@ function clampPointToMap(p: Point): Point {
   };
 }
 
-/**
- * Simplifies raw mouse drag points via Ramer-Douglas-Peucker into 4..10 smooth control points,
- * optionally applying a perpendicular arc bend offset and clamping total length.
- */
 export function buildSmoothAttackWaypoints(
   rawPoints: ReadonlyArray<Point>,
   bendOffset = 0,
@@ -271,7 +330,7 @@ export function isBorderCell(
   return false;
 }
 
-function countFriendlyNeighbors(
+export function countFriendlyNeighbors(
   state: GameState,
   x: number,
   y: number,
@@ -291,10 +350,6 @@ function countFriendlyNeighbors(
   return count;
 }
 
-/**
- * Claims an initial circular connected land patch around (centerX, centerY) via BFS,
- * ensuring islands or across-strait land are not accidentally claimed.
- */
 export function claimInitialTerritory(
   state: GameState,
   playerId: number,
@@ -362,12 +417,23 @@ interface ExpansionCandidate {
 
 interface ExpandableOrder {
   playerId: number;
-  targetOwnerId: number;
   manpowerCommitted: number;
   manpowerRemaining: number;
   ticksRemaining: number;
   stagnantTicks: number;
   mountainAccum: number;
+}
+
+function getProtectedReserveFloor(defender: PlayerState): number {
+  return Math.min(defender.maxManpower * 0.4, Math.max(28, defender.maxManpower * 0.08));
+}
+
+function applyDefenderAttrition(defender: PlayerState, rawLoss: number): void {
+  if (!defender.alive || rawLoss <= 0) return;
+  const floor = getProtectedReserveFloor(defender);
+  if (defender.manpower > floor) {
+    defender.manpower = Math.max(floor, defender.manpower - rawLoss);
+  }
 }
 
 function computeCellCaptureCost(
@@ -391,13 +457,15 @@ function computeCellCaptureCost(
   const defenderRatio = defender
     ? defender.manpower / Math.max(100, defender.maxManpower)
     : 0;
-  const defenderStrength = 0.75 + 0.85 * Math.min(1, defenderRatio / 0.55);
+  const defenderStrength = 0.72 + 0.85 * Math.min(1, defenderRatio / 0.55);
   const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
   const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
 
   let effectiveCost =
     ENEMY_BORDER_BASE_COST * defenderStrength * cohesionFactor * terrainFactor;
-  let defenderLoss = ENEMY_BORDER_BASE_COST * 0.72 * cohesionFactor;
+  // Scale defender losses proportionally so low reserves don't spiral permanently to zero
+  let defenderLoss =
+    ENEMY_BORDER_BASE_COST * (0.18 + 0.38 * defenderRatio) * cohesionFactor;
 
   if (defender && defender.betrayalDebuffTicks > 0) {
     effectiveCost *= 0.65;
@@ -414,6 +482,7 @@ function computeCellCaptureCost(
 function applyExpansionCandidates(
   state: GameState,
   order: ExpandableOrder,
+  allowedEnemyIds: ReadonlyArray<number>,
   candidates: ExpansionCandidate[],
   onClaim?: (claimedIdx: number) => void,
 ): boolean {
@@ -436,7 +505,7 @@ function applyExpansionCandidates(
     }
 
     const prevOwner = state.owners[cand.idx];
-    if (!canOrderCaptureCell(state, order.playerId, order.targetOwnerId, prevOwner)) {
+    if (!canOrderCaptureCell(state, order.playerId, allowedEnemyIds, prevOwner)) {
       continue;
     }
 
@@ -459,15 +528,13 @@ function applyExpansionCandidates(
         order.mountainAccum += stepCharge;
 
         if (isForeign) {
-          const skirmishAttackerLoss = Math.min(order.manpowerRemaining, stepCharge * 0.35);
+          setWarRelation(state, order.playerId, prevOwner);
+          const skirmishAttackerLoss = Math.min(order.manpowerRemaining, stepCharge * 0.32);
           order.manpowerRemaining -= skirmishAttackerLoss;
           const defender = state.players.get(prevOwner);
           if (defender && defender.alive) {
             const betrayalMul = defender.betrayalDebuffTicks > 0 ? 1.4 : 1.0;
-            defender.manpower = Math.max(
-              0,
-              defender.manpower - stepCharge * 0.25 * betrayalMul,
-            );
+            applyDefenderAttrition(defender, stepCharge * 0.2 * betrayalMul);
           }
         }
 
@@ -488,6 +555,10 @@ function applyExpansionCandidates(
       continue;
     }
 
+    if (isForeign) {
+      setWarRelation(state, order.playerId, prevOwner);
+    }
+
     state.owners[cand.idx] = order.playerId;
     order.manpowerRemaining -= effectiveCost;
     budgetSpent += effectiveCost;
@@ -495,8 +566,8 @@ function applyExpansionCandidates(
 
     if (isForeign) {
       const defender: PlayerState | undefined = state.players.get(prevOwner);
-      if (defender && defender.alive) {
-        defender.manpower = Math.max(0, defender.manpower - defenderLoss);
+      if (defender) {
+        applyDefenderAttrition(defender, defenderLoss);
       }
     }
 
@@ -515,10 +586,6 @@ interface CurveProjection {
   readonly tanY: number;
 }
 
-/**
- * Projects a cell strictly onto segments overlapping the active forward arc window [minArc, maxArc].
- * This prevents an arrow drawn across an encircled enemy from locking onto distant own territory.
- */
 function projectPointOntoWaypointsWindow(
   px: number,
   py: number,
@@ -567,6 +634,53 @@ function projectPointOntoWaypointsWindow(
   };
 }
 
+/**
+ * Walks contiguously along the polyline spine from origin to find how far owned territory
+ * reaches WITHOUT jumping over an intervening foreign state or uncaptured wilderness strip.
+ */
+function computeContiguousOwnedSpineArc(
+  state: GameState,
+  order: AttackOrder,
+  cumDist: ReadonlyArray<number>,
+): number {
+  const totalLen = cumDist[cumDist.length - 1];
+  if (totalLen < 1e-4) return 0;
+
+  const { width, height, owners, terrain } = state;
+  let seg = 0;
+  let lastOwnedArc = 0;
+
+  for (let s = 0; s <= totalLen; s += 1.0) {
+    while (seg < cumDist.length - 2 && cumDist[seg + 1] < s) {
+      seg++;
+    }
+    const segStart = cumDist[seg];
+    const segEnd = cumDist[seg + 1];
+    const span = segEnd - segStart;
+    const t = span > 1e-6 ? (s - segStart) / span : 0;
+    const a = order.waypoints[seg];
+    const b = order.waypoints[seg + 1];
+    const px = a.x + (b.x - a.x) * t;
+    const py = a.y + (b.y - a.y) * t;
+
+    const ix = Math.max(0, Math.min(width - 1, Math.floor(px)));
+    const iy = Math.max(0, Math.min(height - 1, Math.floor(py)));
+    const idx = iy * width + ix;
+
+    if (terrain[idx] === TerrainType.WATER) {
+      continue;
+    }
+    if (owners[idx] === order.playerId) {
+      lastOwnedArc = s;
+    } else if (s > 2.5) {
+      // Hit an uncaptured barrier along the spine — stop contiguous advance right here
+      break;
+    }
+  }
+
+  return lastOwnedArc;
+}
+
 function refundRemainingManpower(player: PlayerState, remaining: number): void {
   if (remaining > 0) {
     player.manpower = Math.min(player.maxManpower, player.manpower + remaining);
@@ -590,6 +704,22 @@ function stepAttackOrders(state: GameState): boolean {
     }
 
     order.ticksRemaining--;
+
+    // Sync allowed WAR enemies dynamically along the centerline (unless wilderness-only)
+    if (!order.wildernessOnly) {
+      const centerlineWar = collectCenterlineWarEnemies(
+        state,
+        order.playerId,
+        order.waypoints,
+      );
+      if (centerlineWar.length > 0) {
+        const merged = new Set(order.targetOwnerIds);
+        for (const id of centerlineWar) {
+          merged.add(id);
+        }
+        order.targetOwnerIds = Array.from(merged);
+      }
+    }
 
     const cumDist: number[] = [0];
     for (let i = 1; i < order.waypoints.length; i++) {
@@ -622,10 +752,13 @@ function stepAttackOrders(state: GameState): boolean {
     minY = Math.max(0, minY);
     maxY = Math.min(height - 1, maxY);
 
-    // Pass 1: advance frontierArc strictly within a contiguous forward window from origin
-    const winMin = Math.max(0, order.frontierArc - 8);
-    const winMax = Math.min(totalLen, order.frontierArc + 16);
-    let maxWindowOwnedArc = order.frontierArc;
+    // Spine march guarantees arrows crossing an enemy state never skip to distant own territory
+    const spineArc = computeContiguousOwnedSpineArc(state, order, cumDist);
+    order.frontierArc = Math.max(order.frontierArc, spineArc);
+
+    const winMin = Math.max(0, order.frontierArc - 4);
+    const winMax = Math.min(totalLen, spineArc + 4);
+    let maxContiguousArc = order.frontierArc;
 
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
@@ -639,17 +772,17 @@ function stepAttackOrders(state: GameState): boolean {
           winMax,
         );
         if (
-          proj.perpDist <= halfCorridor * 0.7 &&
+          proj.perpDist <= halfCorridor * 0.65 &&
           proj.arcDist >= winMin &&
           proj.arcDist <= winMax &&
-          proj.arcDist > maxWindowOwnedArc
+          proj.arcDist > maxContiguousArc
         ) {
-          maxWindowOwnedArc = proj.arcDist;
+          maxContiguousArc = proj.arcDist;
         }
       }
     }
 
-    order.frontierArc = Math.max(order.frontierArc, maxWindowOwnedArc);
+    order.frontierArc = Math.max(order.frontierArc, maxContiguousArc);
     const rawProgress = totalLen > 0 ? Math.min(1, order.frontierArc / totalLen) : 1;
     order.segmentProgress = Math.max(order.segmentProgress, rawProgress);
 
@@ -659,11 +792,10 @@ function stepAttackOrders(state: GameState): boolean {
     }
     order.currentSegmentIndex = segIdx;
 
-    const activeMinArc = Math.max(0, order.frontierArc - 12);
-    const activeMaxArc = Math.min(totalLen + 4, order.frontierArc + 12);
+    const activeMinArc = Math.max(0, order.frontierArc - 10);
+    const activeMaxArc = Math.min(totalLen + 4, order.frontierArc + 10);
     const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
 
-    // Pass 2: gather strictly bounded expansion targets along the active forward corridor
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         const idx = y * width + x;
@@ -693,7 +825,7 @@ function stepAttackOrders(state: GameState): boolean {
           const nOwner = owners[nIdx];
           if (
             terrain[nIdx] === TerrainType.WATER ||
-            !canOrderCaptureCell(state, order.playerId, order.targetOwnerId, nOwner)
+            !canOrderCaptureCell(state, order.playerId, order.targetOwnerIds, nOwner)
           ) {
             continue;
           }
@@ -704,7 +836,7 @@ function stepAttackOrders(state: GameState): boolean {
             order.waypoints,
             cumDist,
             activeMinArc - 2,
-            totalLen + 6,
+            Math.min(totalLen + 6, activeMaxArc + 6),
           );
           if (
             nProj.perpDist > halfCorridor ||
@@ -716,13 +848,14 @@ function stepAttackOrders(state: GameState): boolean {
 
           const stepLen = Math.hypot(dx, dy);
           const dot = (dx * nProj.tanX + dy * nProj.tanY) / stepLen;
-          if (dot < 0.38) {
+          const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
+          if (dot < 0.35 && friendly < 3) {
             continue;
           }
 
-          const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
           const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
-          const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.25;
+          const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.2;
+          const cleanupBonus = friendly >= 3 ? 1.8 : 0;
           const arcLeadBonus = Math.min(
             1.5,
             Math.max(-0.5, (nProj.arcDist - order.frontierArc) * 0.06),
@@ -733,7 +866,8 @@ function stepAttackOrders(state: GameState): boolean {
             friendly * 0.45 +
             arcLeadBonus +
             terrainBonus +
-            wildernessBonus;
+            wildernessBonus +
+            cleanupBonus;
 
           const existing = candidateBestScore.get(nIdx);
           if (!existing || score > existing.score) {
@@ -748,7 +882,12 @@ function stepAttackOrders(state: GameState): boolean {
       candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
-    const claimed = applyExpansionCandidates(state, order, candidates);
+    const claimed = applyExpansionCandidates(
+      state,
+      order,
+      order.targetOwnerIds,
+      candidates,
+    );
     if (claimed) {
       mapChanged = true;
       order.stagnantTicks = 0;
@@ -785,6 +924,8 @@ function stepFrontPushOrders(state: GameState): boolean {
     }
 
     order.ticksRemaining--;
+    const allowedEnemyIds =
+      order.targetOwnerId >= 0 ? [order.targetOwnerId] : [];
     const activeFrontierSet = new Set<number>();
     const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
 
@@ -804,7 +945,7 @@ function stepFrontPushOrders(state: GameState): boolean {
         const nOwner = owners[nIdx];
         if (
           terrain[nIdx] === TerrainType.WATER ||
-          !canOrderCaptureCell(state, order.playerId, order.targetOwnerId, nOwner)
+          !canOrderCaptureCell(state, order.playerId, allowedEnemyIds, nOwner)
         ) {
           continue;
         }
@@ -812,14 +953,17 @@ function stepFrontPushOrders(state: GameState): boolean {
         hasTarget = true;
         const stepLen = Math.hypot(dx, dy);
         const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
-        if (dot < 0.25) {
+        const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
+        // Clean up surrounded micro-dots regardless of wave angle
+        if (dot < 0.25 && friendly < 3) {
           continue;
         }
 
-        const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
         const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
-        const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.2;
-        const score = dot * 2.6 + friendly * 0.5 + terrainBonus + wildernessBonus;
+        const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.15;
+        const cleanupBonus = friendly >= 3 ? 2.2 : 0;
+        const score =
+          dot * 2.6 + friendly * 0.5 + terrainBonus + wildernessBonus + cleanupBonus;
 
         const existing = candidateBestScore.get(nIdx);
         if (!existing || score > existing.score) {
@@ -837,9 +981,15 @@ function stepFrontPushOrders(state: GameState): boolean {
       candidates.push({ idx, nx: val.nx, ny: val.ny, score: val.score });
     }
 
-    const claimed = applyExpansionCandidates(state, order, candidates, (claimedIdx) => {
-      activeFrontierSet.add(claimedIdx);
-    });
+    const claimed = applyExpansionCandidates(
+      state,
+      order,
+      allowedEnemyIds,
+      candidates,
+      (claimedIdx) => {
+        activeFrontierSet.add(claimedIdx);
+      },
+    );
     if (claimed) {
       mapChanged = true;
       order.stagnantTicks = 0;
@@ -868,10 +1018,10 @@ function stepFrontPushOrders(state: GameState): boolean {
 }
 
 /**
- * Immediately annexes enclosed empty pockets (wilderness or foreign state pockets without
- * access to water, map edge, or other neighbors) to the single encircling state.
+ * Immediately annexes enclosed pockets and residual coastal/border micro-dots
+ * surrounded by a single state, plus 1-pass 4-neighbor micro-speckle absorption.
  */
-function annexEncircledPockets(state: GameState): boolean {
+export function annexEncircledPockets(state: GameState): boolean {
   const { width, height, terrain, owners, players } = state;
   const total = width * height;
   const visited = new Uint8Array(total);
@@ -945,25 +1095,77 @@ function annexEncircledPockets(state: GameState): boolean {
     }
 
     if (
-      !touchesMapEdge &&
-      !touchesWater &&
       !multipleEnclosers &&
       singleEncloser !== null &&
       singleEncloser >= 0 &&
       singleEncloser !== regionOwner
     ) {
       const pocketSize = tail;
-      const canAnnexWilderness =
-        regionOwner === WILDERNESS_OWNER && pocketSize <= 2200;
-      const canAnnexForeign =
+      const landLocked = !touchesMapEdge && !touchesWater;
+      const canAnnexMicroDot =
+        pocketSize <= 48 &&
+        (!containsCapital || pocketSize <= 18) &&
+        (regionOwner === WILDERNESS_OWNER ||
+          getRelation(state, singleEncloser, regionOwner) === 'WAR');
+      const canAnnexLandlocked =
+        landLocked &&
+        ((regionOwner === WILDERNESS_OWNER && pocketSize <= 2200) ||
+          (regionOwner >= 0 &&
+            pocketSize < 3200 &&
+            (!containsCapital || pocketSize <= 450) &&
+            getRelation(state, singleEncloser, regionOwner) === 'WAR'));
+      const canAnnexCoastalCutoff =
+        !landLocked &&
         regionOwner >= 0 &&
-        pocketSize < 3200 &&
-        (!containsCapital || pocketSize <= 450);
+        !containsCapital &&
+        pocketSize <= 600 &&
+        getRelation(state, singleEncloser, regionOwner) === 'WAR';
 
-      if (canAnnexWilderness || canAnnexForeign) {
+      if (canAnnexMicroDot || canAnnexLandlocked || canAnnexCoastalCutoff) {
         for (let i = 0; i < tail; i++) {
           owners[queue[i]] = singleEncloser;
         }
+        anyAnnexed = true;
+      }
+    }
+  }
+
+  // Fast 1-pass micro-speckle absorption for 1px isolated residual cells
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      if (terrain[idx] === TerrainType.WATER) continue;
+      const selfOwner = owners[idx];
+      let firstOther = -99;
+      let sameAsOther = 0;
+      let hasOwnNeighbor = false;
+
+      for (const [dx, dy] of CARDINAL_OFFSETS) {
+        const nIdx = (y + dy) * width + (x + dx);
+        if (terrain[nIdx] === TerrainType.WATER) continue;
+        const nOwner = owners[nIdx];
+        if (nOwner === selfOwner) {
+          hasOwnNeighbor = true;
+          break;
+        }
+        if (nOwner >= 0) {
+          if (firstOther === -99) {
+            firstOther = nOwner;
+            sameAsOther = 1;
+          } else if (firstOther === nOwner) {
+            sameAsOther++;
+          }
+        }
+      }
+
+      if (
+        !hasOwnNeighbor &&
+        firstOther >= 0 &&
+        sameAsOther >= 3 &&
+        (selfOwner === WILDERNESS_OWNER ||
+          getRelation(state, firstOther, selfOwner) === 'WAR')
+      ) {
+        owners[idx] = firstOther;
         anyAnnexed = true;
       }
     }

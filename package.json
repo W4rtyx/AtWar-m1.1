@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test:sim": "tsc --project tsconfig.test.json && node --input-type=commonjs -e \"require('fs').writeFileSync('dist-test/package.json', JSON.stringify({type:'commonjs'}))\" && node dist-test/tests/simTest.js",
     "preview": "vite preview"
   },
   "devDependencies": {

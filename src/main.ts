@@ -222,7 +222,7 @@ function bootstrap(): void {
     return null;
   }
 
-  function getNonWarForeignOwnerAtWorld(
+  function getNonWarForeignOwnerAtPoint(
     state: ClientRenderState,
     pt: Point,
   ): { readonly id: number; readonly name: string; readonly isAllied: boolean } | null {
@@ -247,6 +247,31 @@ function bootstrap(): void {
       name: target.name,
       isAllied: target.relationToHuman === 'ALLIED',
     };
+  }
+
+  function getNonWarForeignOwnerAlongArrow(
+    state: ClientRenderState,
+    points: ReadonlyArray<Point>,
+  ): { readonly id: number; readonly name: string; readonly isAllied: boolean } | null {
+    if (points.length === 0) return null;
+    const tipTarget = getNonWarForeignOwnerAtPoint(state, points[points.length - 1]);
+    if (tipTarget) return tipTarget;
+
+    // Also inspect the full arrow spine in case the player dragged across a foreign state back to own territory
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 2));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const found = getNonWarForeignOwnerAtPoint(state, {
+          x: a.x + (b.x - a.x) * t,
+          y: a.y + (b.y - a.y) * t,
+        });
+        if (found) return found;
+      }
+    }
+    return null;
   }
 
   function refreshArrowPreview(state: ClientRenderState): void {
@@ -482,14 +507,14 @@ function bootstrap(): void {
       } else {
         const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
         if (waypoints.length >= 2 && computePolylineLength(waypoints) >= 6) {
-          const tipNonWar = getNonWarForeignOwnerAtWorld(state, worldPt);
+          const spineNonWar = getNonWarForeignOwnerAlongArrow(state, waypoints);
           // Early release before 2s Ambush: never declares war, still advances into wilderness along path
           engine.dispatch({
             type: 'CREATE_ATTACK_ORDER',
             playerId: state.humanPlayerId,
             waypoints,
             manpowerPercent,
-            targetOwnerId: tipNonWar ? WILDERNESS_OWNER : undefined,
+            targetOwnerId: spineNonWar ? WILDERNESS_OWNER : undefined,
           });
         }
       }
@@ -640,8 +665,8 @@ function bootstrap(): void {
 
     let ambushOverlay: AmbushOverlay | null = null;
     if (renderState.phase === 'PLAYING' && rawArrowPoints.length >= 2) {
-      const tipWorld = camera.screenToWorld(lastMouseScreenX, lastMouseScreenY);
-      const nonWarTarget = getNonWarForeignOwnerAtWorld(renderState, tipWorld);
+      const previewWaypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
+      const nonWarTarget = getNonWarForeignOwnerAlongArrow(renderState, previewWaypoints);
       if (nonWarTarget) {
         if (ambushTargetId !== nonWarTarget.id) {
           ambushTargetId = nonWarTarget.id;

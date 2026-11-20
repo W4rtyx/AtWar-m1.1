@@ -119,6 +119,69 @@ function slicePolylineByProgress(
   return out;
 }
 
+function addChamferedVertexEdges(
+  path: Path2D,
+  vx: number,
+  vy: number,
+  tActive: boolean,
+  rActive: boolean,
+  bActive: boolean,
+  lActive: boolean,
+): void {
+  const count = (tActive ? 1 : 0) + (rActive ? 1 : 0) + (bActive ? 1 : 0) + (lActive ? 1 : 0);
+  if (count === 0) return;
+
+  const tx = vx;
+  const ty = vy - 0.5;
+  const rx = vx + 0.5;
+  const ry = vy;
+  const bx = vx;
+  const by = vy + 0.5;
+  const lx = vx - 0.5;
+  const ly = vy;
+
+  if (count === 2) {
+    if (tActive && bActive) {
+      path.moveTo(tx, ty);
+      path.lineTo(bx, by);
+    } else if (lActive && rActive) {
+      path.moveTo(lx, ly);
+      path.lineTo(rx, ry);
+    } else if (tActive && rActive) {
+      path.moveTo(tx, ty);
+      path.lineTo(rx, ry);
+    } else if (rActive && bActive) {
+      path.moveTo(rx, ry);
+      path.lineTo(bx, by);
+    } else if (bActive && lActive) {
+      path.moveTo(bx, by);
+      path.lineTo(lx, ly);
+    } else if (lActive && tActive) {
+      path.moveTo(lx, ly);
+      path.lineTo(tx, ty);
+    }
+    return;
+  }
+
+  // Junction (triple-point / coastal termination): connect active midpoints cleanly to vertex
+  if (tActive) {
+    path.moveTo(tx, ty);
+    path.lineTo(vx, vy);
+  }
+  if (rActive) {
+    path.moveTo(rx, ry);
+    path.lineTo(vx, vy);
+  }
+  if (bActive) {
+    path.moveTo(bx, by);
+    path.lineTo(vx, vy);
+  }
+  if (lActive) {
+    path.moveTo(lx, ly);
+    path.lineTo(vx, vy);
+  }
+}
+
 export class CanvasRenderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -126,6 +189,9 @@ export class CanvasRenderer {
   private readonly offscreenCtx: CanvasRenderingContext2D;
   private readonly imageData: ImageData;
   private readonly baseTerrainRgb: Uint8ClampedArray;
+
+  private coastlinePath: Path2D | null = null;
+  private stateBorderPath: Path2D = new Path2D();
 
   private lastStateVersion = -1;
   private baseBuilt = false;
@@ -215,28 +281,34 @@ export class CanvasRenderer {
           buf[rgbIdx + 1] = Math.max(62, Math.min(166, 120 + elevLift - shade + contour));
           buf[rgbIdx + 2] = Math.max(54, Math.min(152, 105 + elevLift - shade + contour));
         } else {
-          // Soft coastal tint on shoreline plains for smooth transitions
-          let waterNeighbors = 0;
-          for (let dy = -1; dy <= 1; dy++) {
-            const ny = y + dy;
-            if (ny < 0 || ny >= height) continue;
-            for (let dx = -1; dx <= 1; dx++) {
-              if (dx === 0 && dy === 0) continue;
-              const nx = x + dx;
-              if (nx < 0 || nx >= width) continue;
-              if (terrain[ny * width + nx] === TerrainType.WATER) {
-                waterNeighbors++;
-              }
-            }
-          }
-          const coastTint = waterNeighbors * 2.2;
-          buf[rgbIdx] = 198 - coastTint;
-          buf[rgbIdx + 1] = 192 - coastTint * 0.9;
-          buf[rgbIdx + 2] = 177 - coastTint * 0.6;
+          buf[rgbIdx] = 198;
+          buf[rgbIdx + 1] = 192;
+          buf[rgbIdx + 2] = 177;
         }
       }
     }
 
+    // Build smooth chamfered vector coastline once
+    const coast = new Path2D();
+    for (let vy = 1; vy < height; vy++) {
+      for (let vx = 1; vx < width; vx++) {
+        const tlWater = terrain[(vy - 1) * width + (vx - 1)] === TerrainType.WATER;
+        const trWater = terrain[(vy - 1) * width + vx] === TerrainType.WATER;
+        const blWater = terrain[vy * width + (vx - 1)] === TerrainType.WATER;
+        const brWater = terrain[vy * width + vx] === TerrainType.WATER;
+
+        addChamferedVertexEdges(
+          coast,
+          vx,
+          vy,
+          tlWater !== trWater,
+          trWater !== brWater,
+          blWater !== brWater,
+          tlWater !== blWater,
+        );
+      }
+    }
+    this.coastlinePath = coast;
     this.baseBuilt = true;
   }
 
@@ -254,6 +326,7 @@ export class CanvasRenderer {
     const data = this.imageData.data;
     const base = this.baseTerrainRgb;
 
+    // Fill clean interior colors without baking pixelated dark edges into the bitmap
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const idx = y * width + x;
@@ -278,86 +351,57 @@ export class CanvasRenderer {
           continue;
         }
 
-        // Crisp 4-neighbor border detection without blurry halo
-        let landBorder = false;
-        let coastBorder = false;
         let nearBorder = false;
-
-        if (x > 0) {
-          const nOwner = owners[idx - 1];
-          if (nOwner !== owner) {
-            if (terrain[idx - 1] === TerrainType.WATER) coastBorder = true;
-            else landBorder = true;
-          } else if (x > 1 && owners[idx - 2] !== owner && terrain[idx - 2] !== TerrainType.WATER) {
-            nearBorder = true;
-          }
-        }
-        if (x < width - 1) {
-          const nOwner = owners[idx + 1];
-          if (nOwner !== owner) {
-            if (terrain[idx + 1] === TerrainType.WATER) coastBorder = true;
-            else landBorder = true;
-          } else if (
-            x < width - 2 &&
-            owners[idx + 2] !== owner &&
-            terrain[idx + 2] !== TerrainType.WATER
-          ) {
-            nearBorder = true;
-          }
-        }
-        if (y > 0) {
-          const nOwner = owners[idx - width];
-          if (nOwner !== owner) {
-            if (terrain[idx - width] === TerrainType.WATER) coastBorder = true;
-            else landBorder = true;
-          } else if (
-            y > 1 &&
-            owners[idx - width * 2] !== owner &&
-            terrain[idx - width * 2] !== TerrainType.WATER
-          ) {
-            nearBorder = true;
-          }
-        }
-        if (y < height - 1) {
-          const nOwner = owners[idx + width];
-          if (nOwner !== owner) {
-            if (terrain[idx + width] === TerrainType.WATER) coastBorder = true;
-            else landBorder = true;
-          } else if (
-            y < height - 2 &&
-            owners[idx + width * 2] !== owner &&
-            terrain[idx + width * 2] !== TerrainType.WATER
-          ) {
-            nearBorder = true;
-          }
+        if (
+          (x > 1 && owners[idx - 2] !== owner && terrain[idx - 2] !== TerrainType.WATER) ||
+          (x < width - 2 && owners[idx + 2] !== owner && terrain[idx + 2] !== TerrainType.WATER) ||
+          (y > 1 && owners[idx - width * 2] !== owner && terrain[idx - width * 2] !== TerrainType.WATER) ||
+          (y < height - 2 && owners[idx + width * 2] !== owner && terrain[idx + width * 2] !== TerrainType.WATER)
+        ) {
+          nearBorder = true;
         }
 
         const isMountain = terrain[idx] === TerrainType.MOUNTAINS;
-        const baseBlend = nearBorder || landBorder ? 0.76 : 0.56;
+        const baseBlend = nearBorder ? 0.72 : 0.56;
         const blend = isMountain ? baseBlend - 0.14 : baseBlend;
 
-        let r = pColor[0] * blend + base[rgbIdx] * (1 - blend);
-        let g = pColor[1] * blend + base[rgbIdx + 1] * (1 - blend);
-        let b = pColor[2] * blend + base[rgbIdx + 2] * (1 - blend);
-
-        if (landBorder) {
-          r *= 0.4;
-          g *= 0.4;
-          b *= 0.4;
-        } else if (coastBorder) {
-          r *= 0.68;
-          g *= 0.68;
-          b *= 0.68;
-        }
-
-        data[rgbaIdx] = r;
-        data[rgbaIdx + 1] = g;
-        data[rgbaIdx + 2] = b;
+        data[rgbaIdx] = pColor[0] * blend + base[rgbIdx] * (1 - blend);
+        data[rgbaIdx + 1] = pColor[1] * blend + base[rgbIdx + 1] * (1 - blend);
+        data[rgbaIdx + 2] = pColor[2] * blend + base[rgbIdx + 2] * (1 - blend);
         data[rgbaIdx + 3] = 255;
       }
     }
 
     this.offscreenCtx.putImageData(this.imageData, 0, 0);
+
+    // Build crisp chamfered vector state borders over the smooth bitmap
+    const borders = new Path2D();
+    for (let vy = 1; vy < height; vy++) {
+      for (let vx = 1; vx < width; vx++) {
+        const tlIdx = (vy - 1) * width + (vx - 1);
+        const trIdx = (vy - 1) * width + vx;
+        const blIdx = vy * width + (vx - 1);
+        const brIdx = vy * width + vx;
+
+        const tlLand = terrain[tlIdx] !== TerrainType.WATER;
+        const trLand = terrain[trIdx] !== TerrainType.WATER;
+        const blLand = terrain[blIdx] !== TerrainType.WATER;
+        const brLand = terrain[brIdx] !== TerrainType.WATER;
+
+        const tlO = owners[tlIdx];
+        const trO = owners[trIdx];
+        const blO = owners[blIdx];
+        const brO = owners[brIdx];
+
+        const tActive = tlLand && trLand && tlO !== trO && (tlO >= 0 || trO >= 0);
+        const rActive = trLand && brLand && trO !== brO && (trO >= 0 || brO >= 0);
+        const bActive = blLand && brLand && blO !== brO && (blO >= 0 || brO >= 0);
+        const lActive = tlLand && blLand && tlO !== blO && (tlO >= 0 || blO >= 0);
+
+        addChamferedVertexEdges(borders, vx, vy, tActive, rActive, bActive, lActive);
+      }
+    }
+    this.stateBorderPath = borders;
     this.lastStateVersion = state.stateVersion;
   }
 
@@ -377,9 +421,10 @@ export class CanvasRenderer {
     ctx.fillStyle = '#151e27';
     ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
 
-    // Crisp, unblurred terrain & borders (720x500 direct blit)
+    // Smooth terrain & interior fills (no blocky pixel squares)
     ctx.save();
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(
       this.offscreenCanvas,
       camera.offsetX,
@@ -387,6 +432,24 @@ export class CanvasRenderer {
       state.width * camera.zoom,
       state.height * camera.zoom,
     );
+    ctx.restore();
+
+    // Crisp vector coastline & state border contours (chamfered, never blurry)
+    ctx.save();
+    ctx.translate(camera.offsetX, camera.offsetY);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    if (this.coastlinePath) {
+      ctx.strokeStyle = 'rgba(18, 28, 38, 0.85)';
+      ctx.lineWidth = Math.max(0.55, 1.05 / camera.zoom);
+      ctx.stroke(this.coastlinePath);
+    }
+
+    ctx.strokeStyle = 'rgba(16, 20, 26, 0.90)';
+    ctx.lineWidth = Math.max(0.7, 1.55 / camera.zoom);
+    ctx.stroke(this.stateBorderPath);
     ctx.restore();
 
     ctx.strokeStyle = '#33414f';
@@ -629,20 +692,17 @@ export class CanvasRenderer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Static outer casing along exact waypoints
     this.traceSmoothSpline(ctx, trimmedPts);
     ctx.strokeStyle = 'rgba(13, 18, 24, 0.86)';
     ctx.lineWidth = lineWidth + 2.6;
     ctx.stroke();
 
-    // Base route shaft (fixed thickness — never jitters)
     this.traceSmoothSpline(ctx, trimmedPts);
     ctx.globalAlpha = 0.55;
     ctx.strokeStyle = fillColor;
     ctx.lineWidth = lineWidth;
     ctx.stroke();
 
-    // Smooth advancing progress overlay along the stationary path
     const progressPts = slicePolylineByProgress(trimmedPts, progress);
     if (progressPts.length >= 2) {
       this.traceSmoothSpline(ctx, progressPts);
@@ -654,7 +714,6 @@ export class CanvasRenderer {
 
     ctx.globalAlpha = 1;
 
-    // Stationary arrowhead
     const px = -uy;
     const py = ux;
     ctx.beginPath();
@@ -832,7 +891,6 @@ export class CanvasRenderer {
     ctx.fillStyle = '#f0ece1';
     ctx.fillText(`${ambush.remainingSec.toFixed(1)}s`, cx, cy + 0.5);
 
-    // Warning banner right beside the countdown ring
     ctx.font = '600 11px "Segoe UI", system-ui, sans-serif';
     const textW = ctx.measureText(label).width + 14;
     const boxX = cx + radius + 8;

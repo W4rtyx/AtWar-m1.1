@@ -3,13 +3,16 @@ import {
   MAX_ARROW_PATH_LENGTH,
   MAX_ORDER_TICKS,
   MIN_ACTIVE_ORDER_MANPOWER,
+  annexEncircledPockets,
   buildSmoothAttackWaypoints,
   canOrderCaptureCell,
   claimInitialTerritory,
   clampPolylineLength,
+  collectCenterlineWarEnemies,
   computePolylineLength,
   getRelation,
   isBorderCell,
+  setWarRelation,
   stepFrontExpansion,
 } from './frontExpansion';
 import { generateEuropeMap } from './mapGenerator';
@@ -62,10 +65,8 @@ export function createInitialGameState(seed = 20261120): GameState {
 }
 
 /**
- * Computes non-linear manpower capacity and growth rate around a 50% optimum:
- * - Low fill (< 45%): slower recovery that accelerates toward optimum
- * - Optimum window (45-55%): peak growth rate
- * - High fill (> 55%): diminishing growth tapering to zero at 100% capacity
+ * Computes non-linear manpower capacity and growth rate around a 50% optimum,
+ * with a protected emergency home-defense recovery floor to prevent death spirals.
  */
 function updatePlayerManpowerEconomy(player: PlayerState, applyTickGrowth: boolean): void {
   const maxManpower = Math.round(320 + Math.pow(Math.max(1, player.territoryCells), 0.88) * 0.62);
@@ -74,14 +75,18 @@ function updatePlayerManpowerEconomy(player: PlayerState, applyTickGrowth: boole
 
   let efficiency: number;
   if (fillRatio <= OPTIMUM_FILL_RATIO) {
-    efficiency = 0.22 + 0.78 * Math.sin((fillRatio / OPTIMUM_FILL_RATIO) * (Math.PI / 2));
+    efficiency = 0.48 + 0.52 * Math.sin((fillRatio / OPTIMUM_FILL_RATIO) * (Math.PI / 2));
   } else {
     const overRatio = (fillRatio - OPTIMUM_FILL_RATIO) / (1 - OPTIMUM_FILL_RATIO);
     efficiency = Math.pow(Math.max(0, 1 - overRatio), 1.65);
   }
 
   const peakIncomePerSec = 7.2 + Math.pow(Math.max(1, player.territoryCells), 0.76) * 0.066;
-  const incomePerSec = peakIncomePerSec * efficiency;
+  let incomePerSec = peakIncomePerSec * efficiency;
+
+  if (fillRatio < 0.18) {
+    incomePerSec = Math.max(incomePerSec, 14 + maxManpower * 0.025);
+  }
 
   player.maxManpower = maxManpower;
   player.manpowerGrowthEfficiency = efficiency;
@@ -192,8 +197,7 @@ function declareWar(state: GameState, actorId: number, targetId: number): void {
     actor.betrayalDebuffTicks = BETRAYAL_DEBUFF_TICKS;
   }
 
-  state.relations.set(getRelationKey(actorId, targetId), 'WAR');
-  state.stateVersion++;
+  setWarRelation(state, actorId, targetId);
 }
 
 function isOrderDirectedAtState(
@@ -359,43 +363,6 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
   state.stateVersion++;
 }
 
-function resolveArrowTargetOwner(
-  state: GameState,
-  playerId: number,
-  waypoints: ReadonlyArray<Point>,
-  explicitTargetOwnerId?: number,
-): number {
-  if (explicitTargetOwnerId !== undefined) {
-    if (explicitTargetOwnerId === WILDERNESS_OWNER) {
-      return WILDERNESS_OWNER;
-    }
-    if (
-      explicitTargetOwnerId >= 0 &&
-      explicitTargetOwnerId !== playerId &&
-      getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
-    ) {
-      return explicitTargetOwnerId;
-    }
-    return WILDERNESS_OWNER;
-  }
-
-  const startIdx = Math.max(1, Math.floor(waypoints.length * 0.7));
-  for (let i = waypoints.length - 1; i >= startIdx; i--) {
-    const ix = Math.max(0, Math.min(state.width - 1, Math.floor(waypoints[i].x)));
-    const iy = Math.max(0, Math.min(state.height - 1, Math.floor(waypoints[i].y)));
-    const owner = state.owners[iy * state.width + ix];
-    if (
-      owner >= 0 &&
-      owner !== playerId &&
-      getRelation(state, playerId, owner) === 'WAR'
-    ) {
-      return owner;
-    }
-  }
-
-  return WILDERNESS_OWNER;
-}
-
 function handleCreateAttackOrder(
   state: GameState,
   playerId: number,
@@ -429,12 +396,20 @@ function handleCreateAttackOrder(
     return;
   }
 
-  const targetOwnerId = resolveArrowTargetOwner(
-    state,
-    playerId,
-    waypoints,
-    explicitTargetOwnerId,
-  );
+  const wildernessOnly = explicitTargetOwnerId === WILDERNESS_OWNER;
+  let targetOwnerIds: number[];
+  if (wildernessOnly) {
+    targetOwnerIds = [];
+  } else if (
+    explicitTargetOwnerId !== undefined &&
+    explicitTargetOwnerId >= 0 &&
+    explicitTargetOwnerId !== playerId &&
+    getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
+  ) {
+    targetOwnerIds = [explicitTargetOwnerId];
+  } else {
+    targetOwnerIds = collectCenterlineWarEnemies(state, playerId, waypoints);
+  }
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const committed = player.manpower * (clampedPct / 100);
@@ -451,7 +426,8 @@ function handleCreateAttackOrder(
     origin: anchoredOrigin,
     waypoints,
     frontierArc: 0,
-    targetOwnerId,
+    targetOwnerIds,
+    wildernessOnly,
     currentSegmentIndex: 0,
     segmentProgress: 0,
     totalPathLength,
@@ -653,11 +629,10 @@ function handleBorderSurgePush(
   ) {
     targetOwnerId = clickedOwner;
   } else {
-    // Check nearby cells around click for a WAR border
-    for (let dy = -4; dy <= 4 && targetOwnerId === WILDERNESS_OWNER; dy++) {
+    for (let dy = -5; dy <= 5 && targetOwnerId === WILDERNESS_OWNER; dy++) {
       const ny = iy + dy;
       if (ny < 0 || ny >= height) continue;
-      for (let dx = -4; dx <= 4; dx++) {
+      for (let dx = -5; dx <= 5; dx++) {
         const nx = ix + dx;
         if (nx < 0 || nx >= width) continue;
         const o = owners[ny * width + nx];
@@ -669,7 +644,14 @@ function handleBorderSurgePush(
     }
   }
 
-  const radius = 14;
+  // Immediately absorb any stray enclosed micro-dots before launching the surge wave
+  if (annexEncircledPockets(state)) {
+    recalculateTerritoryAndCapitals(state);
+    state.stateVersion++;
+  }
+
+  const allowedEnemyIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
+  const radius = 16;
   const rSq = radius * radius;
   const frontierCells: number[] = [];
   let sumDirX = 0;
@@ -695,7 +677,7 @@ function handleBorderSurgePush(
           if (nx < 0 || nx >= width) continue;
           const nIdx = ny * width + nx;
           if (terrain[nIdx] === TerrainType.WATER) continue;
-          if (canOrderCaptureCell(state, playerId, targetOwnerId, owners[nIdx])) {
+          if (canOrderCaptureCell(state, playerId, allowedEnemyIds, owners[nIdx])) {
             cellHasTarget = true;
             sumDirX += dx;
             sumDirY += dy;
@@ -944,6 +926,7 @@ export function createClientRenderState(state: GameState): ClientRenderState {
       ...o,
       origin: { ...o.origin },
       waypoints: o.waypoints.map((pt) => ({ ...pt })),
+      targetOwnerIds: [...o.targetOwnerIds],
     })),
     frontPushOrders: state.frontPushOrders.map((o) => ({
       ...o,

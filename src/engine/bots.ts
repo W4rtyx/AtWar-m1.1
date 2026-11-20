@@ -3,8 +3,10 @@ import {
   buildSmoothAttackWaypoints,
   claimInitialTerritory,
   computePolylineLength,
+  countFriendlyNeighbors,
   getRelation,
   isBorderCell,
+  setWarRelation,
 } from './frontExpansion';
 import { nextRandom } from './mapGenerator';
 import {
@@ -13,7 +15,6 @@ import {
   Point,
   TerrainType,
   WILDERNESS_OWNER,
-  getRelationKey,
 } from './types';
 
 interface BotIdentity {
@@ -145,6 +146,16 @@ interface BotTargetCandidate {
   readonly dirY: number;
   readonly isWilderness: boolean;
   readonly targetOwnerId: number;
+  readonly tacticalScore: number;
+}
+
+function hasActiveWarOpponent(state: GameState, botId: number): boolean {
+  for (const other of state.players.values()) {
+    if (other.id !== botId && other.alive && getRelation(state, botId, other.id) === 'WAR') {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function stepBots(state: GameState): void {
@@ -160,10 +171,11 @@ export function stepBots(state: GameState): void {
       continue;
     }
     player.nextBotDecisionTick =
-      state.tick + 12 + Math.floor(nextRandom(rngBox) * 6);
+      state.tick + 14 + Math.floor(nextRandom(rngBox) * 6);
 
+    // One well-coordinated attack at a time to avoid scattered manpower waste
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
-    if (activeBotOrders >= 2 || player.manpower < player.maxManpower * 0.42) {
+    if (activeBotOrders >= 1 || player.manpower < player.maxManpower * 0.46) {
       continue;
     }
 
@@ -171,8 +183,8 @@ export function stepBots(state: GameState): void {
     const warTargets: BotTargetCandidate[] = [];
     const neutralTargets: BotTargetCandidate[] = [];
 
-    for (let y = 0; y < height; y += 2) {
-      for (let x = 0; x < width; x += 2) {
+    for (let y = 0; y < height; y += 3) {
+      for (let x = 0; x < width; x += 3) {
         if (!isBorderCell(state, x, y, player.id)) {
           continue;
         }
@@ -184,6 +196,7 @@ export function stepBots(state: GameState): void {
         let sumWarY = 0;
         let warCount = 0;
         let warOwnerId = -1;
+        let warPlainsCount = 0;
         let sumNeutralX = 0;
         let sumNeutralY = 0;
         let neutralCount = 0;
@@ -196,7 +209,8 @@ export function stepBots(state: GameState): void {
             const nx = x + dx;
             if (nx < 0 || nx >= width || (dx === 0 && dy === 0)) continue;
             const nIdx = ny * width + nx;
-            if (terrain[nIdx] === TerrainType.WATER) continue;
+            const nTerrain = terrain[nIdx];
+            if (nTerrain === TerrainType.WATER) continue;
             const nOwner = owners[nIdx];
             if (nOwner === WILDERNESS_OWNER) {
               sumWildX += dx;
@@ -209,6 +223,7 @@ export function stepBots(state: GameState): void {
                 sumWarY += dy;
                 warCount++;
                 warOwnerId = nOwner;
+                if (nTerrain === TerrainType.PLAINS) warPlainsCount++;
               } else if (rel === 'NEUTRAL') {
                 sumNeutralX += dx;
                 sumNeutralY += dy;
@@ -229,11 +244,15 @@ export function stepBots(state: GameState): void {
               dirY: sumWildY / len,
               isWilderness: true,
               targetOwnerId: WILDERNESS_OWNER,
+              tacticalScore: wildCount,
             });
           }
         } else if (warCount > 0 && warOwnerId >= 0) {
           const len = Math.hypot(sumWarX, sumWarY);
           if (len > 0.1) {
+            const enemyNeighbors = countFriendlyNeighbors(state, x, y, warOwnerId);
+            const targetState = state.players.get(warOwnerId);
+            const betrayalBonus = targetState && targetState.betrayalDebuffTicks > 0 ? 4 : 0;
             warTargets.push({
               bx: x,
               by: y,
@@ -241,6 +260,8 @@ export function stepBots(state: GameState): void {
               dirY: sumWarY / len,
               isWilderness: false,
               targetOwnerId: warOwnerId,
+              tacticalScore:
+                warPlainsCount * 1.4 - enemyNeighbors * 0.8 + betrayalBonus + nextRandom(rngBox),
             });
           }
         } else if (neutralCount > 0 && neutralOwnerId >= 0) {
@@ -253,37 +274,40 @@ export function stepBots(state: GameState): void {
               dirY: sumNeutralY / len,
               isWilderness: false,
               targetOwnerId: neutralOwnerId,
+              tacticalScore: neutralCount,
             });
           }
         }
       }
     }
 
-    let pool: BotTargetCandidate[] = [];
+    let chosen: BotTargetCandidate | null = null;
     if (wildernessTargets.length > 0) {
-      pool = wildernessTargets;
-    } else if (warTargets.length > 0) {
-      pool = warTargets;
+      chosen =
+        wildernessTargets[Math.floor(nextRandom(rngBox) * wildernessTargets.length)];
+    } else if (
+      warTargets.length > 0 &&
+      player.manpower >= player.maxManpower * 0.48
+    ) {
+      warTargets.sort((a, b) => b.tacticalScore - a.tacticalScore);
+      const topSlice = Math.min(4, warTargets.length);
+      chosen = warTargets[Math.floor(nextRandom(rngBox) * topSlice)];
     } else if (
       neutralTargets.length > 0 &&
-      player.manpower >= player.maxManpower * 0.46 &&
-      nextRandom(rngBox) < 0.42
+      !hasActiveWarOpponent(state, player.id) &&
+      player.manpower >= player.maxManpower * 0.52 &&
+      nextRandom(rngBox) < 0.35
     ) {
-      pool = neutralTargets;
+      chosen = neutralTargets[Math.floor(nextRandom(rngBox) * neutralTargets.length)];
     }
 
-    if (pool.length === 0) {
+    if (!chosen) {
       continue;
     }
 
-    const chosen = pool[Math.floor(nextRandom(rngBox) * pool.length)];
-
-    if (
-      chosen.targetOwnerId >= 0 &&
-      getRelation(state, player.id, chosen.targetOwnerId) === 'NEUTRAL'
-    ) {
-      state.relations.set(getRelationKey(player.id, chosen.targetOwnerId), 'WAR');
-      state.stateVersion++;
+    // Bidirectional WAR registration before launching any attack on a foreign state
+    if (chosen.targetOwnerId >= 0) {
+      setWarRelation(state, player.id, chosen.targetOwnerId);
     }
 
     const pushDist = chosen.isWilderness ? 42 : 30;
@@ -294,16 +318,14 @@ export function stepBots(state: GameState): void {
         y: Math.max(0, Math.min(height - 1, chosen.by + chosen.dirY * pushDist)),
       },
     ];
-    const bendOffset = (nextRandom(rngBox) - 0.5) * 14;
+    const bendOffset = (nextRandom(rngBox) - 0.5) * 12;
     const waypoints = buildSmoothAttackWaypoints(rawPts, bendOffset);
     const totalPathLength = computePolylineLength(waypoints);
     if (totalPathLength < 6) {
       continue;
     }
 
-    const commitRatio = chosen.isWilderness
-      ? 0.22 + nextRandom(rngBox) * 0.08
-      : 0.26 + nextRandom(rngBox) * 0.10;
+    const commitRatio = chosen.isWilderness ? 0.2 : 0.25;
     const manpowerCommitted = player.manpower * commitRatio;
     if (manpowerCommitted < 16) {
       continue;
@@ -316,7 +338,8 @@ export function stepBots(state: GameState): void {
       origin: waypoints[0],
       waypoints,
       frontierArc: 0,
-      targetOwnerId: chosen.targetOwnerId,
+      targetOwnerIds: chosen.targetOwnerId >= 0 ? [chosen.targetOwnerId] : [],
+      wildernessOnly: chosen.targetOwnerId < 0,
       currentSegmentIndex: 0,
       segmentProgress: 0,
       totalPathLength,

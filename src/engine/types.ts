@@ -84,7 +84,8 @@ export interface AttackOrder {
   readonly origin: Point;
   waypoints: Point[];
   frontierArc: number;
-  readonly targetOwnerId: number;
+  targetOwnerIds: number[];
+  readonly wildernessOnly: boolean;
   currentSegmentIndex: number;
   segmentProgress: number;
   totalPathLength: number;
