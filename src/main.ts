@@ -4,7 +4,12 @@ import {
   computePolylineLength,
 } from './engine/frontExpansion';
 import { createEngineController } from './engine/simulation';
-import { ClientRenderState, Point, TICK_DT } from './engine/types';
+import {
+  ClientRenderState,
+  Point,
+  TICK_DT,
+  WILDERNESS_OWNER,
+} from './engine/types';
 import { Camera } from './render/camera';
 import {
   AmbushOverlay,
@@ -37,6 +42,7 @@ function bootstrap(): void {
   let manpowerPercent = 35;
   let simSpeed: SimSpeed = 1;
   let selectedFrontierCells: number[] = [];
+  let initialSelectedCount = 0;
   let frontLassoPoints: Point[] = [];
   let hoverCell: Point | null = null;
 
@@ -61,9 +67,21 @@ function bootstrap(): void {
   let lastPanY = 0;
   const keysPressed = new Set<string>();
 
+  let lastFrameMs = performance.now();
+  let accumulatorSec = 0;
+  let lastPrunedVersion = -1;
+
   function resetAmbush(): void {
     ambushTargetId = null;
     ambushElapsedMs = 0;
+  }
+
+  function clearFrontSelection(): void {
+    selectedFrontierCells = [];
+    initialSelectedCount = 0;
+    frontLassoPoints = [];
+    frontPushStart = null;
+    frontPushPreview = null;
   }
 
   function clearInteractionPreviews(): void {
@@ -79,10 +97,14 @@ function bootstrap(): void {
 
   const hud = new HudController(hudRoot, {
     onTogglePause: () => {
+      accumulatorSec = 0;
+      lastFrameMs = performance.now();
       engine.dispatch({ type: 'TOGGLE_PAUSE' });
     },
     onRestart: () => {
-      selectedFrontierCells = [];
+      accumulatorSec = 0;
+      lastFrameMs = performance.now();
+      clearFrontSelection();
       clearInteractionPreviews();
       engine.dispatch({ type: 'RESTART_GAME' });
     },
@@ -108,13 +130,10 @@ function bootstrap(): void {
         dirY,
         manpowerPercent,
       });
-      selectedFrontierCells = [];
+      clearFrontSelection();
     },
     onClearFrontSelection: () => {
-      selectedFrontierCells = [];
-      frontLassoPoints = [];
-      frontPushStart = null;
-      frontPushPreview = null;
+      clearFrontSelection();
     },
     onCancelOrders: () => {
       const state = engine.getRenderState();
@@ -125,6 +144,8 @@ function bootstrap(): void {
     },
     onSpeedChange: (speed) => {
       simSpeed = speed;
+      accumulatorSec = 0;
+      lastFrameMs = performance.now();
     },
     onDeclareWar: (targetId) => {
       const state = engine.getRenderState();
@@ -290,6 +311,7 @@ function bootstrap(): void {
       } else {
         frontLassoPoints = [worldPt];
         selectedFrontierCells = engine.findHumanBorderCellsFromLasso(frontLassoPoints);
+        initialSelectedCount = selectedFrontierCells.length;
       }
       return;
     }
@@ -304,6 +326,19 @@ function bootstrap(): void {
     arrowBendOffset = 0;
     arrowPreview = null;
     resetAmbush();
+  });
+
+  canvas.addEventListener('dblclick', (e) => {
+    const state = engine.getRenderState();
+    if (state.phase !== 'PLAYING' || e.button !== 0) return;
+    const worldPt = camera.screenToWorld(e.clientX, e.clientY);
+    engine.dispatch({
+      type: 'BORDER_SURGE_PUSH',
+      playerId: state.humanPlayerId,
+      x: worldPt.x,
+      y: worldPt.y,
+      manpowerPercent: Math.max(manpowerPercent, 65),
+    });
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -354,6 +389,7 @@ function bootstrap(): void {
       if (Math.hypot(worldPt.x - last.x, worldPt.y - last.y) >= 1.2) {
         frontLassoPoints.push(worldPt);
         selectedFrontierCells = engine.findHumanBorderCellsFromLasso(frontLassoPoints);
+        initialSelectedCount = selectedFrontierCells.length;
       }
       return;
     }
@@ -409,9 +445,10 @@ function bootstrap(): void {
           dirY: dy,
           manpowerPercent,
         });
-        selectedFrontierCells = [];
+        clearFrontSelection();
       } else {
         selectedFrontierCells = engine.findHumanBorderCellsFromLasso([worldPt]);
+        initialSelectedCount = selectedFrontierCells.length;
       }
       frontPushStart = null;
       frontPushPreview = null;
@@ -421,6 +458,7 @@ function bootstrap(): void {
     if (frontLassoPoints.length > 0) {
       frontLassoPoints.push(worldPt);
       selectedFrontierCells = engine.findHumanBorderCellsFromLasso(frontLassoPoints);
+      initialSelectedCount = selectedFrontierCells.length;
       frontLassoPoints = [];
       return;
     }
@@ -431,16 +469,27 @@ function bootstrap(): void {
         rawArrowPoints.push(worldPt);
       }
 
-      // If released over a NEUTRAL or ALLIED state before 2s ambush completes, cancel safely
-      const tipNonWar = getNonWarForeignOwnerAtWorld(state, worldPt);
-      if (tipNonWar === null) {
+      const pathLen = computePolylineLength(rawArrowPoints);
+      if (pathLen < 6) {
+        // Short click on/near border triggers a targeted local surge
+        engine.dispatch({
+          type: 'BORDER_SURGE_PUSH',
+          playerId: state.humanPlayerId,
+          x: worldPt.x,
+          y: worldPt.y,
+          manpowerPercent,
+        });
+      } else {
         const waypoints = buildSmoothAttackWaypoints(rawArrowPoints, arrowBendOffset);
         if (waypoints.length >= 2 && computePolylineLength(waypoints) >= 6) {
+          const tipNonWar = getNonWarForeignOwnerAtWorld(state, worldPt);
+          // Early release before 2s Ambush: never declares war, still advances into wilderness along path
           engine.dispatch({
             type: 'CREATE_ATTACK_ORDER',
             playerId: state.humanPlayerId,
             waypoints,
             manpowerPercent,
+            targetOwnerId: tipNonWar ? WILDERNESS_OWNER : undefined,
           });
         }
       }
@@ -475,12 +524,14 @@ function bootstrap(): void {
 
     if (e.code === 'Space') {
       e.preventDefault();
+      accumulatorSec = 0;
+      lastFrameMs = performance.now();
       engine.dispatch({ type: 'TOGGLE_PAUSE' });
       return;
     }
 
     if (e.code === 'Escape') {
-      selectedFrontierCells = [];
+      clearFrontSelection();
       clearInteractionPreviews();
       hud.leaderboard.closeProfile();
       return;
@@ -528,7 +579,7 @@ function bootstrap(): void {
           dirY,
           manpowerPercent,
         });
-        selectedFrontierCells = [];
+        clearFrontSelection();
       }
     }
   });
@@ -536,9 +587,6 @@ function bootstrap(): void {
   window.addEventListener('keyup', (e) => {
     keysPressed.delete(e.code);
   });
-
-  let lastFrameMs = performance.now();
-  let accumulatorSec = 0;
 
   function frame(nowMs: number): void {
     const rawDtMs = Math.min(100, Math.max(0, nowMs - lastFrameMs));
@@ -574,7 +622,22 @@ function bootstrap(): void {
 
     const renderState = engine.getRenderState();
 
-    // Update 2.0s Ambush hold countdown if arrow tip hovers over NEUTRAL or ALLIED state
+    // Auto-clear stale front selection when borders advance or disappear
+    if (
+      selectedFrontierCells.length > 0 &&
+      frontLassoPoints.length === 0 &&
+      renderState.stateVersion !== lastPrunedVersion
+    ) {
+      lastPrunedVersion = renderState.stateVersion;
+      selectedFrontierCells = engine.pruneHumanBorderCells(
+        selectedFrontierCells,
+        initialSelectedCount,
+      );
+      if (selectedFrontierCells.length === 0) {
+        initialSelectedCount = 0;
+      }
+    }
+
     let ambushOverlay: AmbushOverlay | null = null;
     if (renderState.phase === 'PLAYING' && rawArrowPoints.length >= 2) {
       const tipWorld = camera.screenToWorld(lastMouseScreenX, lastMouseScreenY);

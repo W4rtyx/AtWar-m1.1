@@ -54,6 +54,7 @@ export interface PlayerState {
   manpowerIncomePerSec: number;
   manpowerGrowthEfficiency: number;
   betrayalDebuffTicks: number;
+  nextBotDecisionTick: number;
   territoryCells: number;
   alive: boolean;
 }
@@ -80,7 +81,10 @@ export interface PublicPlayerInfo {
 export interface AttackOrder {
   id: number;
   playerId: number;
+  readonly origin: Point;
   waypoints: Point[];
+  frontierArc: number;
+  readonly targetOwnerId: number;
   currentSegmentIndex: number;
   segmentProgress: number;
   totalPathLength: number;
@@ -96,6 +100,7 @@ export interface FrontPushOrder {
   id: number;
   playerId: number;
   frontierCells: number[];
+  readonly targetOwnerId: number;
   dirX: number;
   dirY: number;
   manpowerCommitted: number;
@@ -154,6 +159,7 @@ export type Action =
       readonly playerId: number;
       readonly waypoints: ReadonlyArray<Point>;
       readonly manpowerPercent: number;
+      readonly targetOwnerId?: number;
     }
   | {
       readonly type: 'AMBUSH_ATTACK';
@@ -176,6 +182,14 @@ export type Action =
       readonly frontierCells: ReadonlyArray<number>;
       readonly dirX: number;
       readonly dirY: number;
+      readonly manpowerPercent: number;
+      readonly targetOwnerId?: number;
+    }
+  | {
+      readonly type: 'BORDER_SURGE_PUSH';
+      readonly playerId: number;
+      readonly x: number;
+      readonly y: number;
       readonly manpowerPercent: number;
     }
   | { readonly type: 'DECLARE_WAR'; readonly actorId: number; readonly targetId: number }

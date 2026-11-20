@@ -127,6 +127,7 @@ export function spawnBots(state: GameState, count: number): void {
       manpowerIncomePerSec: 14,
       manpowerGrowthEfficiency: 1,
       betrayalDebuffTicks: 0,
+      nextBotDecisionTick: 6 + i * 2,
       territoryCells: claimed,
       alive: true,
     };
@@ -155,9 +156,11 @@ export function stepBots(state: GameState): void {
       continue;
     }
 
-    if ((state.tick + player.id * 3) % 18 !== 0) {
+    if (state.tick < player.nextBotDecisionTick) {
       continue;
     }
+    player.nextBotDecisionTick =
+      state.tick + 12 + Math.floor(nextRandom(rngBox) * 6);
 
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
     if (activeBotOrders >= 2 || player.manpower < player.maxManpower * 0.42) {
@@ -168,8 +171,8 @@ export function stepBots(state: GameState): void {
     const warTargets: BotTargetCandidate[] = [];
     const neutralTargets: BotTargetCandidate[] = [];
 
-    for (let y = 0; y < height; y += 4) {
-      for (let x = 0; x < width; x += 4) {
+    for (let y = 0; y < height; y += 2) {
+      for (let x = 0; x < width; x += 2) {
         if (!isBorderCell(state, x, y, player.id)) {
           continue;
         }
@@ -212,7 +215,6 @@ export function stepBots(state: GameState): void {
                 neutralCount++;
                 neutralOwnerId = nOwner;
               }
-              // Never target ALLIED neighbors
             }
           }
         }
@@ -264,8 +266,8 @@ export function stepBots(state: GameState): void {
       pool = warTargets;
     } else if (
       neutralTargets.length > 0 &&
-      player.manpower >= player.maxManpower * 0.58 &&
-      nextRandom(rngBox) < 0.18
+      player.manpower >= player.maxManpower * 0.46 &&
+      nextRandom(rngBox) < 0.42
     ) {
       pool = neutralTargets;
     }
@@ -276,7 +278,6 @@ export function stepBots(state: GameState): void {
 
     const chosen = pool[Math.floor(nextRandom(rngBox) * pool.length)];
 
-    // Respect diplomacy: declare war before attacking a neutral neighbor
     if (
       chosen.targetOwnerId >= 0 &&
       getRelation(state, player.id, chosen.targetOwnerId) === 'NEUTRAL'
@@ -312,7 +313,10 @@ export function stepBots(state: GameState): void {
     state.attackOrders.push({
       id: state.nextOrderId++,
       playerId: player.id,
+      origin: waypoints[0],
       waypoints,
+      frontierArc: 0,
+      targetOwnerId: chosen.targetOwnerId,
       currentSegmentIndex: 0,
       segmentProgress: 0,
       totalPathLength,

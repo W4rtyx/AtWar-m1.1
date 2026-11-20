@@ -4,6 +4,7 @@ import {
   MAX_ORDER_TICKS,
   MIN_ACTIVE_ORDER_MANPOWER,
   buildSmoothAttackWaypoints,
+  canOrderCaptureCell,
   claimInitialTerritory,
   clampPolylineLength,
   computePolylineLength,
@@ -93,16 +94,19 @@ function updatePlayerManpowerEconomy(player: PlayerState, applyTickGrowth: boole
   }
 }
 
-function isNearPlayerTerritory(
+function findNearestOwnedPoint(
   state: GameState,
   x: number,
   y: number,
   playerId: number,
   maxRadius: number,
-): boolean {
+): Point | null {
   const { width, height, owners } = state;
   const ix = Math.round(x);
   const iy = Math.round(y);
+  let bestDist = Infinity;
+  let bestPt: Point | null = null;
+
   for (let dy = -maxRadius; dy <= maxRadius; dy++) {
     const ny = iy + dy;
     if (ny < 0 || ny >= height) continue;
@@ -110,11 +114,25 @@ function isNearPlayerTerritory(
       const nx = ix + dx;
       if (nx < 0 || nx >= width) continue;
       if (owners[ny * width + nx] === playerId) {
-        return true;
+        const d = Math.hypot(nx + 0.5 - x, ny + 0.5 - y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestPt = { x: nx + 0.5, y: ny + 0.5 };
+        }
       }
     }
   }
-  return false;
+  return bestPt;
+}
+
+function isNearPlayerTerritory(
+  state: GameState,
+  x: number,
+  y: number,
+  playerId: number,
+  maxRadius: number,
+): boolean {
+  return findNearestOwnedPoint(state, x, y, playerId, maxRadius) !== null;
 }
 
 function recalculateTerritoryAndCapitals(state: GameState): void {
@@ -321,6 +339,7 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
     manpowerIncomePerSec: 14,
     manpowerGrowthEfficiency: 1,
     betrayalDebuffTicks: 0,
+    nextBotDecisionTick: 0,
     territoryCells: claimed,
     alive: true,
   };
@@ -340,11 +359,49 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
   state.stateVersion++;
 }
 
+function resolveArrowTargetOwner(
+  state: GameState,
+  playerId: number,
+  waypoints: ReadonlyArray<Point>,
+  explicitTargetOwnerId?: number,
+): number {
+  if (explicitTargetOwnerId !== undefined) {
+    if (explicitTargetOwnerId === WILDERNESS_OWNER) {
+      return WILDERNESS_OWNER;
+    }
+    if (
+      explicitTargetOwnerId >= 0 &&
+      explicitTargetOwnerId !== playerId &&
+      getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
+    ) {
+      return explicitTargetOwnerId;
+    }
+    return WILDERNESS_OWNER;
+  }
+
+  const startIdx = Math.max(1, Math.floor(waypoints.length * 0.7));
+  for (let i = waypoints.length - 1; i >= startIdx; i--) {
+    const ix = Math.max(0, Math.min(state.width - 1, Math.floor(waypoints[i].x)));
+    const iy = Math.max(0, Math.min(state.height - 1, Math.floor(waypoints[i].y)));
+    const owner = state.owners[iy * state.width + ix];
+    if (
+      owner >= 0 &&
+      owner !== playerId &&
+      getRelation(state, playerId, owner) === 'WAR'
+    ) {
+      return owner;
+    }
+  }
+
+  return WILDERNESS_OWNER;
+}
+
 function handleCreateAttackOrder(
   state: GameState,
   playerId: number,
   rawWaypoints: ReadonlyArray<Point>,
   manpowerPercent: number,
+  explicitTargetOwnerId?: number,
 ): void {
   if (state.phase !== 'PLAYING' || rawWaypoints.length < 2) {
     return;
@@ -354,16 +411,30 @@ function handleCreateAttackOrder(
     return;
   }
 
-  const startPt = rawWaypoints[0];
-  if (!isNearPlayerTerritory(state, startPt.x, startPt.y, playerId, 5)) {
+  const anchoredOrigin = findNearestOwnedPoint(
+    state,
+    rawWaypoints[0].x,
+    rawWaypoints[0].y,
+    playerId,
+    6,
+  );
+  if (!anchoredOrigin) {
     return;
   }
 
-  const waypoints = buildSmoothAttackWaypoints(rawWaypoints);
+  const anchoredInput: Point[] = [anchoredOrigin, ...rawWaypoints.slice(1)];
+  const waypoints = buildSmoothAttackWaypoints(anchoredInput);
   const totalPathLength = computePolylineLength(waypoints);
   if (waypoints.length < 2 || totalPathLength < 6) {
     return;
   }
+
+  const targetOwnerId = resolveArrowTargetOwner(
+    state,
+    playerId,
+    waypoints,
+    explicitTargetOwnerId,
+  );
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const committed = player.manpower * (clampedPct / 100);
@@ -377,7 +448,10 @@ function handleCreateAttackOrder(
   state.attackOrders.push({
     id: state.nextOrderId++,
     playerId,
+    origin: anchoredOrigin,
     waypoints,
+    frontierArc: 0,
+    targetOwnerId,
     currentSegmentIndex: 0,
     segmentProgress: 0,
     totalPathLength,
@@ -423,6 +497,64 @@ function handleBendAttackOrder(
   order.stagnantTicks = 0;
 }
 
+function inferFrontTargetOwner(
+  state: GameState,
+  playerId: number,
+  cells: ReadonlyArray<number>,
+  dirX: number,
+  dirY: number,
+  explicitTargetOwnerId?: number,
+): number {
+  if (explicitTargetOwnerId !== undefined) {
+    return explicitTargetOwnerId;
+  }
+  const { width, height, owners, terrain } = state;
+  const warCounts = new Map<number, number>();
+  let wildCount = 0;
+
+  for (const idx of cells) {
+    const cx = idx % width;
+    const cy = (idx - cx) / width;
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = cy + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = cx + dx;
+        if (nx < 0 || nx >= width) continue;
+        const stepLen = Math.hypot(dx, dy);
+        if ((dx * dirX + dy * dirY) / stepLen < 0.25) continue;
+        const nIdx = ny * width + nx;
+        if (terrain[nIdx] === TerrainType.WATER) continue;
+        const nOwner = owners[nIdx];
+        if (nOwner === WILDERNESS_OWNER) {
+          wildCount++;
+        } else if (
+          nOwner >= 0 &&
+          nOwner !== playerId &&
+          getRelation(state, playerId, nOwner) === 'WAR'
+        ) {
+          warCounts.set(nOwner, (warCounts.get(nOwner) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  let bestWarOwner = -1;
+  let bestCount = 0;
+  for (const [owner, count] of warCounts) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestWarOwner = owner;
+    }
+  }
+
+  if (bestWarOwner >= 0 && (wildCount === 0 || bestCount >= wildCount * 0.5)) {
+    return bestWarOwner;
+  }
+  return WILDERNESS_OWNER;
+}
+
 function handleCreateFrontPushOrder(
   state: GameState,
   playerId: number,
@@ -430,6 +562,7 @@ function handleCreateFrontPushOrder(
   dirX: number,
   dirY: number,
   manpowerPercent: number,
+  explicitTargetOwnerId?: number,
 ): void {
   if (state.phase !== 'PLAYING') {
     return;
@@ -443,6 +576,8 @@ function handleCreateFrontPushOrder(
   if (len < 0.001) {
     return;
   }
+  const ux = dirX / len;
+  const uy = dirY / len;
 
   const validCells = new Set<number>();
   const totalCells = state.width * state.height;
@@ -459,6 +594,16 @@ function handleCreateFrontPushOrder(
     return;
   }
 
+  const cellList = Array.from(validCells);
+  const targetOwnerId = inferFrontTargetOwner(
+    state,
+    playerId,
+    cellList,
+    ux,
+    uy,
+    explicitTargetOwnerId,
+  );
+
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const committed = player.manpower * (clampedPct / 100);
   if (committed < MIN_ACTIVE_ORDER_MANPOWER) {
@@ -471,9 +616,10 @@ function handleCreateFrontPushOrder(
   state.frontPushOrders.push({
     id: state.nextOrderId++,
     playerId,
-    frontierCells: Array.from(validCells),
-    dirX: dirX / len,
-    dirY: dirY / len,
+    frontierCells: cellList,
+    targetOwnerId,
+    dirX: ux,
+    dirY: uy,
     manpowerCommitted: committed,
     manpowerRemaining: committed,
     ticksRemaining: MAX_ORDER_TICKS,
@@ -481,6 +627,103 @@ function handleCreateFrontPushOrder(
     stagnantTicks: 0,
     mountainAccum: 0,
   });
+}
+
+function handleBorderSurgePush(
+  state: GameState,
+  playerId: number,
+  x: number,
+  y: number,
+  manpowerPercent: number,
+): void {
+  if (state.phase !== 'PLAYING') return;
+  const player = state.players.get(playerId);
+  if (!player || !player.alive) return;
+
+  const { width, height, owners, terrain } = state;
+  const ix = Math.max(0, Math.min(width - 1, Math.floor(x)));
+  const iy = Math.max(0, Math.min(height - 1, Math.floor(y)));
+  const clickedOwner = owners[iy * width + ix];
+
+  let targetOwnerId = WILDERNESS_OWNER;
+  if (
+    clickedOwner >= 0 &&
+    clickedOwner !== playerId &&
+    getRelation(state, playerId, clickedOwner) === 'WAR'
+  ) {
+    targetOwnerId = clickedOwner;
+  } else {
+    // Check nearby cells around click for a WAR border
+    for (let dy = -4; dy <= 4 && targetOwnerId === WILDERNESS_OWNER; dy++) {
+      const ny = iy + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -4; dx <= 4; dx++) {
+        const nx = ix + dx;
+        if (nx < 0 || nx >= width) continue;
+        const o = owners[ny * width + nx];
+        if (o >= 0 && o !== playerId && getRelation(state, playerId, o) === 'WAR') {
+          targetOwnerId = o;
+          break;
+        }
+      }
+    }
+  }
+
+  const radius = 14;
+  const rSq = radius * radius;
+  const frontierCells: number[] = [];
+  let sumDirX = 0;
+  let sumDirY = 0;
+
+  const minX = Math.max(0, ix - radius);
+  const maxX = Math.min(width - 1, ix + radius);
+  const minY = Math.max(0, iy - radius);
+  const maxY = Math.min(height - 1, iy + radius);
+
+  for (let cy = minY; cy <= maxY; cy++) {
+    for (let cx = minX; cx <= maxX; cx++) {
+      if ((cx - ix) * (cx - ix) + (cy - iy) * (cy - iy) > rSq) continue;
+      if (!isBorderCell(state, cx, cy, playerId)) continue;
+
+      let cellHasTarget = false;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = cx + dx;
+          if (nx < 0 || nx >= width) continue;
+          const nIdx = ny * width + nx;
+          if (terrain[nIdx] === TerrainType.WATER) continue;
+          if (canOrderCaptureCell(state, playerId, targetOwnerId, owners[nIdx])) {
+            cellHasTarget = true;
+            sumDirX += dx;
+            sumDirY += dy;
+          }
+        }
+      }
+
+      if (cellHasTarget) {
+        frontierCells.push(cy * width + cx);
+      }
+    }
+  }
+
+  if (frontierCells.length === 0) return;
+
+  const dirLen = Math.hypot(sumDirX, sumDirY);
+  const dirX = dirLen > 0.01 ? sumDirX / dirLen : ix + 0.5 - player.capitalX;
+  const dirY = dirLen > 0.01 ? sumDirY / dirLen : iy + 0.5 - player.capitalY;
+
+  handleCreateFrontPushOrder(
+    state,
+    playerId,
+    frontierCells,
+    dirX,
+    dirY,
+    manpowerPercent,
+    targetOwnerId,
+  );
 }
 
 function handleCancelPlayerOrders(state: GameState, playerId: number): void {
@@ -540,6 +783,7 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.playerId,
         action.waypoints,
         action.manpowerPercent,
+        action.targetOwnerId,
       );
       break;
     case 'AMBUSH_ATTACK':
@@ -549,6 +793,7 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.playerId,
         action.waypoints,
         action.manpowerPercent,
+        action.targetId,
       );
       break;
     case 'BEND_ATTACK_ORDER':
@@ -568,6 +813,16 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.frontierCells,
         action.dirX,
         action.dirY,
+        action.manpowerPercent,
+        action.targetOwnerId,
+      );
+      break;
+    case 'BORDER_SURGE_PUSH':
+      handleBorderSurgePush(
+        state,
+        action.playerId,
+        action.x,
+        action.y,
         action.manpowerPercent,
       );
       break;
@@ -687,6 +942,7 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     relations: relationsObj,
     attackOrders: state.attackOrders.map((o) => ({
       ...o,
+      origin: { ...o.origin },
       waypoints: o.waypoints.map((pt) => ({ ...pt })),
     })),
     frontPushOrders: state.frontPushOrders.map((o) => ({
@@ -741,6 +997,7 @@ export interface EngineController {
   dispatch(action: Action): void;
   getRenderState(): ClientRenderState;
   findHumanBorderCellsFromLasso(points: ReadonlyArray<Point>): number[];
+  pruneHumanBorderCells(cells: ReadonlyArray<number>, originalCount: number): number[];
 }
 
 export function createEngineController(seed?: number): EngineController {
@@ -784,6 +1041,27 @@ export function createEngineController(seed?: number): EngineController {
         }
       }
       return result;
+    },
+    pruneHumanBorderCells(
+      cells: ReadonlyArray<number>,
+      originalCount: number,
+    ): number[] {
+      if (state.phase !== 'PLAYING' || cells.length === 0) {
+        return [];
+      }
+      const { width } = state;
+      const surviving: number[] = [];
+      for (const idx of cells) {
+        const cx = idx % width;
+        const cy = (idx - cx) / width;
+        if (isBorderCell(state, cx, cy, state.humanPlayerId)) {
+          surviving.push(idx);
+        }
+      }
+      if (surviving.length < 2 || surviving.length < originalCount * 0.5) {
+        return [];
+      }
+      return surviving;
     },
   };
 }

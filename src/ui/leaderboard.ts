@@ -42,7 +42,7 @@ export class LeaderboardController {
     this.panelEl.className = 'hud-panel hud-leaderboard hidden';
     this.panelEl.innerHTML = `
       <div class="hud-lb-header">
-        <span class="hud-lb-title">Státy Evropy</span>
+        <span class="hud-lb-title">Státy</span>
         <button type="button" class="hud-btn hud-lb-toggle" data-action="toggle-lb">Sbalit</button>
       </div>
       <div class="hud-lb-list" data-el="lb-list"></div>
@@ -178,13 +178,17 @@ export class LeaderboardController {
           ? 'rel-allied'
           : 'rel-neutral';
 
-    const badgeText = isHuman
-      ? 'Vy'
-      : relationLabel(player.relationToHuman);
+    const statusHint = isHuman
+      ? ''
+      : player.relationToHuman === 'WAR'
+        ? '<span class="hud-lb-tag rel-war">VÁLKA</span>'
+        : player.relationToHuman === 'ALLIED'
+          ? '<span class="hud-lb-tag rel-allied">SPOJ.</span>'
+          : '';
 
     const betrayalTag =
       player.betrayalDebuffTicks > 0
-        ? `<span class="hud-betrayal-tag" title="Bojový postih za zradu aliance">ZRÁDCE ${Math.ceil(player.betrayalDebuffTicks / TICK_RATE)}s</span>`
+        ? `<span class="hud-lb-betrayal" title="Postih za zradu aliance">• Zrádce</span>`
         : '';
 
     const interactiveAttr = isHuman ? '' : `data-player-id="${player.id}"`;
@@ -192,11 +196,13 @@ export class LeaderboardController {
 
     return `
       <div class="hud-lb-row ${relClass} ${clickableClass}" ${interactiveAttr}>
-        <span class="hud-lb-rank">${rank}.</span>
-        <span class="hud-lb-swatch" style="background:${player.colorHex}"></span>
-        <span class="hud-lb-name">${player.name}${betrayalTag}</span>
+        <span class="hud-lb-rank">${rank}</span>
+        <span class="hud-lb-identity">
+          <span class="hud-lb-swatch" style="background:${player.colorHex}"></span>
+          <span class="hud-lb-name">${player.name}</span>
+          ${statusHint}${betrayalTag}
+        </span>
         <span class="hud-lb-pct">${pct} %</span>
-        <span class="hud-lb-rel ${relClass}">${badgeText}</span>
       </div>
     `;
   }
@@ -258,7 +264,7 @@ export class LeaderboardController {
       </div>
       <div class="hud-dip-meta">
         <span>Území: <strong>${pct} %</strong></span>
-        <span class="hud-lb-rel ${relClass}">${relationLabel(rel)}</span>
+        <span class="hud-dip-rel-text ${relClass}">${relationLabel(rel)}</span>
       </div>
       ${betrayalInfo}
       <div class="hud-dip-actions">

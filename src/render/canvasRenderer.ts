@@ -124,8 +124,6 @@ export class CanvasRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly offscreenCanvas: HTMLCanvasElement;
   private readonly offscreenCtx: CanvasRenderingContext2D;
-  private readonly smoothCanvas: HTMLCanvasElement;
-  private readonly smoothCtx: CanvasRenderingContext2D;
   private readonly imageData: ImageData;
   private readonly baseTerrainRgb: Uint8ClampedArray;
 
@@ -151,16 +149,6 @@ export class CanvasRenderer {
       throw new Error('Could not initialize offscreen 2D canvas context');
     }
     this.offscreenCtx = offCtx;
-
-    // 2x smoothed intermediate surface to eliminate jagged pixel edges at zoom
-    this.smoothCanvas = document.createElement('canvas');
-    this.smoothCanvas.width = MAP_WIDTH * 2;
-    this.smoothCanvas.height = MAP_HEIGHT * 2;
-    const smoothCtx = this.smoothCanvas.getContext('2d');
-    if (!smoothCtx) {
-      throw new Error('Could not initialize smooth 2D canvas context');
-    }
-    this.smoothCtx = smoothCtx;
 
     this.imageData = this.offscreenCtx.createImageData(MAP_WIDTH, MAP_HEIGHT);
     this.baseTerrainRgb = new Uint8ClampedArray(MAP_WIDTH * MAP_HEIGHT * 3);
@@ -290,57 +278,76 @@ export class CanvasRenderer {
           continue;
         }
 
-        // Smooth 8-neighbor border coverage for anti-aliased frontiers
-        let landDiff = 0;
-        let coastDiff = 0;
+        // Crisp 4-neighbor border detection without blurry halo
+        let landBorder = false;
+        let coastBorder = false;
         let nearBorder = false;
 
-        for (let dy = -1; dy <= 1; dy++) {
-          const ny = y + dy;
-          if (ny < 0 || ny >= height) continue;
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx;
-            if (nx < 0 || nx >= width) continue;
-            const nIdx = ny * width + nx;
-            const weight = dx === 0 || dy === 0 ? 1.0 : 0.45;
-            if (owners[nIdx] !== owner) {
-              if (terrain[nIdx] === TerrainType.WATER) {
-                coastDiff += weight;
-              } else {
-                landDiff += weight;
-              }
-            }
+        if (x > 0) {
+          const nOwner = owners[idx - 1];
+          if (nOwner !== owner) {
+            if (terrain[idx - 1] === TerrainType.WATER) coastBorder = true;
+            else landBorder = true;
+          } else if (x > 1 && owners[idx - 2] !== owner && terrain[idx - 2] !== TerrainType.WATER) {
+            nearBorder = true;
+          }
+        }
+        if (x < width - 1) {
+          const nOwner = owners[idx + 1];
+          if (nOwner !== owner) {
+            if (terrain[idx + 1] === TerrainType.WATER) coastBorder = true;
+            else landBorder = true;
+          } else if (
+            x < width - 2 &&
+            owners[idx + 2] !== owner &&
+            terrain[idx + 2] !== TerrainType.WATER
+          ) {
+            nearBorder = true;
+          }
+        }
+        if (y > 0) {
+          const nOwner = owners[idx - width];
+          if (nOwner !== owner) {
+            if (terrain[idx - width] === TerrainType.WATER) coastBorder = true;
+            else landBorder = true;
+          } else if (
+            y > 1 &&
+            owners[idx - width * 2] !== owner &&
+            terrain[idx - width * 2] !== TerrainType.WATER
+          ) {
+            nearBorder = true;
+          }
+        }
+        if (y < height - 1) {
+          const nOwner = owners[idx + width];
+          if (nOwner !== owner) {
+            if (terrain[idx + width] === TerrainType.WATER) coastBorder = true;
+            else landBorder = true;
+          } else if (
+            y < height - 2 &&
+            owners[idx + width * 2] !== owner &&
+            terrain[idx + width * 2] !== TerrainType.WATER
+          ) {
+            nearBorder = true;
           }
         }
 
-        if (
-          (x > 1 && owners[idx - 2] !== owner && terrain[idx - 2] !== TerrainType.WATER) ||
-          (x < width - 2 && owners[idx + 2] !== owner && terrain[idx + 2] !== TerrainType.WATER) ||
-          (y > 1 && owners[idx - width * 2] !== owner && terrain[idx - width * 2] !== TerrainType.WATER) ||
-          (y < height - 2 && owners[idx + width * 2] !== owner && terrain[idx + width * 2] !== TerrainType.WATER)
-        ) {
-          nearBorder = true;
-        }
-
         const isMountain = terrain[idx] === TerrainType.MOUNTAINS;
-        const baseBlend = nearBorder || landDiff > 0 ? 0.78 : 0.56;
+        const baseBlend = nearBorder || landBorder ? 0.76 : 0.56;
         const blend = isMountain ? baseBlend - 0.14 : baseBlend;
 
         let r = pColor[0] * blend + base[rgbIdx] * (1 - blend);
         let g = pColor[1] * blend + base[rgbIdx + 1] * (1 - blend);
         let b = pColor[2] * blend + base[rgbIdx + 2] * (1 - blend);
 
-        if (landDiff > 0) {
-          const factor = 1 - Math.min(0.56, landDiff * 0.22);
-          r *= factor;
-          g *= factor;
-          b *= factor;
-        } else if (coastDiff > 0) {
-          const factor = 1 - Math.min(0.30, coastDiff * 0.12);
-          r *= factor;
-          g *= factor;
-          b *= factor;
+        if (landBorder) {
+          r *= 0.4;
+          g *= 0.4;
+          b *= 0.4;
+        } else if (coastBorder) {
+          r *= 0.68;
+          g *= 0.68;
+          b *= 0.68;
         }
 
         data[rgbaIdx] = r;
@@ -351,16 +358,6 @@ export class CanvasRenderer {
     }
 
     this.offscreenCtx.putImageData(this.imageData, 0, 0);
-    this.smoothCtx.clearRect(0, 0, this.smoothCanvas.width, this.smoothCanvas.height);
-    this.smoothCtx.imageSmoothingEnabled = true;
-    this.smoothCtx.imageSmoothingQuality = 'high';
-    this.smoothCtx.drawImage(
-      this.offscreenCanvas,
-      0,
-      0,
-      this.smoothCanvas.width,
-      this.smoothCanvas.height,
-    );
     this.lastStateVersion = state.stateVersion;
   }
 
@@ -380,12 +377,11 @@ export class CanvasRenderer {
     ctx.fillStyle = '#151e27';
     ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
 
-    // Fluid high-quality smoothed blit (eliminates pixelated blockiness)
+    // Crisp, unblurred terrain & borders (720x500 direct blit)
     ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
-      this.smoothCanvas,
+      this.offscreenCanvas,
       camera.offsetX,
       camera.offsetY,
       state.width * camera.zoom,

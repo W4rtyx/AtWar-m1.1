@@ -252,45 +252,47 @@ body {
 }
 
 .hud-leaderboard {
-  width: 268px;
-  max-height: 360px;
+  width: 234px;
+  max-height: 330px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: rgba(16, 21, 27, 0.88);
+  border-color: #2c3744;
 }
 
 .hud-lb-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 10px;
-  border-bottom: 1px solid #2e3844;
+  padding: 5px 10px;
+  border-bottom: 1px solid #28323e;
 }
 
 .hud-lb-title {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #aeb8c2;
+  letter-spacing: 0.06em;
+  color: #9ba6b2;
 }
 
 .hud-lb-toggle {
-  padding: 2px 7px;
-  font-size: 11px;
+  padding: 1px 6px;
+  font-size: 10.5px;
 }
 
 .hud-lb-list {
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 .hud-lb-row {
   display: grid;
-  grid-template-columns: 22px 10px 1fr 46px 56px;
+  grid-template-columns: 18px 1fr 44px;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 4px 9px;
   font-size: 11.5px;
   border-left: 3px solid transparent;
 }
@@ -300,30 +302,42 @@ body {
 }
 
 .hud-lb-row-clickable:hover {
-  background: rgba(58, 72, 88, 0.35);
+  background: rgba(64, 78, 94, 0.28);
 }
 
 .hud-lb-row-self {
-  background: rgba(59, 110, 140, 0.16);
+  background: rgba(59, 110, 140, 0.14);
+  border-left-color: #4b83a8;
 }
 
 .hud-lb-row.rel-war {
-  border-left-color: #b84a42;
+  border-left-color: #c94f46;
+  background: rgba(168, 60, 54, 0.10);
 }
 
 .hud-lb-row.rel-allied {
-  border-left-color: #499664;
+  border-left-color: #4ca36b;
+  background: rgba(71, 139, 94, 0.10);
 }
 
 .hud-lb-rank {
-  color: #8b96a3;
+  color: #7c8794;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 
+.hud-lb-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .hud-lb-swatch {
+  flex-shrink: 0;
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 2px;
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
@@ -332,56 +346,53 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #e2ddd0;
+  color: #e0dbd0;
 }
 
-.hud-betrayal-tag {
-  margin-left: 5px;
-  padding: 0 4px;
+.hud-lb-tag {
+  flex-shrink: 0;
   font-size: 9.5px;
   font-weight: 700;
-  border-radius: 2px;
-  background: #46231e;
-  color: #eba9a0;
-  border: 1px solid #8a4339;
+  letter-spacing: 0.03em;
+}
+
+.hud-lb-tag.rel-war {
+  color: #e4867e;
+}
+
+.hud-lb-tag.rel-allied {
+  color: #87cfa0;
+}
+
+.hud-lb-betrayal {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #e09f67;
 }
 
 .hud-lb-pct {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  color: #c8c4b8;
+  font-size: 11px;
+  color: #b7c0c9;
 }
 
-.hud-lb-rel {
-  text-align: center;
-  padding: 1px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  border-radius: 3px;
+.hud-dip-rel-text {
+  font-size: 11px;
+  font-weight: 700;
 }
 
-.hud-lb-rel.rel-war {
-  background: rgba(168, 60, 54, 0.28);
-  color: #ebaba4;
-  border: 1px solid rgba(186, 74, 66, 0.55);
+.hud-dip-rel-text.rel-war {
+  color: #e68a82;
 }
 
-.hud-lb-rel.rel-allied {
-  background: rgba(71, 139, 94, 0.28);
-  color: #a9dbb8;
-  border: 1px solid rgba(82, 162, 108, 0.55);
+.hud-dip-rel-text.rel-allied {
+  color: #8fd4a7;
 }
 
-.hud-lb-rel.rel-neutral {
-  background: rgba(54, 65, 78, 0.35);
-  color: #aeb7c0;
-  border: 1px solid rgba(82, 96, 112, 0.45);
-}
-
-.hud-lb-rel.rel-self {
-  background: rgba(59, 110, 140, 0.3);
-  color: #a8d4ee;
-  border: 1px solid rgba(84, 148, 186, 0.5);
+.hud-dip-rel-text.rel-neutral {
+  color: #a6b0ba;
 }
 
 .hud-diplomacy-popover {

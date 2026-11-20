@@ -50,18 +50,22 @@ export function getRelation(
   return state.relations.get(getRelationKey(a, b)) ?? 'NEUTRAL';
 }
 
-export function canAttackOwner(
+export function canOrderCaptureCell(
   state: GameState,
-  attackerId: number,
-  targetOwner: number,
+  playerId: number,
+  targetOwnerId: number,
+  cellOwner: number,
 ): boolean {
-  if (targetOwner === WILDERNESS_OWNER) {
-    return true;
-  }
-  if (targetOwner === attackerId || targetOwner < 0) {
+  if (cellOwner === playerId || cellOwner < WILDERNESS_OWNER) {
     return false;
   }
-  return getRelation(state, attackerId, targetOwner) === 'WAR';
+  if (cellOwner === WILDERNESS_OWNER) {
+    return true;
+  }
+  if (targetOwnerId === WILDERNESS_OWNER) {
+    return false;
+  }
+  return cellOwner === targetOwnerId && getRelation(state, playerId, cellOwner) === 'WAR';
 }
 
 export function computePolylineLength(points: ReadonlyArray<Point>): number {
@@ -358,6 +362,7 @@ interface ExpansionCandidate {
 
 interface ExpandableOrder {
   playerId: number;
+  targetOwnerId: number;
   manpowerCommitted: number;
   manpowerRemaining: number;
   ticksRemaining: number;
@@ -431,7 +436,7 @@ function applyExpansionCandidates(
     }
 
     const prevOwner = state.owners[cand.idx];
-    if (!canAttackOwner(state, order.playerId, prevOwner)) {
+    if (!canOrderCaptureCell(state, order.playerId, order.targetOwnerId, prevOwner)) {
       continue;
     }
 
@@ -510,11 +515,17 @@ interface CurveProjection {
   readonly tanY: number;
 }
 
-function projectPointOntoWaypoints(
+/**
+ * Projects a cell strictly onto segments overlapping the active forward arc window [minArc, maxArc].
+ * This prevents an arrow drawn across an encircled enemy from locking onto distant own territory.
+ */
+function projectPointOntoWaypointsWindow(
   px: number,
   py: number,
   waypoints: ReadonlyArray<Point>,
   cumDist: ReadonlyArray<number>,
+  minArc: number,
+  maxArc: number,
 ): CurveProjection {
   let bestPerp = Infinity;
   let bestArc = 0;
@@ -522,6 +533,12 @@ function projectPointOntoWaypoints(
   let bestTanY = 0;
 
   for (let i = 0; i < waypoints.length - 1; i++) {
+    const segStart = cumDist[i];
+    const segEnd = cumDist[i + 1];
+    if (segEnd < minArc || segStart > maxArc) {
+      continue;
+    }
+
     const a = waypoints[i];
     const b = waypoints[i + 1];
     const dx = b.x - a.x;
@@ -536,7 +553,7 @@ function projectPointOntoWaypoints(
 
     if (dist < bestPerp) {
       bestPerp = dist;
-      bestArc = cumDist[i] + t * len;
+      bestArc = segStart + t * len;
       bestTanX = dx / len;
       bestTanY = dy / len;
     }
@@ -587,7 +604,7 @@ function stepAttackOrders(state: GameState): boolean {
     const totalLen = cumDist[cumDist.length - 1];
     order.totalPathLength = totalLen;
 
-    const halfCorridor = 11;
+    const halfCorridor = 8.5;
     const scanPad = halfCorridor + 6;
 
     let minX = width - 1;
@@ -605,37 +622,61 @@ function stepAttackOrders(state: GameState): boolean {
     minY = Math.max(0, minY);
     maxY = Math.min(height - 1, maxY);
 
-    // Pass 1: find furthest point along the curve currently reached by owned territory
-    let maxOwnedArc = 0;
+    // Pass 1: advance frontierArc strictly within a contiguous forward window from origin
+    const winMin = Math.max(0, order.frontierArc - 8);
+    const winMax = Math.min(totalLen, order.frontierArc + 16);
+    let maxWindowOwnedArc = order.frontierArc;
+
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         if (owners[y * width + x] !== order.playerId) continue;
-        const proj = projectPointOntoWaypoints(x + 0.5, y + 0.5, order.waypoints, cumDist);
-        if (proj.perpDist <= halfCorridor * 0.75 && proj.arcDist > maxOwnedArc) {
-          maxOwnedArc = proj.arcDist;
+        const proj = projectPointOntoWaypointsWindow(
+          x + 0.5,
+          y + 0.5,
+          order.waypoints,
+          cumDist,
+          winMin,
+          winMax,
+        );
+        if (
+          proj.perpDist <= halfCorridor * 0.7 &&
+          proj.arcDist >= winMin &&
+          proj.arcDist <= winMax &&
+          proj.arcDist > maxWindowOwnedArc
+        ) {
+          maxWindowOwnedArc = proj.arcDist;
         }
       }
     }
 
-    const rawProgress = totalLen > 0 ? Math.min(1, maxOwnedArc / totalLen) : 1;
+    order.frontierArc = Math.max(order.frontierArc, maxWindowOwnedArc);
+    const rawProgress = totalLen > 0 ? Math.min(1, order.frontierArc / totalLen) : 1;
     order.segmentProgress = Math.max(order.segmentProgress, rawProgress);
+
     let segIdx = 0;
-    while (segIdx < cumDist.length - 2 && cumDist[segIdx + 1] < maxOwnedArc) {
+    while (segIdx < cumDist.length - 2 && cumDist[segIdx + 1] < order.frontierArc) {
       segIdx++;
     }
     order.currentSegmentIndex = segIdx;
 
-    const activeMinArc = Math.max(0, maxOwnedArc - 16);
-    const activeMaxArc = Math.min(totalLen + 8, maxOwnedArc + 16);
+    const activeMinArc = Math.max(0, order.frontierArc - 12);
+    const activeMaxArc = Math.min(totalLen + 4, order.frontierArc + 12);
     const candidateBestScore = new Map<number, { nx: number; ny: number; score: number }>();
 
-    // Pass 2: gather strictly bounded expansion targets along the active curve segment
+    // Pass 2: gather strictly bounded expansion targets along the active forward corridor
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         const idx = y * width + x;
         if (owners[idx] !== order.playerId) continue;
 
-        const proj = projectPointOntoWaypoints(x + 0.5, y + 0.5, order.waypoints, cumDist);
+        const proj = projectPointOntoWaypointsWindow(
+          x + 0.5,
+          y + 0.5,
+          order.waypoints,
+          cumDist,
+          activeMinArc,
+          activeMaxArc,
+        );
         if (
           proj.perpDist > halfCorridor ||
           proj.arcDist < activeMinArc ||
@@ -650,15 +691,20 @@ function stepAttackOrders(state: GameState): boolean {
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
           const nIdx = ny * width + nx;
           const nOwner = owners[nIdx];
-          if (terrain[nIdx] === TerrainType.WATER || !canAttackOwner(state, order.playerId, nOwner)) {
+          if (
+            terrain[nIdx] === TerrainType.WATER ||
+            !canOrderCaptureCell(state, order.playerId, order.targetOwnerId, nOwner)
+          ) {
             continue;
           }
 
-          const nProj = projectPointOntoWaypoints(
+          const nProj = projectPointOntoWaypointsWindow(
             nx + 0.5,
             ny + 0.5,
             order.waypoints,
             cumDist,
+            activeMinArc - 2,
+            totalLen + 6,
           );
           if (
             nProj.perpDist > halfCorridor ||
@@ -670,17 +716,20 @@ function stepAttackOrders(state: GameState): boolean {
 
           const stepLen = Math.hypot(dx, dy);
           const dot = (dx * nProj.tanX + dy * nProj.tanY) / stepLen;
-          if (dot < 0.25) {
+          if (dot < 0.38) {
             continue;
           }
 
           const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
           const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
           const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.25;
-          const arcLeadBonus = Math.min(1.5, Math.max(-0.5, (nProj.arcDist - maxOwnedArc) * 0.06));
+          const arcLeadBonus = Math.min(
+            1.5,
+            Math.max(-0.5, (nProj.arcDist - order.frontierArc) * 0.06),
+          );
           const score =
             dot * 3.0 -
-            nProj.perpDist * 0.16 +
+            nProj.perpDist * 0.26 +
             friendly * 0.45 +
             arcLeadBonus +
             terrainBonus +
@@ -753,7 +802,10 @@ function stepFrontPushOrders(state: GameState): boolean {
         if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
         const nIdx = ny * width + nx;
         const nOwner = owners[nIdx];
-        if (terrain[nIdx] === TerrainType.WATER || !canAttackOwner(state, order.playerId, nOwner)) {
+        if (
+          terrain[nIdx] === TerrainType.WATER ||
+          !canOrderCaptureCell(state, order.playerId, order.targetOwnerId, nOwner)
+        ) {
           continue;
         }
 
@@ -815,10 +867,116 @@ function stepFrontPushOrders(state: GameState): boolean {
   return mapChanged;
 }
 
+/**
+ * Immediately annexes enclosed empty pockets (wilderness or foreign state pockets without
+ * access to water, map edge, or other neighbors) to the single encircling state.
+ */
+function annexEncircledPockets(state: GameState): boolean {
+  const { width, height, terrain, owners, players } = state;
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let anyAnnexed = false;
+
+  for (let startIdx = 0; startIdx < total; startIdx++) {
+    if (visited[startIdx] || terrain[startIdx] === TerrainType.WATER) {
+      continue;
+    }
+
+    const regionOwner = owners[startIdx];
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = startIdx;
+    visited[startIdx] = 1;
+
+    let touchesMapEdge = false;
+    let touchesWater = false;
+    let singleEncloser: number | null = null;
+    let multipleEnclosers = false;
+    let containsCapital = false;
+
+    let capIdx = -1;
+    if (regionOwner >= 0) {
+      const p = players.get(regionOwner);
+      if (p) {
+        capIdx = p.capitalY * width + p.capitalX;
+      }
+    }
+
+    while (head < tail) {
+      const idx = queue[head++];
+      if (idx === capIdx) {
+        containsCapital = true;
+      }
+
+      const x = idx % width;
+      const y = (idx - x) / width;
+
+      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+        touchesMapEdge = true;
+      }
+
+      for (const [dx, dy] of CARDINAL_OFFSETS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+          touchesMapEdge = true;
+          continue;
+        }
+        const nIdx = ny * width + nx;
+        if (terrain[nIdx] === TerrainType.WATER) {
+          touchesWater = true;
+          continue;
+        }
+        const nOwner = owners[nIdx];
+        if (nOwner === regionOwner) {
+          if (!visited[nIdx]) {
+            visited[nIdx] = 1;
+            queue[tail++] = nIdx;
+          }
+        } else {
+          if (singleEncloser === null) {
+            singleEncloser = nOwner;
+          } else if (singleEncloser !== nOwner) {
+            multipleEnclosers = true;
+          }
+        }
+      }
+    }
+
+    if (
+      !touchesMapEdge &&
+      !touchesWater &&
+      !multipleEnclosers &&
+      singleEncloser !== null &&
+      singleEncloser >= 0 &&
+      singleEncloser !== regionOwner
+    ) {
+      const pocketSize = tail;
+      const canAnnexWilderness =
+        regionOwner === WILDERNESS_OWNER && pocketSize <= 2200;
+      const canAnnexForeign =
+        regionOwner >= 0 &&
+        pocketSize < 3200 &&
+        (!containsCapital || pocketSize <= 450);
+
+      if (canAnnexWilderness || canAnnexForeign) {
+        for (let i = 0; i < tail; i++) {
+          owners[queue[i]] = singleEncloser;
+        }
+        anyAnnexed = true;
+      }
+    }
+  }
+
+  return anyAnnexed;
+}
+
 export function stepFrontExpansion(state: GameState): void {
   const changedByAttacks = stepAttackOrders(state);
   const changedByPushes = stepFrontPushOrders(state);
   if (changedByAttacks || changedByPushes) {
+    annexEncircledPockets(state);
     state.stateVersion++;
   }
 }
