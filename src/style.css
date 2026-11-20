@@ -1,0 +1,261 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #161d24;
+  color: #d8d4c8;
+  font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+#map-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+#hud-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.hud-panel {
+  pointer-events: auto;
+  background: rgba(20, 25, 31, 0.88);
+  border: 1px solid #333e4b;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+}
+
+.hud-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 14px;
+}
+
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hud-title {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 13px;
+  color: #e4dfd2;
+}
+
+.hud-phase-badge {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  background: #24303c;
+  border: 1px solid #3c4f61;
+  color: #a9c4d8;
+}
+
+.hud-phase-badge.phase-playing {
+  background: #22352c;
+  border-color: #3b5e4d;
+  color: #a7d1b9;
+}
+
+.hud-stats {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.hud-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.hud-stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8f9aa6;
+}
+
+.hud-stat-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #e4dfd2;
+}
+
+.hud-stat-sub {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: #93b09c;
+}
+
+.hud-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-btn {
+  appearance: none;
+  background: #232c36;
+  color: #d8d4c8;
+  border: 1px solid #3c4856;
+  border-radius: 3px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.hud-btn:hover {
+  background: #2d3845;
+  border-color: #556679;
+}
+
+.hud-btn:active {
+  background: #1d252e;
+}
+
+.hud-btn.active {
+  background: #35546b;
+  border-color: #5b89ab;
+  color: #f0ede4;
+}
+
+.hud-btn.paused {
+  background: #5a4228;
+  border-color: #8a673f;
+  color: #f3e4c9;
+}
+
+.hud-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hud-prompt-banner {
+  align-self: center;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #e4dfd2;
+  letter-spacing: 0.02em;
+}
+
+.hud-bottom-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hud-tactical-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 14px;
+}
+
+.hud-control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-divider {
+  width: 1px;
+  height: 24px;
+  background: #333e4b;
+}
+
+.hud-slider {
+  width: 130px;
+  accent-color: #4a7c9b;
+  cursor: pointer;
+}
+
+.hud-slider-readout {
+  min-width: 112px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: #d8d4c8;
+}
+
+.hud-front-pad {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: rgba(34, 44, 54, 0.75);
+  border: 1px solid #46586b;
+  border-radius: 3px;
+}
+
+.hud-front-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ebd79a;
+  margin-right: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-dir-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.hud-legend {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #a6b0ba;
+  max-width: 310px;
+}
+
+.hud-legend-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.hud-legend-row:last-child {
+  margin-bottom: 0;
+}
+
+.hud-legend-key {
+  color: #d8d4c8;
+  font-weight: 600;
+}
+
+.hidden {
+  display: none !important;
+}

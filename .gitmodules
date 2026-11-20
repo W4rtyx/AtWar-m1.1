@@ -1,0 +1,9 @@
+[submodule "ponytail"]
+	path = ponytail
+	url = https://github.com/DietrichGebert/ponytail.git
+[submodule "graphify"]
+	path = graphify
+	url = https://github.com/Graphify-Labs/graphify.git
+[submodule "caveman"]
+	path = caveman
+	url = https://github.com/JuliusBrussee/caveman.git
