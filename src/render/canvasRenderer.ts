@@ -1,6 +1,6 @@
 import { BUILDING_SPECS } from '../engine/buildings';
+import { getDefenseRadius, isDefenseBuildingType } from '../engine/defenses';
 import {
-  BARRACKS_DEFENSE_RADIUS,
   BuildingType,
   ClientRenderState,
   MAP_HEIGHT,
@@ -821,9 +821,34 @@ export class CanvasRenderer {
 
       ctx.save();
 
-      if (isSelected && b.type === 'BARRACKS') {
+      const defRadius = getDefenseRadius(b.type);
+      if (
+        isDefenseBuildingType(b.type) &&
+        b.stackCount > 0 &&
+        (camera.zoom >= 0.85 || isSelected)
+      ) {
+        const ringColor =
+          b.type === 'TRENCH'
+            ? isSelected
+              ? 'rgba(205, 190, 134, 0.58)'
+              : 'rgba(205, 190, 134, 0.24)'
+            : b.type === 'BUNKER'
+              ? isSelected
+                ? 'rgba(218, 152, 98, 0.65)'
+                : 'rgba(218, 152, 98, 0.28)'
+              : isSelected
+                ? 'rgba(118, 194, 232, 0.65)'
+                : 'rgba(118, 194, 232, 0.26)';
         ctx.beginPath();
-        ctx.arc(sc.x, sc.y, BARRACKS_DEFENSE_RADIUS * camera.zoom, 0, Math.PI * 2);
+        ctx.arc(sc.x, sc.y, defRadius * camera.zoom, 0, Math.PI * 2);
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = isSelected ? 1.4 : 1.0;
+        ctx.strokeStyle = ringColor;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (isSelected && b.type === 'BARRACKS' && defRadius > 0) {
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, defRadius * camera.zoom, 0, Math.PI * 2);
         ctx.setLineDash([4, 4]);
         ctx.lineWidth = 1.25;
         ctx.strokeStyle = 'rgba(130, 198, 150, 0.65)';
@@ -1023,6 +1048,48 @@ export class CanvasRenderer {
         ctx.lineTo(cx + s * 0.32, cy + s * 0.65);
         ctx.stroke();
         break;
+      case 'TRENCH':
+        ctx.strokeStyle = '#d5c589';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.74, cy + s * 0.28);
+        ctx.lineTo(cx - s * 0.34, cy - s * 0.36);
+        ctx.lineTo(cx + s * 0.04, cy + s * 0.28);
+        ctx.lineTo(cx + s * 0.42, cy - s * 0.36);
+        ctx.lineTo(cx + s * 0.74, cy + s * 0.14);
+        ctx.moveTo(cx - s * 0.65, cy + s * 0.58);
+        ctx.lineTo(cx + s * 0.65, cy + s * 0.58);
+        ctx.stroke();
+        break;
+      case 'BUNKER':
+        ctx.fillStyle = '#d99b6a';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.72, cy + s * 0.58);
+        ctx.lineTo(cx - s * 0.5, cy - s * 0.42);
+        ctx.lineTo(cx + s * 0.5, cy - s * 0.42);
+        ctx.lineTo(cx + s * 0.72, cy + s * 0.58);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#1b222a';
+        ctx.lineWidth = Math.max(1.2, s * 0.25);
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.36, cy + s * 0.04);
+        ctx.lineTo(cx + s * 0.36, cy + s * 0.04);
+        ctx.stroke();
+        break;
+      case 'AA_BATTERY':
+        ctx.strokeStyle = '#89d2ee';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.55, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.55, cy + s * 0.62);
+        ctx.moveTo(cx - s * 0.14, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.24, cy - s * 0.64);
+        ctx.moveTo(cx + s * 0.18, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.56, cy - s * 0.42);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx - s * 0.12, cy - s * 0.18, s * 0.52, Math.PI * 1.05, Math.PI * 1.72);
+        ctx.stroke();
+        break;
     }
 
     ctx.restore();
@@ -1036,8 +1103,21 @@ export class CanvasRenderer {
     const sc = camera.worldToScreen(preview.x + 0.5, preview.y + 0.5);
     const r = Math.max(7, Math.min(11, camera.zoom * 2.4));
     const spacingR = MIN_BUILDING_SPACING * camera.zoom;
+    const defenseR = getDefenseRadius(preview.buildingType) * camera.zoom;
 
     ctx.save();
+
+    if (defenseR > 0) {
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, defenseR, 0, Math.PI * 2);
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 1.25;
+      ctx.strokeStyle = preview.valid
+        ? 'rgba(122, 206, 234, 0.46)'
+        : 'rgba(216, 98, 90, 0.32)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     if (preview.stackTargetId === null) {
       ctx.beginPath();

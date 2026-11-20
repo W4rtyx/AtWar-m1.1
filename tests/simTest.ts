@@ -5,10 +5,15 @@ import {
   placeBuilding,
   stackBuilding,
 } from '../src/engine/buildings';
+import { getAirDefenseCoverageAt } from '../src/engine/defenses';
 import {
   CAPITAL_BASE_MATERIAL_PER_SEC,
   areNeighbors,
 } from '../src/engine/economy';
+import {
+  BASE_ENERGY_RESERVE_CAPACITY,
+  ENERGY_RESERVE_PER_POWER_PLANT,
+} from '../src/engine/energyGrid';
 import {
   MAX_ORDER_TICKS,
   annexEncircledPockets,
@@ -16,6 +21,7 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  createClientRenderState,
   createEngineController,
   createInitialGameState,
   dispatchAction,
@@ -1300,7 +1306,7 @@ function testBatchStackingConstructionAndDemolish(): void {
   console.log('PASS [l]: Batch stacking (1x/5x/10x/MAX), construction progress, capture transfer & demolish refund verified.');
 }
 
-function testUnlimitedEnergyReserveAndProgressiveCosts(): void {
+function testEnergyReserveCapAndCascadingBlackout(): void {
   const c0 = getUnitBuildCost('MINE', 0, false);
   const c1 = getUnitBuildCost('MINE', 1, false);
   const c2 = getUnitBuildCost('MINE', 2, false);
@@ -1320,39 +1326,174 @@ function testUnlimitedEnergyReserveAndProgressiveCosts(): void {
   for (const p of state.players.values()) {
     if (p.isBot) p.nextBotDecisionTick = 9999;
   }
-  assert(human.energyReserveMax === null, 'energyReserveMax must be null (unlimited late-game reserve)');
 
-  human.money = 50000;
-  human.buildingMaterial = 25000;
-  human.maxManpower = 800;
-  human.manpower = 800;
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    human.energyReserveMax === BASE_ENERGY_RESERVE_CAPACITY,
+    `0 completed Power Plants must cap reserve at ${BASE_ENERGY_RESERVE_CAPACITY} (got ${human.energyReserveMax})`,
+  );
 
-  const ppSpot = findSpacedOwnedSpot(state, humanId, human.capitalX, human.capitalY, 13, false);
-  assert(ppSpot !== null, 'Should find spot for 10x POWER_PLANT stack');
+  const arena = findInlandPlainsCenter(state, 24, 24);
+  paintBlock(state, arena.x - 18, arena.y - 18, arena.x + 18, arena.y + 18, humanId);
+  dispatchAction(state, { type: 'TICK' });
+
+  human.money = 25000;
+  human.buildingMaterial = 15000;
+  human.industry = 5000;
+  human.maxManpower = 900;
+  human.manpower = 900;
+
+  // Build 1st Power Plant -> reserve max becomes 1500 + 2500 = 4000
+  const ppSpot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 12, false);
+  assert(ppSpot !== null, 'Should find valid spot for Power Plant');
   dispatchAction(state, {
     type: 'PLACE_BUILDING',
     playerId: humanId,
     buildingType: 'POWER_PLANT',
     x: ppSpot!.x,
     y: ppSpot!.y,
-    batchSize: 10,
+    batchSize: 1,
   });
-
-  const pp = state.buildings.find((b) => b.ownerId === humanId && b.type === 'POWER_PLANT');
-  assert(pp !== undefined, '10x POWER_PLANT node must exist');
-  const totalWait = BUILDING_SPECS.POWER_PLANT.constructionTicks * 10 + 180;
-  for (let t = 0; t < totalWait; t++) {
+  for (let t = 0; t < BUILDING_SPECS.POWER_PLANT.constructionTicks; t++) {
     dispatchAction(state, { type: 'TICK' });
   }
-  assert(pp!.stackCount === 10, `All 10 Power Plants must complete (got ${pp!.stackCount})`);
+  const pp = state.buildings.find((b) => b.ownerId === humanId && b.type === 'POWER_PLANT');
+  assert(pp !== undefined && pp.stackCount === 1, '1st Power Plant must complete');
   assert(
-    human.energyReserve > 1500 && human.energyReserveMax === null,
-    `Energy reserve must grow past 1500 without artificial cap (got ${human.energyReserve.toFixed(1)})`,
+    human.energyReserveMax === BASE_ENERGY_RESERVE_CAPACITY + ENERGY_RESERVE_PER_POWER_PLANT,
+    `1 Power Plant must cap reserve at 4000 (got ${human.energyReserveMax})`,
   );
-  console.log('PASS [m]: Progressive building costs (+14%) & unlimited late-game energy reserve verified.');
+
+  // Stack 2nd unit onto Power Plant -> reserve max becomes 6500 and strictly clamps excess
+  dispatchAction(state, {
+    type: 'STACK_BUILDING',
+    playerId: humanId,
+    buildingId: pp!.id,
+    batchSize: 1,
+  });
+  for (let t = 0; t < BUILDING_SPECS.POWER_PLANT.constructionTicks; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(pp!.stackCount === 2, '2nd Power Plant unit must complete');
+  const cap2 = BASE_ENERGY_RESERVE_CAPACITY + 2 * ENERGY_RESERVE_PER_POWER_PLANT;
+  assert(
+    human.energyReserveMax === cap2,
+    `2 Power Plants must cap reserve at ${cap2} (got ${human.energyReserveMax})`,
+  );
+
+  human.energyReserve = cap2 + 55000;
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    human.energyReserve === cap2,
+    `Cannot hoard excess energy beyond plant-based cap (${human.energyReserve} === ${cap2})`,
+  );
+
+  // Scale to 3 PP units (>= 16.8/s even outside energy zones) + 1 FACTORY + 1 LAB (12.0/s total demand)
+  dispatchAction(state, {
+    type: 'STACK_BUILDING',
+    playerId: humanId,
+    buildingId: pp!.id,
+    batchSize: 1,
+  });
+  for (const bType of ['FACTORY', 'LAB'] as const) {
+    const spot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 16, false);
+    assert(spot !== null, `Should find spot for ${bType}`);
+    dispatchAction(state, {
+      type: 'PLACE_BUILDING',
+      playerId: humanId,
+      buildingType: bType,
+      x: spot!.x,
+      y: spot!.y,
+    });
+  }
+  for (let t = 0; t < BUILDING_SPECS.LAB.constructionTicks; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(pp!.stackCount === 3, `3rd Power Plant unit must complete (got ${pp!.stackCount})`);
+
+  dispatchAction(state, { type: 'TICK' });
+  const preBlackoutMaxMp = human.maxManpower;
+  const preBlackoutIndRate = human.industryIncomePerSec;
+  const buildingsCountBefore = state.buildings.length;
+  assert(
+    !human.blackoutActive && human.blackoutSeverity === 0 && preBlackoutIndRate > 4,
+    'Healthy grid before outage must have active production and 0 blackout',
+  );
+
+  // Turn Power Plants down to 0% occupancy and drain reserve to trigger cascading blackout
+  dispatchAction(state, {
+    type: 'SET_BUILDING_TYPE_OCCUPANCY',
+    playerId: humanId,
+    buildingType: 'POWER_PLANT',
+    occupancyPct: 0,
+  });
+  human.energyReserve = 1.0;
+  human.manpower = Math.round(preBlackoutMaxMp * 0.75);
+  dispatchAction(state, { type: 'TICK' });
+  const activeAtBlackoutStart = human.activeManpower;
+
+  for (let t = 0; t < 15; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(human.blackoutActive === true, 'Blackout must activate when reserve hits 0 with deficit');
+  const earlySeverity = human.blackoutSeverity;
+  assert(earlySeverity > 0 && earlySeverity < 0.8, `Severity must ramp gradually (got ${earlySeverity})`);
+
+  for (let t = 0; t < 65; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    human.blackoutActive === true && human.blackoutSeverity > earlySeverity,
+    `Blackout severity must keep climbing while deficit continues (${human.blackoutSeverity.toFixed(3)} > ${earlySeverity.toFixed(3)})`,
+  );
+  assert(
+    human.energySupplyRatio < 0.7,
+    `Supply ratio must fall during blackout (got ${human.energySupplyRatio.toFixed(2)})`,
+  );
+  assert(
+    human.industryIncomePerSec < preBlackoutIndRate * 0.75,
+    `Industry production must drop under blackout (${human.industryIncomePerSec.toFixed(2)} < ${(preBlackoutIndRate * 0.75).toFixed(2)})`,
+  );
+  assert(
+    human.maxManpower < preBlackoutMaxMp,
+    `maxManpower must drop under blackout (${human.maxManpower} < ${preBlackoutMaxMp})`,
+  );
+  assert(
+    human.activeManpower < activeAtBlackoutStart,
+    `activeManpower must erode under prolonged blackout (${human.activeManpower.toFixed(1)} < ${activeAtBlackoutStart.toFixed(1)})`,
+  );
+  assert(
+    state.buildings.length === buildingsCountBefore,
+    'Buildings and cities must NOT physically collapse or disappear during blackout',
+  );
+
+  // Restore Power Plants to 100% -> blackout clears and economy recovers cleanly
+  dispatchAction(state, {
+    type: 'SET_BUILDING_TYPE_OCCUPANCY',
+    playerId: humanId,
+    buildingType: 'POWER_PLANT',
+    occupancyPct: 100,
+  });
+  for (let t = 0; t < 110; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    !human.blackoutActive && human.blackoutSeverity === 0,
+    `Grid must recover to 0 blackout severity (got active=${human.blackoutActive}, sev=${human.blackoutSeverity})`,
+  );
+  assert(
+    human.energySupplyRatio === 1 && human.energyReserve > 0,
+    'Energy supply ratio and reserve buffer must recover after positive energy restored',
+  );
+  assert(
+    human.maxManpower === preBlackoutMaxMp && human.industryIncomePerSec >= preBlackoutIndRate * 0.99,
+    `Capacity & production must recover to baseline (${human.maxManpower} === ${preBlackoutMaxMp})`,
+  );
+
+  console.log('PASS [m]: Power-plant energy reserve cap, cascading blackout & non-destructive recovery verified.');
 }
 
-function testTargetedFullAttackAndMicroDotCleanup(): void {
+function testFinishOffTargetAndMultiPocketCleanup(): void {
   const state = createInitialGameState(9303);
   const start = findPlainsLandSpot(state, 220, 270);
   dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
@@ -1360,6 +1501,7 @@ function testTargetedFullAttackAndMicroDotCleanup(): void {
   const humanId = state.humanPlayerId;
   const botId = 2;
   const human = state.players.get(humanId)!;
+  const bot = state.players.get(botId)!;
   for (const p of state.players.values()) {
     if (p.isBot) p.nextBotDecisionTick = 9999;
   }
@@ -1367,12 +1509,40 @@ function testTargetedFullAttackAndMicroDotCleanup(): void {
   const arena = findInlandPlainsCenter(state, 24, 18);
   paintBlock(state, arena.x - 16, arena.y - 12, arena.x - 1, arena.y + 12, humanId);
   paintBlock(state, arena.x, arena.y - 12, arena.x + 16, arena.y + 12, botId);
-  dispatchAction(state, { type: 'TICK' });
 
+  // Inflate botId above 2.5% land AND > 140 cells to test large-target rejection
+  let grantedExtra = 0;
+  for (let i = 0; i < state.owners.length && grantedExtra < 5500; i++) {
+    if (state.terrain[i] !== TerrainType.WATER && state.owners[i] === WILDERNESS_OWNER) {
+      state.owners[i] = botId;
+      grantedExtra++;
+    }
+  }
+  state.stateVersion++;
+  dispatchAction(state, { type: 'TICK' });
+  assert(bot.territoryCells > 5000, 'Large opponent setup should exceed 2.5% land threshold');
+
+  const snapLarge = createClientRenderState(state);
+  const botLargePub = snapLarge.players.find((p) => p.id === botId)!;
+  assert(
+    botLargePub.finishOffEligible === false && botLargePub.finishOffRequiredManpower === null,
+    'Large opponents (> 140 cells & > 2.5% land) must NOT be finishOffEligible',
+  );
+  dispatchAction(state, {
+    type: 'FINISH_OFF_TARGET',
+    playerId: humanId,
+    targetOwnerId: botId,
+  });
+  assert(
+    state.frontPushOrders.length === 0,
+    'FINISH_OFF_TARGET must refuse large opponents',
+  );
+
+  // Build 1 human MINE first so allocatedManpower > 0 is protected during Finish Off
   human.money = 2000;
   human.manpower = 480;
   const mineSpot = findSpacedOwnedSpot(state, humanId, arena.x - 11, arena.y - 7, 4, false);
-  assert(mineSpot !== null, 'Should find spot for human MINE in attack test');
+  assert(mineSpot !== null, 'Should find spot for human MINE in finish-off test');
   dispatchAction(state, {
     type: 'PLACE_BUILDING',
     playerId: humanId,
@@ -1383,64 +1553,79 @@ function testTargetedFullAttackAndMicroDotCleanup(): void {
   for (let t = 0; t < BUILDING_SPECS.MINE.constructionTicks; t++) {
     dispatchAction(state, { type: 'TICK' });
   }
-  human.manpower = 450;
-  dispatchAction(state, { type: 'TICK' });
 
-  // Must refuse TARGETED_ATTACK against NEUTRAL state
+  // Clear botId cells and recreate botId as 3 disconnected residual pockets bordering humanId
+  for (let i = 0; i < state.owners.length; i++) {
+    if (state.owners[i] === botId) {
+      state.owners[i] = WILDERNESS_OWNER;
+    }
+  }
+  paintBlock(state, arena.x - 16, arena.y - 12, arena.x + 16, arena.y + 12, humanId);
+  const p1 = paintBlock(state, arena.x + 4, arena.y - 6, arena.x + 7, arena.y - 4, botId);
+  const p2 = paintBlock(state, arena.x + 6, arena.y + 1, arena.x + 8, arena.y + 3, botId);
+  const p3 = paintBlock(state, arena.x - 9, arena.y + 5, arena.x - 7, arena.y + 7, botId);
+  const allPocketCells = [...p1, ...p2, ...p3];
+  assert(allPocketCells.length === 30, '3 disconnected residual pockets must total 30 cells');
+  bot.capitalX = arena.x + 5;
+  bot.capitalY = arena.y - 5;
+  state.stateVersion++;
+  dispatchAction(state, { type: 'TICK' });
+  assert(bot.territoryCells === 30, `Bot should hold 30 cells across 3 pockets (got ${bot.territoryCells})`);
+
+  const snapSmall = createClientRenderState(state);
+  const botSmallPub = snapSmall.players.find((p) => p.id === botId)!;
+  assert(
+    botSmallPub.finishOffEligible === true &&
+      botSmallPub.finishOffRequiredManpower !== null &&
+      botSmallPub.finishOffRequiredManpower > 0,
+    'Small adjacent opponent must expose finishOffEligible and dynamic MP estimate',
+  );
+  const reqMp = botSmallPub.finishOffRequiredManpower!;
+
+  // Insufficient Ready MP -> FINISH_OFF_TARGET must not launch
+  human.manpower = human.allocatedManpower + Math.max(1, reqMp - 25);
   dispatchAction(state, {
-    type: 'TARGETED_ATTACK',
+    type: 'FINISH_OFF_TARGET',
     playerId: humanId,
     targetOwnerId: botId,
-    anchorX: arena.x + 4,
-    anchorY: arena.y,
-    manpowerPercent: 35,
-    fullAttack: true,
   });
   assert(
     state.frontPushOrders.length === 0,
-    'TARGETED_ATTACK must not attack NEUTRAL foreign states',
+    'FINISH_OFF_TARGET must reject when human activeManpower < finishOffRequiredManpower',
   );
 
-  // Declare WAR and carve isolated 6-cell residual bot micro-dot inside human block
-  setWarRelation(state, humanId, botId);
-  const microCells = paintBlock(state, arena.x - 9, arena.y + 4, arena.x - 8, arena.y + 6, botId);
-  assert(microCells.length === 6, 'Isolated residual micro-dot must have 6 cells');
-
+  // Sufficient Ready MP -> auto-declares WAR & sweeps all 3 pockets simultaneously
+  human.manpower = human.allocatedManpower + reqMp + 80;
   const allocBefore = human.allocatedManpower;
-  const activeBefore = human.activeManpower;
-  assert(allocBefore > 0 && activeBefore > 100, 'Must have both allocated and active manpower');
+  assert(allocBefore > 0, 'Must have active building allocatedManpower');
 
   dispatchAction(state, {
-    type: 'TARGETED_ATTACK',
+    type: 'FINISH_OFF_TARGET',
     playerId: humanId,
     targetOwnerId: botId,
-    anchorX: arena.x + 4,
-    anchorY: arena.y,
-    manpowerPercent: 35,
-    fullAttack: true,
   });
 
-  const fullOrder = state.frontPushOrders.find((o) => o.playerId === humanId);
-  assert(fullOrder !== undefined, 'FULL TARGETED_ATTACK must create frontPushOrder when AT WAR');
   assert(
-    fullOrder!.fullAttack === true && fullOrder!.sweepAllBorders === true,
-    'FULL attack order must enable fullAttack and sweepAllBorders',
+    getRelation(state, humanId, botId) === 'WAR',
+    'FINISH_OFF_TARGET must set WAR relation',
   );
+  const finishOrder = state.frontPushOrders.find((o) => o.playerId === humanId);
+  assert(finishOrder !== undefined, 'FINISH_OFF_TARGET must create frontPushOrder');
   assert(
-    Math.abs(fullOrder!.manpowerCommitted - activeBefore * 0.95) < 1.0,
-    `FULL attack must deploy ~95% of active forces (expected ${(activeBefore * 0.95).toFixed(1)}, got ${fullOrder!.manpowerCommitted.toFixed(1)})`,
+    finishOrder!.finishOff === true && finishOrder!.sweepAllBorders === true,
+    'FINISH_OFF_TARGET order must enable finishOff and sweepAllBorders',
   );
   assert(
     Math.abs(human.allocatedManpower - allocBefore) < 0.01,
-    'FULL attack must keep building allocatedManpower protected',
+    'FINISH_OFF_TARGET must keep building allocatedManpower protected',
   );
 
-  for (let t = 0; t < 8; t++) {
+  for (let t = 0; t < 35 && bot.territoryCells > 0; t++) {
     dispatchAction(state, { type: 'TICK' });
   }
   assert(
-    microCells.every((idx) => state.owners[idx] === humanId),
-    'All 6 isolated residual micro-dot cells must be absorbed after FULL assault',
+    bot.territoryCells === 0 && !bot.alive && allPocketCells.every((idx) => state.owners[idx] === humanId),
+    `All 3 separated opponent pockets must be eliminated by Finish Off (remaining=${bot.territoryCells})`,
   );
 
   // Verify EngineController.pruneHumanBorderCells clears stale selected border segments
@@ -1491,7 +1676,157 @@ function testTargetedFullAttackAndMicroDotCleanup(): void {
     `Stale border selection must prune to empty after borders advance (remaining ${prunedStrip.length})`,
   );
 
-  console.log('PASS [n]: Targeted FULL attack (95% active MP), micro-dot cleanup & stale border pruning verified.');
+  console.log('PASS [n]: FINISH_OFF_TARGET dynamic MP cost, multi-pocket cleanup & stale border pruning verified.');
+}
+
+function testDefenseBuildingsTrenchBunkerAndAA(): void {
+  const countOwned = (state: GameState, ownerId: number): number => {
+    let n = 0;
+    for (let i = 0; i < state.owners.length; i++) {
+      if (state.owners[i] === ownerId) n++;
+    }
+    return n;
+  };
+
+  const runAttackTrial = (
+    defenseType: 'NONE' | 'TRENCH' | 'BUNKER',
+  ): { readonly cellsCaptured: number; readonly costPerCell: number } => {
+    const state = createInitialGameState(9505);
+    const start = findPlainsLandSpot(state, 220, 270);
+    dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+    const humanId = state.humanPlayerId;
+    const botId = 2;
+    const human = state.players.get(humanId)!;
+    const bot = state.players.get(botId)!;
+    for (const p of state.players.values()) {
+      if (p.isBot) p.nextBotDecisionTick = 9999;
+    }
+
+    const arena = findInlandPlainsCenter(state, 24, 16);
+    paintBlock(state, arena.x - 16, arena.y - 10, arena.x - 1, arena.y + 10, humanId);
+    paintBlock(state, arena.x, arena.y - 10, arena.x + 16, arena.y + 10, botId);
+    setWarRelation(state, humanId, botId);
+    dispatchAction(state, { type: 'TICK' });
+
+    bot.money = 5000;
+    bot.buildingMaterial = 5000;
+    bot.industry = 5000;
+    bot.energyReserve = 2000;
+    bot.manpower = 800;
+
+    if (defenseType !== 'NONE') {
+      const def = placeBuilding(state, botId, defenseType, arena.x + 3, arena.y, 1);
+      assert(def !== null && def.level === 1, `${defenseType} placement must succeed with level 1`);
+      for (let t = 0; t < BUILDING_SPECS[defenseType].constructionTicks; t++) {
+        dispatchAction(state, { type: 'TICK' });
+      }
+      assert(def!.stackCount === 1, `${defenseType} must finish construction`);
+    }
+
+    bot.energyReserve = 2000;
+    bot.manpower = 400 + bot.allocatedManpower;
+    human.maxManpower = 1000;
+    human.manpower = 600;
+    dispatchAction(state, { type: 'TICK' });
+    human.manpower = 600;
+
+    const beforeCells = countOwned(state, humanId);
+    dispatchAction(state, {
+      type: 'CREATE_ATTACK_ORDER',
+      playerId: humanId,
+      waypoints: [
+        { x: arena.x - 1, y: arena.y },
+        { x: arena.x + 14, y: arena.y },
+      ],
+      manpowerPercent: 50,
+      targetOwnerId: botId,
+    });
+    const order = state.attackOrders.find((o) => o.playerId === humanId);
+    assert(order !== undefined, `Attack order in ${defenseType} trial must launch`);
+
+    for (let t = 0; t < 12; t++) {
+      dispatchAction(state, { type: 'TICK' });
+    }
+    const cellsCaptured = countOwned(state, humanId) - beforeCells;
+    const mpSpent = order!.manpowerCommitted - order!.manpowerRemaining;
+    return {
+      cellsCaptured,
+      costPerCell: mpSpent / Math.max(1, cellsCaptured),
+    };
+  };
+
+  const undefended = runAttackTrial('NONE');
+  const trench = runAttackTrial('TRENCH');
+  const bunker = runAttackTrial('BUNKER');
+
+  assert(
+    undefended.cellsCaptured > trench.cellsCaptured && trench.cellsCaptured > bunker.cellsCaptured,
+    `Defenses must progressively slow enemy advance: none(${undefended.cellsCaptured}) > trench(${trench.cellsCaptured}) > bunker(${bunker.cellsCaptured})`,
+  );
+  assert(
+    trench.costPerCell > undefended.costPerCell && bunker.costPerCell > trench.costPerCell,
+    `Defenses must inflict higher attacker MP cost/cell: none(${undefended.costPerCell.toFixed(2)}) < trench(${trench.costPerCell.toFixed(2)}) < bunker(${bunker.costPerCell.toFixed(2)})`,
+  );
+
+  // Verify AA_BATTERY radius coverage, stacking and 50% demolish refund
+  const state = createInitialGameState(9506);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 9999;
+  }
+  const aaArena = findInlandPlainsCenter(state, 24, 14);
+  paintBlock(state, aaArena.x - 16, aaArena.y - 10, aaArena.x + 16, aaArena.y + 10, humanId);
+  dispatchAction(state, { type: 'TICK' });
+
+  human.money = 8000;
+  human.buildingMaterial = 4000;
+  human.industry = 4000;
+  human.energyReserve = 2000;
+  const aaSpot = findSpacedOwnedSpot(state, humanId, aaArena.x, aaArena.y, 10, false);
+  assert(aaSpot !== null, 'Should find valid spot for AA_BATTERY');
+  dispatchAction(state, {
+    type: 'PLACE_BUILDING',
+    playerId: humanId,
+    buildingType: 'AA_BATTERY',
+    x: aaSpot!.x,
+    y: aaSpot!.y,
+    batchSize: 5,
+  });
+  const aa = state.buildings.find((b) => b.ownerId === humanId && b.type === 'AA_BATTERY');
+  assert(aa !== undefined && aa.underConstructionCount === 5, '5x AA_BATTERY batch should queue');
+  for (let t = 0; t < BUILDING_SPECS.AA_BATTERY.constructionTicks; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(aa!.stackCount === 1, 'First AA_BATTERY unit must complete');
+  assert(
+    getAirDefenseCoverageAt(state.buildings, humanId, aa!.x + 5, aa!.y) > 0,
+    'AA_BATTERY must provide air-defense coverage inside radius',
+  );
+  assert(
+    getAirDefenseCoverageAt(state.buildings, humanId, aa!.x + 40, aa!.y) === 0,
+    'AA_BATTERY coverage must be 0 outside radius',
+  );
+
+  const moneyBeforeDem = human.money;
+  const expectedRef = Math.floor(aa!.totalInvestedMoney * DEMOLISH_REFUND_RATIO);
+  dispatchAction(state, {
+    type: 'DEMOLISH_BUILDING',
+    playerId: humanId,
+    buildingId: aa!.id,
+    demolishAll: true,
+  });
+  assert(
+    !state.buildings.some((b) => b.id === aa!.id) && human.money === moneyBeforeDem + expectedRef,
+    'Demolishing AA_BATTERY stack must remove node and refund 50%',
+  );
+
+  console.log(
+    `PASS [o]: TRENCH & BUNKER slow front and raise casualties (${undefended.cellsCaptured} -> ${trench.cellsCaptured} -> ${bunker.cellsCaptured} cells) + AA_BATTERY verified.`,
+  );
 }
 
 function main(): void {
@@ -1507,9 +1842,10 @@ function main(): void {
   testHomeFrontVsBareWilderness();
   testNeighborTradeAndBetrayalFine();
   testBatchStackingConstructionAndDemolish();
-  testUnlimitedEnergyReserveAndProgressiveCosts();
-  testTargetedFullAttackAndMicroDotCleanup();
-  console.log('ALL 14 SIMULATION TESTS PASSED.');
+  testEnergyReserveCapAndCascadingBlackout();
+  testFinishOffTargetAndMultiPocketCleanup();
+  testDefenseBuildingsTrenchBunkerAndAA();
+  console.log('ALL 15 SIMULATION TESTS PASSED.');
 }
 
 main();

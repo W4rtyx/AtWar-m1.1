@@ -285,7 +285,7 @@ function bootstrap(): void {
       selectedBuildingId = null;
       syncHud();
     },
-    onLaunchTargetAttack: (fullAttack) => {
+    onLaunchTargetAttack: () => {
       if (!selectedTarget) return;
       const state = engine.getRenderState();
       const targetOwnerId =
@@ -297,9 +297,19 @@ function bootstrap(): void {
         anchorX: selectedTarget.anchorX,
         anchorY: selectedTarget.anchorY,
         manpowerPercent,
-        fullAttack,
       });
       clearFrontSelection();
+      syncHud();
+    },
+    onFinishOff: (targetId) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'FINISH_OFF_TARGET',
+        playerId: state.humanPlayerId,
+        targetOwnerId: targetId,
+      });
+      clearFrontSelection();
+      selectedTarget = null;
       syncHud();
     },
     onClearTarget: () => {
@@ -794,20 +804,26 @@ function bootstrap(): void {
       return;
     }
 
-    if (e.code.startsWith('Digit')) {
-      const digit = Number(e.code.slice(5));
-      if (digit >= 1 && digit <= ALL_BUILDING_TYPES.length) {
-        const state = engine.getRenderState();
-        if (state.phase === 'PLAYING') {
-          const bType = ALL_BUILDING_TYPES[digit - 1];
-          selectedBuildType = selectedBuildType === bType ? null : bType;
-          if (selectedBuildType !== null) {
-            clearFrontSelection();
-            clearInteractionPreviews();
-          }
+    const buildHotkeyIdx =
+      e.code.startsWith('Digit')
+        ? e.code === 'Digit0'
+          ? 9
+          : Number(e.code.slice(5)) - 1
+        : e.code === 'Minus'
+          ? 10
+          : -1;
+    if (buildHotkeyIdx >= 0 && buildHotkeyIdx < ALL_BUILDING_TYPES.length) {
+      const state = engine.getRenderState();
+      if (state.phase === 'PLAYING') {
+        const bType = ALL_BUILDING_TYPES[buildHotkeyIdx];
+        selectedBuildType = selectedBuildType === bType ? null : bType;
+        if (selectedBuildType !== null) {
+          selectedTarget = null;
+          clearFrontSelection();
+          clearInteractionPreviews();
         }
-        return;
       }
+      return;
     }
 
     if (e.code === 'KeyM') {

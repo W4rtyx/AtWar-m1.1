@@ -3,6 +3,7 @@ import {
   computeBatchQuote,
   countPlayerUnitsOfType,
 } from '../engine/buildings';
+import { isDefenseBuildingType } from '../engine/defenses';
 import {
   ALL_BUILDING_TYPES,
   BuildBatchSize,
@@ -43,6 +44,7 @@ function formatCostText(cost: BuildingCost, isFreeOnly: boolean): string {
 interface BuildButtonRef {
   readonly type: BuildingType;
   readonly button: HTMLButtonElement;
+  readonly countEl: HTMLElement;
   readonly costEl: HTMLElement;
 }
 
@@ -112,24 +114,32 @@ export class BuildMenuController {
 
     ALL_BUILDING_TYPES.forEach((bType, idx) => {
       const spec = BUILDING_SPECS[bType];
+      const hotkeyLabel = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '-';
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'hud-btn hud-build-btn';
-      btn.title = `${spec.nameCs} [${idx + 1}] — ${spec.descriptionCs} Kliknutím na existující stejný uzel stackujete.`;
+      btn.className = isDefenseBuildingType(bType)
+        ? 'hud-btn hud-build-btn hud-build-btn-defense'
+        : 'hud-btn hud-build-btn';
+      btn.title = `${spec.nameCs} [${hotkeyLabel}] — ${spec.descriptionCs} Kliknutím na existující stejný uzel stackujete.`;
 
       const topRow = document.createElement('span');
       topRow.className = 'hud-build-btn-top';
 
       const keyBadge = document.createElement('span');
       keyBadge.className = 'hud-build-hotkey';
-      keyBadge.textContent = String(idx + 1);
+      keyBadge.textContent = hotkeyLabel;
 
       const nameEl = document.createElement('span');
       nameEl.className = 'hud-build-name';
       nameEl.textContent = spec.nameCs;
 
+      const countEl = document.createElement('span');
+      countEl.className = 'hud-build-owned';
+      countEl.textContent = '(0)';
+
       topRow.appendChild(keyBadge);
       topRow.appendChild(nameEl);
+      topRow.appendChild(countEl);
 
       const costEl = document.createElement('span');
       costEl.className = 'hud-build-cost';
@@ -147,7 +157,7 @@ export class BuildMenuController {
       });
 
       gridEl.appendChild(btn);
-      this.buttons.push({ type: bType, button: btn, costEl });
+      this.buttons.push({ type: bType, button: btn, countEl, costEl });
     });
 
     this.panelEl.appendChild(gridEl);
@@ -185,7 +195,20 @@ export class BuildMenuController {
     }
     this.cancelBtn.classList.toggle('hidden', selectedBuildType === null);
 
+    const ownedCompleted = new Map<BuildingType, number>();
+    const ownedQueued = new Map<BuildingType, number>();
+    for (const b of state.buildings) {
+      ownedCompleted.set(b.type, (ownedCompleted.get(b.type) ?? 0) + b.stackCount);
+      ownedQueued.set(b.type, (ownedQueued.get(b.type) ?? 0) + b.underConstructionCount);
+    }
+
     for (const ref of this.buttons) {
+      const doneCount = ownedCompleted.get(ref.type) ?? 0;
+      const queuedCount = ownedQueued.get(ref.type) ?? 0;
+      ref.countEl.textContent =
+        queuedCount > 0 ? `(${doneCount} +${queuedCount})` : `(${doneCount})`;
+      ref.countEl.classList.toggle('has-queued', queuedCount > 0);
+
       const scaledCount = countPlayerUnitsOfType(state.buildings, state.humanPlayerId, ref.type);
       const quote = computeBatchQuote(
         ref.type,

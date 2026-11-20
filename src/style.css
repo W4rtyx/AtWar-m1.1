@@ -78,6 +78,15 @@ body {
   color: #e2a298;
 }
 
+.hud-res-pill.energy-blackout {
+  border-color: #9e433a;
+  background: rgba(68, 22, 20, 0.72);
+}
+
+.hud-res-pill.energy-blackout .hud-stat-value {
+  color: #f3b5ad;
+}
+
 .hud-stat-sub.rate-negative {
   color: #dc867c;
 }
@@ -261,6 +270,26 @@ body {
   padding: 4px 7px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+.hud-blackout-pill {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-blackout-pill.is-blackout {
+  background: #4d1c18;
+  border: 1px solid #b54e45;
+  color: #ffd0c9;
+}
+
+.hud-blackout-pill.is-deficit {
+  background: #3d311a;
+  border: 1px solid #9c7936;
+  color: #edd596;
 }
 
 .hud-betrayal-pill {
@@ -592,8 +621,18 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: 4px 8px;
-  min-width: 96px;
+  padding: 4px 7px;
+  min-width: 90px;
+}
+
+.hud-build-btn-defense {
+  border-color: #465d68;
+  background: #1f2b33;
+}
+
+.hud-build-btn-defense.active {
+  background: #2f5166;
+  border-color: #6ea8c9;
 }
 
 .hud-build-btn.unaffordable:not(.active) {
@@ -603,7 +642,7 @@ body {
 .hud-build-btn-top {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .hud-build-hotkey {
@@ -617,8 +656,19 @@ body {
 }
 
 .hud-build-name {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
+}
+
+.hud-build-owned {
+  font-size: 10px;
+  font-weight: 700;
+  color: #8eb2c9;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-build-owned.has-queued {
+  color: #82d3e6;
 }
 
 .hud-build-cost {
@@ -1058,15 +1108,15 @@ body {
   gap: 6px;
 }
 
-.hud-btn-full-attack {
-  background: #662d28;
-  border-color: #a34d45;
-  color: #f4dad6;
+.hud-btn-finish-off {
+  background: #5f3121;
+  border-color: #b46444;
+  color: #f8dfd2;
 }
 
-.hud-btn-full-attack:hover {
-  background: #7c3630;
-  border-color: #c25c53;
+.hud-btn-finish-off:hover:not(:disabled) {
+  background: #773d29;
+  border-color: #cf7652;
 }
 
 .hidden {

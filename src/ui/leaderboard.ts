@@ -10,6 +10,7 @@ export interface DiplomacyCallbacks {
   readonly onMakePeace: (targetId: number) => void;
   readonly onToggleAlliance: (targetId: number) => void;
   readonly onToggleTrade: (targetId: number) => void;
+  readonly onFinishOff: (targetId: number) => void;
 }
 
 function relationLabel(rel: DiplomaticRelation): string {
@@ -37,6 +38,7 @@ export class LeaderboardController {
   private lastListRenderKey = '';
   private lastProfileStructureKey = '';
   private lastDipActionAtMs = 0;
+  private lastHumanReadyMp = 0;
 
   public constructor(root: HTMLElement, callbacks: DiplomacyCallbacks) {
     this.callbacks = callbacks;
@@ -105,6 +107,10 @@ export class LeaderboardController {
         this.callbacks.onToggleAlliance(tid);
       } else if (action === 'trade') {
         this.callbacks.onToggleTrade(tid);
+      } else if (action === 'finish-off') {
+        this.callbacks.onFinishOff(tid);
+        this.closeProfile();
+        return;
       }
       this.lastListRenderKey = '';
       this.lastProfileStructureKey = '';
@@ -178,6 +184,9 @@ export class LeaderboardController {
         this.listEl.innerHTML = rowsHtml;
       }
     }
+
+    const human = state.players.find((p) => p.id === state.humanPlayerId);
+    this.lastHumanReadyMp = Math.floor(human?.activeManpower ?? 0);
 
     if (this.openProfileTargetId !== null) {
       const target = state.players.find((p) => p.id === this.openProfileTargetId);
@@ -255,7 +264,8 @@ export class LeaderboardController {
     const hasBetrayal = target.betrayalDebuffTicks > 0;
     const isNeighbor = target.isNeighborOfHuman;
     const hasTrade = target.hasTradeWithHuman;
-    const structureKey = `${target.id}|${rel}|${hasBetrayal}|${isNeighbor}|${hasTrade}|${this.profileX}|${this.profileY}`;
+    const finishEligible = target.finishOffEligible && target.finishOffRequiredManpower !== null;
+    const structureKey = `${target.id}|${rel}|${hasBetrayal}|${isNeighbor}|${hasTrade}|${finishEligible}|${this.profileX}|${this.profileY}`;
 
     if (structureKey !== this.lastProfileStructureKey) {
       this.lastProfileStructureKey = structureKey;
@@ -285,6 +295,22 @@ export class LeaderboardController {
         actionsHtml = `
           <button type="button" class="hud-btn hud-btn-ally" data-dip-action="peace">
             Uzavřít mír
+          </button>
+        `;
+      }
+
+      if (finishEligible && target.finishOffRequiredManpower !== null) {
+        const req = target.finishOffRequiredManpower;
+        const finishLabel =
+          rel === 'WAR'
+            ? `Dorazit (${req} MP)`
+            : rel === 'ALLIED'
+              ? `Zradit a dorazit (${req} MP)`
+              : `Válka a dorazit (${req} MP)`;
+        const disabledAttr = this.lastHumanReadyMp < req ? ' disabled' : '';
+        actionsHtml += `
+          <button type="button" class="hud-btn hud-btn-finish-off" data-dip-action="finish-off"${disabledAttr}>
+            ${finishLabel}
           </button>
         `;
       }
@@ -351,6 +377,19 @@ export class LeaderboardController {
       const betEl = this.profileEl.querySelector<HTMLElement>('[data-dip-el="betrayal"]');
       if (betEl) {
         betEl.textContent = `Zrádce aliance: −35 % obrana (${Math.ceil(target.betrayalDebuffTicks / TICK_RATE)}s)`;
+      }
+    }
+    if (finishEligible && target.finishOffRequiredManpower !== null) {
+      const finishBtn = this.profileEl.querySelector<HTMLButtonElement>('[data-dip-action="finish-off"]');
+      if (finishBtn) {
+        const req = target.finishOffRequiredManpower;
+        finishBtn.textContent =
+          rel === 'WAR'
+            ? `Dorazit (${req} MP)`
+            : rel === 'ALLIED'
+              ? `Zradit a dorazit (${req} MP)`
+              : `Válka a dorazit (${req} MP)`;
+        finishBtn.disabled = this.lastHumanReadyMp < req;
       }
     }
   }

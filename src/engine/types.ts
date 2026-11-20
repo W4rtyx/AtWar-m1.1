@@ -10,6 +10,8 @@ export const BARRACKS_DEFENSE_RADIUS = 18;
 export const MAX_STACK_PER_NODE = 50;
 export const DEMOLISH_REFUND_RATIO = 0.5;
 export const BUILDING_COST_SCALING_PER_UNIT = 0.14;
+export const FINISH_OFF_MAX_LAND_RATIO = 0.025;
+export const FINISH_OFF_MAX_CELLS = 140;
 
 export type BuildBatchSize = 1 | 5 | 10 | 'MAX';
 
@@ -21,6 +23,8 @@ export enum TerrainType {
 
 export type ResourceType = 'CONSTRUCTION_MATERIAL' | 'BASIC_ENERGY';
 
+export type DefenseBuildingType = 'TRENCH' | 'BUNKER' | 'AA_BATTERY';
+
 export type BuildingType =
   | 'CITY'
   | 'MINE'
@@ -29,7 +33,14 @@ export type BuildingType =
   | 'LAB'
   | 'BARRACKS'
   | 'PORT'
-  | 'AIRFIELD';
+  | 'AIRFIELD'
+  | DefenseBuildingType;
+
+export const DEFENSE_BUILDING_TYPES: ReadonlyArray<DefenseBuildingType> = [
+  'TRENCH',
+  'BUNKER',
+  'AA_BATTERY',
+];
 
 export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'CITY',
@@ -40,6 +51,9 @@ export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'BARRACKS',
   'PORT',
   'AIRFIELD',
+  'TRENCH',
+  'BUNKER',
+  'AA_BATTERY',
 ];
 
 export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
@@ -50,6 +64,9 @@ export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'BARRACKS',
   'PORT',
   'AIRFIELD',
+  'TRENCH',
+  'BUNKER',
+  'AA_BATTERY',
 ];
 
 export interface BuildingCost {
@@ -86,6 +103,7 @@ export interface Building {
   readonly x: number;
   readonly y: number;
   readonly isCapital: boolean;
+  level: number;
   revealedEfficiencyPct: number | null;
   stackCount: number;
   underConstructionCount: number;
@@ -109,6 +127,7 @@ export interface PublicBuildingInfo {
   readonly x: number;
   readonly y: number;
   readonly isCapital: boolean;
+  readonly level: number;
   readonly revealedEfficiencyPct: number | null;
   readonly stackCount: number;
   readonly underConstructionCount: number;
@@ -179,11 +198,13 @@ export interface PlayerState {
   industry: number;
   industryIncomePerSec: number;
   energyReserve: number;
-  energyReserveMax: number | null;
+  energyReserveMax: number;
   energyProductionPerSec: number;
   energyConsumptionPerSec: number;
   energyNetPerSec: number;
   energySupplyRatio: number;
+  blackoutActive: boolean;
+  blackoutSeverity: number;
   freePowerPlantUsed: boolean;
   buildingOccupancyByType: OccupancyByType;
   betrayalDebuffTicks: number;
@@ -207,6 +228,8 @@ export interface PublicPlayerInfo {
   readonly isNeighborOfHuman: boolean;
   readonly hasTradeWithHuman: boolean;
   readonly tradeIncomeWithHumanPerSec: number;
+  readonly finishOffEligible: boolean;
+  readonly finishOffRequiredManpower: number | null;
   /** Only populated for the local human player; omitted for AI bots / opponents. */
   readonly manpower?: number;
   readonly maxManpower?: number;
@@ -224,11 +247,13 @@ export interface PublicPlayerInfo {
   readonly industry?: number;
   readonly industryIncomePerSec?: number;
   readonly energyReserve?: number;
-  readonly energyReserveMax?: number | null;
+  readonly energyReserveMax?: number;
   readonly energyProductionPerSec?: number;
   readonly energyConsumptionPerSec?: number;
   readonly energyNetPerSec?: number;
   readonly energySupplyRatio?: number;
+  readonly blackoutActive?: boolean;
+  readonly blackoutSeverity?: number;
   readonly freePowerPlantUsed?: boolean;
   readonly buildingOccupancyByType?: Readonly<OccupancyByType>;
 }
@@ -260,7 +285,7 @@ export interface FrontPushOrder {
   readonly originCenter: Point;
   readonly focalPoint?: Point;
   readonly sweepAllBorders?: boolean;
-  readonly fullAttack?: boolean;
+  readonly finishOff?: boolean;
   dirX: number;
   dirY: number;
   manpowerCommitted: number;
@@ -386,7 +411,11 @@ export type Action =
       readonly anchorX: number;
       readonly anchorY: number;
       readonly manpowerPercent: number;
-      readonly fullAttack: boolean;
+    }
+  | {
+      readonly type: 'FINISH_OFF_TARGET';
+      readonly playerId: number;
+      readonly targetOwnerId: number;
     }
   | {
       readonly type: 'SET_BUILDING_TYPE_OCCUPANCY';

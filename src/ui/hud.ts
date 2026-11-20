@@ -1,3 +1,4 @@
+import { BASE_ENERGY_RESERVE_CAPACITY } from '../engine/energyGrid';
 import {
   BuildBatchSize,
   BuildingType,
@@ -31,7 +32,7 @@ export interface HudCallbacks
   readonly onClearFrontSelection: () => void;
   readonly onCancelOrders: () => void;
   readonly onSpeedChange: (speed: SimSpeed) => void;
-  readonly onLaunchTargetAttack: (fullAttack: boolean) => void;
+  readonly onLaunchTargetAttack: () => void;
   readonly onClearTarget: () => void;
 }
 
@@ -75,6 +76,7 @@ export class HudController {
   private buildingsValueEl!: HTMLElement;
   private territoryValueEl!: HTMLElement;
   private ordersValueEl!: HTMLElement;
+  private blackoutAlertEl!: HTMLElement;
   private betrayalAlertEl!: HTMLElement;
   private timerValueEl!: HTMLElement;
   private speedButtons!: NodeListOf<HTMLButtonElement>;
@@ -94,7 +96,7 @@ export class HudController {
   private targetTitleEl!: HTMLElement;
   private targetWarBtn!: HTMLButtonElement;
   private targetAttackBtn!: HTMLButtonElement;
-  private targetFullBtn!: HTMLButtonElement;
+  private targetFinishOffBtn!: HTMLButtonElement;
   private targetCancelBtn!: HTMLButtonElement;
   private currentTargetOwnerId: number | null = null;
 
@@ -124,6 +126,7 @@ export class HudController {
       onMakePeace: callbacks.onMakePeace,
       onToggleAlliance: callbacks.onToggleAlliance,
       onToggleTrade: callbacks.onToggleTrade,
+      onFinishOff: callbacks.onFinishOff,
     });
 
     this.buildMenu = new BuildMenuController({
@@ -215,6 +218,7 @@ export class HudController {
             <span class="hud-stat-label">Útoky</span>
             <span class="hud-stat-value" data-el="orders-val">0</span>
           </div>
+          <span class="hud-blackout-pill hidden" data-el="blackout-alert">BLACKOUT 0 %</span>
           <span class="hud-betrayal-pill hidden" data-el="betrayal-alert">ZRÁDCE −35 % obrana (0s)</span>
         </div>
       </div>
@@ -236,8 +240,8 @@ export class HudController {
               <button type="button" class="hud-btn" data-target-action="attack">
                 Útok (35 %)
               </button>
-              <button type="button" class="hud-btn hud-btn-full-attack" data-target-action="full">
-                FULL ÚTOK (95 %)
+              <button type="button" class="hud-btn hud-btn-finish-off hidden" data-target-action="finish-off">
+                Dorazit (0 MP)
               </button>
               <button type="button" class="hud-btn" data-target-action="cancel">
                 Zrušit (RMB)
@@ -295,10 +299,10 @@ export class HudController {
         <div class="hud-panel hud-legend">
           <div class="hud-legend-row">
             <span class="hud-legend-key">LMB klik / tažení</span>
-            <span>Označit cíl (FULL) / kreslit šipku (2s Ambush)</span>
+            <span>Označit cíl (Útok / Dorazit) / kreslit šipku (2s Ambush)</span>
           </div>
           <div class="hud-legend-row">
-            <span class="hud-legend-key">Klávesy 1–8 / Stavba</span>
+            <span class="hud-legend-key">Klávesy 1–0, - / Stavba</span>
             <span>Stavět či stackovat · RMB na budovu: Správa/Demontáž</span>
           </div>
           <div class="hud-legend-row">
@@ -333,6 +337,7 @@ export class HudController {
     this.buildingsValueEl = this.query('[data-el="buildings-val"]');
     this.territoryValueEl = this.query('[data-el="territory-val"]');
     this.ordersValueEl = this.query('[data-el="orders-val"]');
+    this.blackoutAlertEl = this.query('[data-el="blackout-alert"]');
     this.betrayalAlertEl = this.query('[data-el="betrayal-alert"]');
     this.timerValueEl = this.query('[data-el="game-timer"]');
     this.speedButtons = this.root.querySelectorAll<HTMLButtonElement>('[data-speed]');
@@ -353,7 +358,7 @@ export class HudController {
     this.targetTitleEl = this.query('[data-el="target-title"]');
     this.targetWarBtn = this.query<HTMLButtonElement>('[data-target-action="war"]');
     this.targetAttackBtn = this.query<HTMLButtonElement>('[data-target-action="attack"]');
-    this.targetFullBtn = this.query<HTMLButtonElement>('[data-target-action="full"]');
+    this.targetFinishOffBtn = this.query<HTMLButtonElement>('[data-target-action="finish-off"]');
     this.targetCancelBtn = this.query<HTMLButtonElement>('[data-target-action="cancel"]');
 
     this.pauseBtn.addEventListener('click', () => this.callbacks.onTogglePause());
@@ -381,13 +386,15 @@ export class HudController {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      this.callbacks.onLaunchTargetAttack(false);
+      this.callbacks.onLaunchTargetAttack();
     });
-    this.targetFullBtn.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
+    this.targetFinishOffBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || this.targetFinishOffBtn.disabled) return;
       e.preventDefault();
       e.stopPropagation();
-      this.callbacks.onLaunchTargetAttack(true);
+      if (this.currentTargetOwnerId !== null) {
+        this.callbacks.onFinishOff(this.currentTargetOwnerId);
+      }
     });
     this.targetCancelBtn.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
@@ -492,6 +499,7 @@ export class HudController {
     this.buildingMenu.update(state);
 
     if (!isPlaying) {
+      this.blackoutAlertEl.classList.add('hidden');
       this.betrayalAlertEl.classList.add('hidden');
       this.targetBarEl.classList.add('hidden');
       return;
@@ -510,7 +518,11 @@ export class HudController {
     const industry = human?.industry ?? 0;
     const industryRate = human?.industryIncomePerSec ?? 0;
     const energyRes = human?.energyReserve ?? 0;
+    const energyMax = human?.energyReserveMax ?? BASE_ENERGY_RESERVE_CAPACITY;
     const energyNet = human?.energyNetPerSec ?? 0;
+    const blackoutActive = human?.blackoutActive ?? false;
+    const blackoutSeverity = human?.blackoutSeverity ?? 0;
+    const energySupplyRatio = human?.energySupplyRatio ?? 1;
 
     const totalManpower = Math.max(1, Math.floor(human?.manpower ?? 0));
     const readyManpower = Math.floor(human?.activeManpower ?? 0);
@@ -545,10 +557,28 @@ export class HudController {
     this.industryValueEl.textContent = `${Math.floor(industry)}`;
     this.industryRateEl.textContent = formatSignedRate(industryRate);
 
-    this.energyValueEl.textContent = `${Math.floor(energyRes)}`;
+    this.energyValueEl.textContent = `${Math.floor(energyRes)} / ${Math.round(energyMax)}`;
     this.energyRateEl.textContent = formatSignedRate(energyNet);
     this.energyRateEl.classList.toggle('rate-negative', energyNet < 0);
-    this.energyPillEl.classList.toggle('energy-deficit', energyNet < 0);
+    this.energyPillEl.classList.toggle('energy-deficit', energyNet < -0.05 && !blackoutActive);
+    this.energyPillEl.classList.toggle('energy-blackout', blackoutActive);
+
+    if (blackoutActive) {
+      this.blackoutAlertEl.classList.remove('hidden', 'is-deficit');
+      this.blackoutAlertEl.classList.add('is-blackout');
+      this.blackoutAlertEl.textContent = `BLACKOUT ${Math.round(blackoutSeverity * 100)} % (výkon −${Math.round((1 - energySupplyRatio) * 100)} %)`;
+    } else if (blackoutSeverity > 0.02) {
+      this.blackoutAlertEl.classList.remove('hidden', 'is-blackout');
+      this.blackoutAlertEl.classList.add('is-deficit');
+      this.blackoutAlertEl.textContent = `ZOTAVENÍ SÍTĚ ${Math.round((1 - blackoutSeverity) * 100)} %`;
+    } else if (energyNet < -0.05) {
+      const secLeft = Math.ceil(energyRes / Math.max(0.1, -energyNet));
+      this.blackoutAlertEl.classList.remove('hidden', 'is-blackout');
+      this.blackoutAlertEl.classList.add('is-deficit');
+      this.blackoutAlertEl.textContent = `DEFICIT ENERGIE (${secLeft}s)`;
+    } else {
+      this.blackoutAlertEl.classList.add('hidden');
+    }
 
     this.manpowerValueEl.textContent = `${readyManpower} (${readyPct} %) · ${assignedManpower} · ${maxManpower}`;
     this.manpowerIncomeEl.textContent = `+${income.toFixed(1)}/s`;
@@ -597,13 +627,15 @@ export class HudController {
       this.currentTargetOwnerId = null;
       this.targetTitleEl.textContent = `Cíl: Volné území [${Math.floor(selectedTarget.anchorX)}, ${Math.floor(selectedTarget.anchorY)}]`;
       this.targetWarBtn.classList.add('hidden');
+      this.targetFinishOffBtn.classList.add('hidden');
       this.targetAttackBtn.classList.remove('hidden');
-      this.targetFullBtn.classList.remove('hidden');
       this.targetAttackBtn.textContent = `Útok (${this.currentPercent} %)`;
       this.targetBarEl.classList.remove('hidden');
       return;
     }
 
+    const human = state.players.find((p) => p.id === state.humanPlayerId);
+    const readyMp = Math.floor(human?.activeManpower ?? 0);
     const targetPlayer = state.players.find(
       (p) => p.id === selectedTarget.ownerId && p.alive,
     );
@@ -624,9 +656,25 @@ export class HudController {
       ? 'Zradit a vyhlásit válku'
       : 'Vyhlásit válku';
     this.targetAttackBtn.classList.toggle('hidden', !isWar);
-    this.targetFullBtn.classList.toggle('hidden', !isWar);
     if (isWar) {
       this.targetAttackBtn.textContent = `Útok (${this.currentPercent} %)`;
+    }
+
+    const canFinishOff =
+      targetPlayer.finishOffEligible && targetPlayer.finishOffRequiredManpower !== null;
+    this.targetFinishOffBtn.classList.toggle('hidden', !canFinishOff);
+    if (canFinishOff && targetPlayer.finishOffRequiredManpower !== null) {
+      const req = targetPlayer.finishOffRequiredManpower;
+      this.targetFinishOffBtn.textContent = isWar
+        ? `Dorazit (${req} MP)`
+        : isAllied
+          ? `Zradit a dorazit (${req} MP)`
+          : `Válka a dorazit (${req} MP)`;
+      this.targetFinishOffBtn.disabled = readyMp < req;
+      this.targetFinishOffBtn.title =
+        readyMp < req
+          ? `Vyžaduje ${req} Ready MP (máte ${readyMp} MP)`
+          : 'Spustí koordinovaný útok ze všech okolních hranic na doražení zbytků soupeře';
     }
     this.targetBarEl.classList.remove('hidden');
   }

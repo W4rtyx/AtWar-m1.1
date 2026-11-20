@@ -1,8 +1,11 @@
+import { evaluateCellDefense } from './defenses';
 import { syncPlayerActiveManpower } from './economy';
+import { getCombatBlackoutMultiplier } from './energyGrid';
 import {
   AttackOrder,
-  BARRACKS_DEFENSE_RADIUS,
   DiplomaticRelation,
+  FINISH_OFF_MAX_CELLS,
+  FINISH_OFF_MAX_LAND_RATIO,
   GameState,
   MAP_HEIGHT,
   MAP_WIDTH,
@@ -437,6 +440,7 @@ interface ExpandableOrder {
   ticksRemaining: number;
   stagnantTicks: number;
   mountainAccum: number;
+  readonly finishOff?: boolean;
 }
 
 function getProtectedReserveFloor(defender: PlayerState): number {
@@ -457,22 +461,30 @@ function applyDefenderAttrition(defender: PlayerState, rawLoss: number): void {
 
 function computeCellCaptureCost(
   state: GameState,
+  attackerId: number,
   nx: number,
   ny: number,
   cellTerrain: TerrainType,
   prevOwner: number,
-): { readonly effectiveCost: number; readonly defenderLoss: number; readonly isForeign: boolean } {
+): {
+  readonly effectiveCost: number;
+  readonly defenderLoss: number;
+  readonly advanceSpeedMultiplier: number;
+  readonly isForeign: boolean;
+} {
   const terrainFactor = cellTerrain === TerrainType.MOUNTAINS ? 1 / MOUNTAINS_SPEED : 1 / PLAINS_SPEED;
 
   if (prevOwner === WILDERNESS_OWNER) {
     return {
       effectiveCost: WILDERNESS_BASE_COST * terrainFactor,
       defenderLoss: 0,
+      advanceSpeedMultiplier: 1,
       isForeign: false,
     };
   }
 
   const defender = state.players.get(prevOwner);
+  const attacker = state.players.get(attackerId);
   const defenderActive = defender
     ? Math.max(0, defender.manpower - defender.allocatedManpower)
     : 0;
@@ -483,36 +495,24 @@ function computeCellCaptureCost(
   const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
   const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
 
-  let bestBarracksEff = 0;
-  let bestBarracksStack = 0;
-  for (const building of state.buildings) {
-    if (
-      building.ownerId === prevOwner &&
-      building.type === 'BARRACKS' &&
-      building.stackCount > 0 &&
-      building.effectiveOutputPct > 0 &&
-      Math.hypot(building.x - nx, building.y - ny) <= BARRACKS_DEFENSE_RADIUS
-    ) {
-      const eff = building.effectiveOutputPct / 100;
-      const weighted = eff * (0.3 + 0.08 * Math.min(3, building.stackCount - 1));
-      if (weighted > bestBarracksEff) {
-        bestBarracksEff = weighted;
-        bestBarracksStack = building.stackCount;
-      }
-    }
-  }
-  const barracksDefenseFactor =
-    bestBarracksStack > 0 ? 1 + Math.min(0.55, bestBarracksEff) : 1;
+  const defense = evaluateCellDefense(state.buildings, prevOwner, nx, ny);
+  const defenderBlackoutMul = getCombatBlackoutMultiplier(defender);
+  const attackerBlackoutMul = getCombatBlackoutMultiplier(attacker);
 
   let effectiveCost =
     ENEMY_BORDER_BASE_COST *
     defenderStrength *
     cohesionFactor *
     terrainFactor *
-    barracksDefenseFactor;
+    defense.attackerCostMultiplier *
+    (defenderBlackoutMul / attackerBlackoutMul);
   // Scale defender losses proportionally so low reserves don't spiral permanently to zero
   let defenderLoss =
-    ENEMY_BORDER_BASE_COST * (0.18 + 0.38 * defenderRatio) * cohesionFactor;
+    (ENEMY_BORDER_BASE_COST *
+      (0.18 + 0.38 * defenderRatio) *
+      cohesionFactor *
+      defense.defenderLossMultiplier) /
+    defenderBlackoutMul;
 
   if (defender && defender.betrayalDebuffTicks > 0) {
     effectiveCost *= 0.65;
@@ -522,6 +522,7 @@ function computeCellCaptureCost(
   return {
     effectiveCost,
     defenderLoss,
+    advanceSpeedMultiplier: defense.advanceSpeedMultiplier,
     isForeign: true,
   };
 }
@@ -544,10 +545,14 @@ function applyExpansionCandidates(
 
   candidates.sort((a, b) => b.score - a.score);
 
-  const tickBudget = Math.min(
-    order.manpowerRemaining,
-    Math.max(4.5, order.manpowerCommitted * 0.16),
-  );
+  const attacker = state.players.get(order.playerId);
+  const attackerCombatMul = getCombatBlackoutMultiplier(attacker);
+  const budgetRate = order.finishOff ? 0.24 : 0.16;
+  const tickBudget =
+    Math.min(
+      order.manpowerRemaining,
+      Math.max(4.5, order.manpowerCommitted * budgetRate),
+    ) * attackerCombatMul;
   let budgetSpent = 0;
   let anyClaimed = false;
   let anyForeignCaptured = false;
@@ -567,15 +572,20 @@ function applyExpansionCandidates(
       continue;
     }
 
-    const { effectiveCost, defenderLoss, isForeign } = computeCellCaptureCost(
-      state,
-      cand.nx,
-      cand.ny,
-      cellTerrain,
-      prevOwner,
-    );
+    const { effectiveCost, defenderLoss, advanceSpeedMultiplier, isForeign } =
+      computeCellCaptureCost(
+        state,
+        order.playerId,
+        cand.nx,
+        cand.ny,
+        cellTerrain,
+        prevOwner,
+      );
+    const budgetCost = isForeign
+      ? effectiveCost / Math.max(0.22, advanceSpeedMultiplier)
+      : effectiveCost;
 
-    if (budgetSpent + effectiveCost > tickBudget) {
+    if (budgetSpent + budgetCost > tickBudget) {
       if (budgetSpent === 0 && (cellTerrain === TerrainType.MOUNTAINS || isForeign)) {
         const stepCharge = Math.min(tickBudget, order.manpowerRemaining);
         order.mountainAccum += stepCharge;
@@ -592,10 +602,10 @@ function applyExpansionCandidates(
         }
 
         if (
-          order.mountainAccum >= effectiveCost &&
+          order.mountainAccum >= budgetCost &&
           order.manpowerRemaining >= effectiveCost
         ) {
-          order.mountainAccum -= effectiveCost;
+          order.mountainAccum -= budgetCost;
         } else {
           break;
         }
@@ -614,7 +624,7 @@ function applyExpansionCandidates(
 
     state.owners[cand.idx] = order.playerId;
     order.manpowerRemaining -= effectiveCost;
-    budgetSpent += effectiveCost;
+    budgetSpent += budgetCost;
     anyClaimed = true;
 
     if (isForeign) {
@@ -978,28 +988,100 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
   return { mapChanged, capturedForeign, anyTerminated };
 }
 
-function addEnemyAdjacentFrontierCells(
+export function addEnemyAdjacentFrontierCells(
   state: GameState,
   playerId: number,
   targetOwnerId: number,
   intoSet: Set<number>,
 ): void {
   const { width, height, owners, terrain } = state;
-  for (let y = 1; y < height - 1; y++) {
+  for (let y = 0; y < height; y++) {
     const row = y * width;
-    for (let x = 1; x < width - 1; x++) {
+    for (let x = 0; x < width; x++) {
       const idx = row + x;
       if (owners[idx] !== playerId) continue;
-      if (
-        (owners[idx - 1] === targetOwnerId && terrain[idx - 1] !== TerrainType.WATER) ||
-        (owners[idx + 1] === targetOwnerId && terrain[idx + 1] !== TerrainType.WATER) ||
-        (owners[idx - width] === targetOwnerId && terrain[idx - width] !== TerrainType.WATER) ||
-        (owners[idx + width] === targetOwnerId && terrain[idx + width] !== TerrainType.WATER)
-      ) {
-        intoSet.add(idx);
+      for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const nIdx = ny * width + nx;
+        if (owners[nIdx] === targetOwnerId && terrain[nIdx] !== TerrainType.WATER) {
+          intoSet.add(idx);
+          break;
+        }
       }
     }
   }
+}
+
+export function isFinishOffTargetSmall(state: GameState, target: PlayerState): boolean {
+  if (!target.alive || target.territoryCells <= 0) {
+    return false;
+  }
+  return (
+    target.territoryCells <= FINISH_OFF_MAX_CELLS ||
+    target.territoryCells / Math.max(1, state.totalLandCells) < FINISH_OFF_MAX_LAND_RATIO
+  );
+}
+
+/**
+ * Estimates manpower required to finish off all remaining pockets of a small residual opponent.
+ * Returns null if the opponent exceeds small-target thresholds or shares no active border.
+ */
+export function estimateFinishOffManpower(
+  state: GameState,
+  attackerId: number,
+  targetId: number,
+): number | null {
+  const attacker = state.players.get(attackerId);
+  const target = state.players.get(targetId);
+  if (!attacker || !attacker.alive || !target || !target.alive || attackerId === targetId) {
+    return null;
+  }
+  if (!isFinishOffTargetSmall(state, target)) {
+    return null;
+  }
+
+  const { width, height, owners, terrain } = state;
+  let cellCount = 0;
+  let totalCost = 0;
+  let hasSharedBorder = false;
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const idx = row + x;
+      if (owners[idx] !== targetId || terrain[idx] === TerrainType.WATER) {
+        continue;
+      }
+      cellCount++;
+      totalCost += computeCellCaptureCost(
+        state,
+        attackerId,
+        x,
+        y,
+        terrain[idx],
+        targetId,
+      ).effectiveCost;
+
+      if (!hasSharedBorder) {
+        for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          if (owners[ny * width + nx] === attackerId) {
+            hasSharedBorder = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!hasSharedBorder || cellCount === 0) {
+    return null;
+  }
+  return Math.max(25, Math.ceil(totalCost * 1.25));
 }
 
 /**
@@ -1127,7 +1209,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
     if (order.sweepAllBorders && order.targetOwnerId >= 0) {
       addEnemyAdjacentFrontierCells(state, order.playerId, order.targetOwnerId, activeFrontierSet);
     } else if (order.focalPoint) {
-      const recruitRadius = order.fullAttack ? 30 : 22;
+      const recruitRadius = order.finishOff ? 30 : 22;
       const recruitRSq = recruitRadius * recruitRadius;
       const fx = Math.round(order.focalPoint.x);
       const fy = Math.round(order.focalPoint.y);
@@ -1181,7 +1263,14 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
         const edgeNoise = organicCellNoise(nx, ny, order.id);
 
         let score: number;
-        if (order.focalPoint) {
+        if (order.finishOff) {
+          score =
+            friendly * 0.75 +
+            cleanupBonus +
+            terrainBonus +
+            wildernessBonus +
+            edgeNoise;
+        } else if (order.focalPoint) {
           const toFocalX = order.focalPoint.x - (x + 0.5);
           const toFocalY = order.focalPoint.y - (y + 0.5);
           const focalLen = Math.hypot(toFocalX, toFocalY);
@@ -1204,7 +1293,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
           score =
             localDot * (order.sweepAllBorders ? 0.8 : 1.9) -
             anchorPenalty +
-            friendly * (order.fullAttack ? 0.55 : 0.32) +
+            friendly * 0.32 +
             terrainBonus +
             wildernessBonus +
             cleanupBonus +
@@ -1261,12 +1350,11 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
 
       if (
         order.targetOwnerId >= 0 &&
-        (order.fullAttack || order.manpowerCommitted >= 60)
+        (order.finishOff || order.manpowerCommitted >= 60)
       ) {
-        const sweepSeeds =
-          order.fullAttack && claimedCells.length < 40
-            ? claimedCells.concat(order.frontierCells.slice(0, 60))
-            : claimedCells;
+        const sweepSeeds = order.finishOff
+          ? claimedCells.concat(order.frontierCells.slice(0, 120))
+          : claimedCells;
         const swept = sweepMicroPocketsForAttacker(
           state,
           order.playerId,
@@ -1275,11 +1363,30 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
           sweepSeeds,
         );
         if (swept > 0) {
+          mapChanged = true;
           capturedForeign = true;
         }
       }
     } else {
       order.stagnantTicks++;
+      if (
+        order.finishOff &&
+        order.targetOwnerId >= 0 &&
+        order.manpowerRemaining >= MIN_ACTIVE_ORDER_MANPOWER
+      ) {
+        const swept = sweepMicroPocketsForAttacker(
+          state,
+          order.playerId,
+          order.targetOwnerId,
+          order,
+          order.frontierCells.slice(0, 120),
+        );
+        if (swept > 0) {
+          mapChanged = true;
+          capturedForeign = true;
+          order.stagnantTicks = 0;
+        }
+      }
     }
 
     order.frontierCells = Array.from(prunedFrontierSet);

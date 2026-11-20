@@ -1,0 +1,152 @@
+import {
+  BARRACKS_DEFENSE_RADIUS,
+  Building,
+  BuildingType,
+  DefenseBuildingType,
+} from './types';
+
+export type DefenseDomain = 'GROUND_INFANTRY' | 'GROUND_ARMOR' | 'AIR_DEFENSE';
+
+export interface DefenseSpec {
+  readonly type: DefenseBuildingType;
+  readonly domain: DefenseDomain;
+  readonly radius: number;
+  readonly maxLevel: number;
+  readonly frontCostBonusPerStack: number;
+  readonly frontSlowdownPerStack: number;
+  readonly antiArmorRating: number;
+  readonly antiAirRating: number;
+  readonly buildingProtectionRatio: number;
+}
+
+/** Static defense specifications structured with Tech-Tree level & Step 5-6 armor/AA hooks. */
+export const DEFENSE_SPECS: Readonly<Record<DefenseBuildingType, DefenseSpec>> = {
+  TRENCH: {
+    type: 'TRENCH',
+    domain: 'GROUND_INFANTRY',
+    radius: 14,
+    maxLevel: 5,
+    frontCostBonusPerStack: 0.4,
+    frontSlowdownPerStack: 0.28,
+    antiArmorRating: 0.2,
+    antiAirRating: 0.0,
+    buildingProtectionRatio: 0.1,
+  },
+  BUNKER: {
+    type: 'BUNKER',
+    domain: 'GROUND_ARMOR',
+    radius: 18,
+    maxLevel: 5,
+    frontCostBonusPerStack: 0.85,
+    frontSlowdownPerStack: 0.46,
+    antiArmorRating: 1.0,
+    antiAirRating: 0.1,
+    buildingProtectionRatio: 0.25,
+  },
+  AA_BATTERY: {
+    type: 'AA_BATTERY',
+    domain: 'AIR_DEFENSE',
+    radius: 26,
+    maxLevel: 5,
+    frontCostBonusPerStack: 0,
+    frontSlowdownPerStack: 0,
+    antiArmorRating: 0.0,
+    antiAirRating: 1.0,
+    buildingProtectionRatio: 0.45,
+  },
+};
+
+export interface CellDefenseModifiers {
+  readonly attackerCostMultiplier: number;
+  readonly advanceSpeedMultiplier: number;
+  readonly defenderLossMultiplier: number;
+  readonly antiArmorFactor: number;
+  readonly antiAirFactor: number;
+  readonly nodeProtectionFactor: number;
+}
+
+export function isDefenseBuildingType(type: BuildingType): type is DefenseBuildingType {
+  return type === 'TRENCH' || type === 'BUNKER' || type === 'AA_BATTERY';
+}
+
+export function getDefenseRadius(type: BuildingType): number {
+  if (isDefenseBuildingType(type)) {
+    return DEFENSE_SPECS[type].radius;
+  }
+  return type === 'BARRACKS' ? BARRACKS_DEFENSE_RADIUS : 0;
+}
+
+/**
+ * Evaluates aggregate defensive impact of completed barracks and fortifications covering
+ * cell (x, y) for defenderId, including speed slowdown, attrition, armor & AA hooks.
+ */
+export function evaluateCellDefense(
+  buildings: ReadonlyArray<Building>,
+  defenderId: number,
+  x: number,
+  y: number,
+): CellDefenseModifiers {
+  let bestBarracksBonus = 0;
+  let costBonus = 0;
+  let slowdown = 0;
+  let antiArmor = 0;
+  let antiAir = 0;
+  let nodeProt = 0;
+
+  for (const b of buildings) {
+    if (b.ownerId !== defenderId || b.stackCount <= 0 || b.effectiveOutputPct <= 0) {
+      continue;
+    }
+
+    if (b.type === 'BARRACKS') {
+      if (Math.hypot(b.x - x, b.y - y) <= BARRACKS_DEFENSE_RADIUS) {
+        const eff = b.effectiveOutputPct / 100;
+        const weighted = eff * (0.3 + 0.08 * Math.min(3, b.stackCount - 1));
+        if (weighted > bestBarracksBonus) {
+          bestBarracksBonus = weighted;
+        }
+      }
+      continue;
+    }
+
+    if (!isDefenseBuildingType(b.type)) {
+      continue;
+    }
+
+    const spec = DEFENSE_SPECS[b.type];
+    if (Math.hypot(b.x - x, b.y - y) > spec.radius) {
+      continue;
+    }
+
+    const eff = b.effectiveOutputPct / 100;
+    const stackScale = 1 + 0.35 * Math.log2(b.stackCount);
+    const levelScale = 1 + Math.max(0, b.level - 1) * 0.2;
+    const weight = eff * stackScale * levelScale;
+
+    costBonus += spec.frontCostBonusPerStack * weight;
+    slowdown += spec.frontSlowdownPerStack * weight;
+    antiArmor += spec.antiArmorRating * weight;
+    antiAir += spec.antiAirRating * weight;
+    nodeProt += spec.buildingProtectionRatio * weight;
+  }
+
+  const cappedBarracks = Math.min(0.55, bestBarracksBonus);
+  return {
+    attackerCostMultiplier: 1 + Math.min(2.4, cappedBarracks + costBonus),
+    advanceSpeedMultiplier: Math.max(0.22, 1 - Math.min(0.78, slowdown)),
+    defenderLossMultiplier: Math.max(0.5, 1 - Math.min(0.5, (cappedBarracks + costBonus) * 0.24)),
+    antiArmorFactor: antiArmor,
+    antiAirFactor: antiAir,
+    nodeProtectionFactor: Math.min(0.75, nodeProt),
+  };
+}
+
+/** Returns local anti-air defense coverage factor at (x, y) for Step 6 aircraft and drops. */
+export function getAirDefenseCoverageAt(
+  buildings: ReadonlyArray<Building>,
+  ownerId: number,
+  x: number,
+  y: number,
+): number {
+  return evaluateCellDefense(buildings, ownerId, x, y).antiAirFactor;
+}

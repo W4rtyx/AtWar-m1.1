@@ -1,5 +1,10 @@
 import { BUILDING_SPECS, createDefaultOccupancyByType } from './buildings';
 import {
+  BASE_ENERGY_RESERVE_CAPACITY,
+  BLACKOUT_MP_DRAIN_RATIO_PER_SEC,
+  stepEnergyGrid,
+} from './energyGrid';
+import {
   Building,
   GameState,
   PlayerState,
@@ -238,12 +243,14 @@ export function createInitialPlayerState(params: {
     buildingMaterialIncomePerSec: CAPITAL_BASE_MATERIAL_PER_SEC,
     industry: 0,
     industryIncomePerSec: 0,
-    energyReserve: 100,
-    energyReserveMax: null,
+    energyReserve: 150,
+    energyReserveMax: BASE_ENERGY_RESERVE_CAPACITY,
     energyProductionPerSec: 0,
     energyConsumptionPerSec: 0,
     energyNetPerSec: 0,
     energySupplyRatio: 1,
+    blackoutActive: false,
+    blackoutSeverity: 0,
     freePowerPlantUsed: false,
     buildingOccupancyByType: createDefaultOccupancyByType(),
     betrayalDebuffTicks: 0,
@@ -344,9 +351,10 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     player.allocatedManpower = allocatedManpower;
     player.activeManpower = Math.max(0, player.manpower - allocatedManpower);
 
-    // Step B: Energy balance & unlimited reserve
+    // Step B: Energy grid balance, capped reserve & cascading blackout progression
     let energyProd = 0;
     let energyCons = 0;
+    let completedPowerPlantUnits = 0;
 
     for (const b of ownedBuildings) {
       const units = b.stackCount;
@@ -362,6 +370,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       let cons = 0;
 
       if (b.type === 'POWER_PLANT') {
+        completedPowerPlantUnits += units;
         prod = spec.baseEnergyProduction * (effPct / 100) * curve.outputMultiplier * units;
         energyProd += prod;
       } else if (spec.baseEnergyConsumption > 0) {
@@ -376,29 +385,32 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       b.currentEnergyUse = cons;
     }
 
-    const energyNet = energyProd - energyCons;
+    const grid = stepEnergyGrid({
+      currentReserve: player.energyReserve,
+      currentSeverity: player.blackoutSeverity,
+      energyProd,
+      energyCons,
+      completedPowerPlantUnits,
+      applyTickGrowth,
+      dtSec: TICK_DT,
+    });
 
-    if (applyTickGrowth) {
-      player.energyReserve = Math.max(0, player.energyReserve + energyNet * TICK_DT);
-    } else {
-      player.energyReserve = Math.max(0, player.energyReserve);
-    }
-
-    const energySupplyRatio =
-      player.energyReserve > 0 || energyNet >= 0
-        ? 1
-        : Math.max(0.25, Math.min(1, energyProd / Math.max(0.01, energyCons)));
-
-    player.energyReserveMax = null;
+    player.energyReserve = grid.energyReserve;
+    player.energyReserveMax = grid.energyReserveMax;
     player.energyProductionPerSec = energyProd;
     player.energyConsumptionPerSec = energyCons;
-    player.energyNetPerSec = energyNet;
-    player.energySupplyRatio = energySupplyRatio;
+    player.energyNetPerSec = grid.energyNetPerSec;
+    player.energySupplyRatio = grid.energySupplyRatio;
+    player.blackoutActive = grid.blackoutActive;
+    player.blackoutSeverity = grid.blackoutSeverity;
 
     // Step C: Resource production & home-front manpower capacity/growth
-    const tradeIncome = tradeIncomeByPlayer.get(player.id) ?? 0;
-    let moneyIncome = Math.pow(Math.max(1, player.territoryCells), 0.55) * 0.11 + tradeIncome;
-    let materialIncome = CAPITAL_BASE_MATERIAL_PER_SEC;
+    const economyPowerScale = 0.5 + 0.5 * grid.energySupplyRatio;
+    const tradeIncome = (tradeIncomeByPlayer.get(player.id) ?? 0) * economyPowerScale;
+    let moneyIncome =
+      Math.pow(Math.max(1, player.territoryCells), 0.55) * 0.11 * economyPowerScale +
+      tradeIncome;
+    let materialIncome = CAPITAL_BASE_MATERIAL_PER_SEC * economyPowerScale;
     let industryIncome = 0;
     let knowledgeIncome = 0;
     let cityCount = 0;
@@ -415,12 +427,12 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       const curve = computeOccupancyCurve(b.effectiveOccupancyPct);
       const effPct = b.revealedEfficiencyPct ?? 100;
       const siteScale = effPct / 100;
-      const energyFactor = spec.baseEnergyConsumption > 0 ? energySupplyRatio : 1;
+      const energyFactor = spec.baseEnergyConsumption > 0 ? grid.energySupplyRatio : 1;
 
       if (b.type === 'CITY') {
         cityCount += units;
-        moneyIncome += spec.baseMoneyPerSec * (0.5 + 0.5 * energySupplyRatio) * units;
-        b.effectiveOutputPct = Math.round((0.5 + 0.5 * energySupplyRatio) * 100);
+        moneyIncome += spec.baseMoneyPerSec * economyPowerScale * units;
+        b.effectiveOutputPct = Math.round(economyPowerScale * 100);
       } else if (b.type === 'MINE') {
         materialIncome +=
           spec.baseMaterialPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
@@ -434,7 +446,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
         knowledgeIncome += spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
       } else if (b.type === 'BARRACKS') {
-        const barracksEnergyScale = 0.7 + 0.3 * energySupplyRatio;
+        const barracksEnergyScale = 0.7 + 0.3 * grid.energySupplyRatio;
         barracksMaxBonus += spec.baseMaxManpowerBonus * curve.outputMultiplier * units;
         barracksIncomeBonus +=
           spec.baseManpowerIncomeBonus * curve.outputMultiplier * barracksEnergyScale * units;
@@ -453,12 +465,12 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     player.industryIncomePerSec = industryIncome;
     player.knowledgeIncomePerSec = knowledgeIncome;
 
-    const maxManpower = Math.round(
+    const baseMaxManpower =
       160 +
-        Math.pow(Math.max(1, player.territoryCells), 0.52) * 5.2 +
-        cityCount * BUILDING_SPECS.CITY.baseMaxManpowerBonus +
-        barracksMaxBonus,
-    );
+      Math.pow(Math.max(1, player.territoryCells), 0.52) * 5.2 +
+      cityCount * BUILDING_SPECS.CITY.baseMaxManpowerBonus +
+      barracksMaxBonus;
+    const maxManpower = Math.round(baseMaxManpower * grid.maxManpowerMultiplier);
     const clampedManpower = Math.min(maxManpower, Math.max(0, player.manpower));
     const fillRatio = Math.max(0, Math.min(1, clampedManpower / Math.max(1, maxManpower)));
 
@@ -476,22 +488,32 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       cityCount * BUILDING_SPECS.CITY.baseManpowerIncomeBonus +
       barracksIncomeBonus;
 
-    let manpowerIncome = peakManpowerIncome * growthEfficiency;
+    let manpowerIncome =
+      peakManpowerIncome *
+      growthEfficiency *
+      Math.max(0.15, 1 - 0.85 * grid.blackoutSeverity);
     const activeBeforeGrowth = Math.max(0, clampedManpower - allocatedManpower);
-    if (activeBeforeGrowth / Math.max(1, maxManpower) < 0.18) {
+    if (!grid.blackoutActive && activeBeforeGrowth / Math.max(1, maxManpower) < 0.18) {
       manpowerIncome = Math.max(manpowerIncome, 12 + maxManpower * 0.022);
     }
+    const blackoutDrain = grid.blackoutActive
+      ? baseMaxManpower * BLACKOUT_MP_DRAIN_RATIO_PER_SEC * grid.blackoutSeverity
+      : 0;
+    const netManpowerDeltaPerSec = manpowerIncome - blackoutDrain;
 
     player.maxManpower = maxManpower;
     player.manpowerGrowthEfficiency = growthEfficiency;
-    player.manpowerIncomePerSec = manpowerIncome;
+    player.manpowerIncomePerSec = netManpowerDeltaPerSec;
 
     if (applyTickGrowth) {
       player.money += moneyIncome * TICK_DT;
       player.buildingMaterial += materialIncome * TICK_DT;
       player.industry += industryIncome * TICK_DT;
       player.knowledge += knowledgeIncome * TICK_DT;
-      player.manpower = Math.min(maxManpower, clampedManpower + manpowerIncome * TICK_DT);
+      player.manpower = Math.max(
+        0,
+        Math.min(maxManpower, clampedManpower + netManpowerDeltaPerSec * TICK_DT),
+      );
     } else {
       player.manpower = clampedManpower;
     }

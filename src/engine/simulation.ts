@@ -20,14 +20,17 @@ import {
   MAX_ARROW_PATH_LENGTH,
   MAX_ORDER_TICKS,
   MIN_ACTIVE_ORDER_MANPOWER,
+  addEnemyAdjacentFrontierCells,
   buildSmoothAttackWaypoints,
   canOrderCaptureCell,
   claimInitialTerritory,
   clampPolylineLength,
   collectCenterlineWarEnemies,
   computePolylineLength,
+  estimateFinishOffManpower,
   getRelation,
   isBorderCell,
+  isFinishOffTargetSmall,
   setWarRelation,
   stepFrontExpansion,
 } from './frontExpansion';
@@ -589,7 +592,8 @@ function handleCreateFrontPushOrder(
   explicitTargetOwnerId?: number,
   focalPoint?: Point,
   sweepAllBorders?: boolean,
-  fullAttack?: boolean,
+  finishOff?: boolean,
+  explicitCommittedManpower?: number,
 ): void {
   if (state.phase !== 'PLAYING') {
     return;
@@ -646,7 +650,10 @@ function handleCreateFrontPushOrder(
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
-  const committed = activeMp * (clampedPct / 100);
+  const committed =
+    explicitCommittedManpower !== undefined
+      ? Math.min(activeMp, Math.max(0, explicitCommittedManpower))
+      : activeMp * (clampedPct / 100);
   if (committed < MIN_ACTIVE_ORDER_MANPOWER) {
     return;
   }
@@ -662,7 +669,7 @@ function handleCreateFrontPushOrder(
     originCenter,
     focalPoint,
     sweepAllBorders,
-    fullAttack,
+    finishOff,
     dirX: ux,
     dirY: uy,
     manpowerCommitted: committed,
@@ -681,7 +688,6 @@ function handleTargetedAttack(
   anchorX: number,
   anchorY: number,
   manpowerPercent: number,
-  fullAttack: boolean,
 ): void {
   if (state.phase !== 'PLAYING') return;
   const player = state.players.get(playerId);
@@ -728,7 +734,7 @@ function handleTargetedAttack(
 
         allEnemyFrontierCells.push(idx);
         const dSq = (x + 0.5 - anchorX) * (x + 0.5 - anchorX) + (y + 0.5 - anchorY) * (y + 0.5 - anchorY);
-        if (fullAttack || dSq <= rSq) {
+        if (dSq <= rSq) {
           nearbyCells.push(idx);
           sumDirX += localDx;
           sumDirY += localDy;
@@ -736,7 +742,7 @@ function handleTargetedAttack(
       }
     }
   } else {
-    const rad = fullAttack ? 65 : 36;
+    const rad = 36;
     const rSq = rad * rad;
     const minX = Math.max(0, Math.floor(anchorX - rad));
     const maxX = Math.min(width - 1, Math.ceil(anchorX + rad));
@@ -825,7 +831,7 @@ function handleTargetedAttack(
   const dirX = dirLen > 0.01 ? sumDirX / dirLen : fallbackLen > 0.01 ? rawDx / fallbackLen : 1;
   const dirY = dirLen > 0.01 ? sumDirY / dirLen : fallbackLen > 0.01 ? rawDy / fallbackLen : 0;
 
-  const effectivePct = fullAttack ? 95 : Math.max(10, Math.min(100, manpowerPercent));
+  const effectivePct = Math.max(10, Math.min(100, manpowerPercent));
   handleCreateFrontPushOrder(
     state,
     playerId,
@@ -835,8 +841,56 @@ function handleTargetedAttack(
     effectivePct,
     targetOwnerId,
     { x: anchorX, y: anchorY },
-    fullAttack && targetOwnerId >= 0,
-    fullAttack,
+    false,
+    false,
+  );
+}
+
+function handleFinishOffTarget(
+  state: GameState,
+  playerId: number,
+  targetOwnerId: number,
+): void {
+  if (state.phase !== 'PLAYING') return;
+  const player = state.players.get(playerId);
+  const target = state.players.get(targetOwnerId);
+  if (!player || !player.alive || !target || !isFinishOffTargetSmall(state, target)) {
+    return;
+  }
+
+  const requiredMp = estimateFinishOffManpower(state, playerId, targetOwnerId);
+  if (requiredMp === null) {
+    return;
+  }
+
+  const activeMpBefore = Math.max(0, player.manpower - player.allocatedManpower);
+  if (activeMpBefore + 0.5 < requiredMp) {
+    return;
+  }
+
+  const frontierSet = new Set<number>();
+  addEnemyAdjacentFrontierCells(state, playerId, targetOwnerId, frontierSet);
+  if (frontierSet.size === 0) {
+    return;
+  }
+
+  if (getRelation(state, playerId, targetOwnerId) !== 'WAR') {
+    declareWar(state, playerId, targetOwnerId);
+  }
+
+  const activeMpAfter = Math.max(0, player.manpower - player.allocatedManpower);
+  handleCreateFrontPushOrder(
+    state,
+    playerId,
+    Array.from(frontierSet),
+    1,
+    0,
+    100,
+    targetOwnerId,
+    undefined,
+    true,
+    true,
+    Math.min(activeMpAfter, requiredMp),
   );
 }
 
@@ -1151,8 +1205,10 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.anchorX,
         action.anchorY,
         action.manpowerPercent,
-        action.fullAttack,
       );
+      break;
+    case 'FINISH_OFF_TARGET':
+      handleFinishOffTarget(state, action.playerId, action.targetOwnerId);
       break;
     case 'SET_BUILDING_TYPE_OCCUPANCY':
       handleSetBuildingTypeOccupancy(
@@ -1238,6 +1294,7 @@ function toPublicBuilding(b: Building): PublicBuildingInfo {
     x: b.x,
     y: b.y,
     isCapital: b.isCapital,
+    level: b.level,
     revealedEfficiencyPct: b.revealedEfficiencyPct,
     stackCount: b.stackCount,
     underConstructionCount: b.underConstructionCount,
@@ -1290,6 +1347,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         isNeighborOfHuman: false,
         hasTradeWithHuman: false,
         tradeIncomeWithHumanPerSec: 0,
+        finishOffEligible: false,
+        finishOffRequiredManpower: null,
         manpower: p.manpower,
         maxManpower: p.maxManpower,
         manpowerIncomePerSec: p.manpowerIncomePerSec,
@@ -1311,10 +1370,15 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         energyConsumptionPerSec: p.energyConsumptionPerSec,
         energyNetPerSec: p.energyNetPerSec,
         energySupplyRatio: p.energySupplyRatio,
+        blackoutActive: p.blackoutActive,
+        blackoutSeverity: p.blackoutSeverity,
         freePowerPlantUsed: p.freePowerPlantUsed,
         buildingOccupancyByType: { ...p.buildingOccupancyByType },
       });
     } else {
+      const finishOffRequiredManpower = isNeighborOfHuman
+        ? estimateFinishOffManpower(state, state.humanPlayerId, p.id)
+        : null;
       players.push({
         id: p.id,
         name: p.name,
@@ -1330,6 +1394,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         isNeighborOfHuman,
         hasTradeWithHuman,
         tradeIncomeWithHumanPerSec,
+        finishOffEligible: finishOffRequiredManpower !== null,
+        finishOffRequiredManpower,
       });
     }
   }
