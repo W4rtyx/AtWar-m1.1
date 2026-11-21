@@ -45,9 +45,16 @@ export class UnitPanelController {
 
   private readonly selectionBoxEl: HTMLElement;
   private readonly selTitleEl: HTMLElement;
-  private readonly selMetaEl: HTMLElement;
+  private readonly selOrderBadgeEl: HTMLElement;
   private readonly selEncircledEl: HTMLElement;
   private readonly selDropEl: HTMLElement;
+  private readonly hpValEl: HTMLElement;
+  private readonly hpBarEl: HTMLElement;
+  private readonly hpHintEl: HTMLElement;
+  private readonly moraleValEl: HTMLElement;
+  private readonly moraleBarEl: HTMLElement;
+  private readonly moraleHintEl: HTMLElement;
+  private readonly orderHintEl: HTMLElement;
   private readonly lockBtn: HTMLButtonElement;
   private readonly rangeBtn: HTMLButtonElement;
   private readonly mergeBtn: HTMLButtonElement;
@@ -63,34 +70,68 @@ export class UnitPanelController {
     this.panelEl = document.createElement('div');
     this.panelEl.className = 'hud-panel hud-unit-panel hidden';
     this.panelEl.innerHTML = `
-      <div class="hud-unit-recruit-row">
-        <span class="hud-build-title">Jednotky</span>
-        <div class="hud-unit-recruit-btns" data-up="recruit-btns"></div>
-      </div>
       <div class="hud-unit-sel-box hidden" data-up="sel-box">
-        <div class="hud-unit-sel-info">
+        <div class="hud-unit-sel-header">
           <strong class="hud-unit-sel-title" data-up="sel-title">Vybráno: 0</strong>
-          <span class="hud-unit-sel-meta" data-up="sel-meta">HP 100 % · Morálka 100 %</span>
-          <span class="hud-unit-badge-encircled hidden" data-up="sel-encircled">OBKLÍČENO</span>
-          <span class="hud-unit-badge-drop hidden" data-up="sel-drop">VÝSADEK</span>
-        </div>
-        <div class="hud-unit-sel-actions">
-          <button type="button" class="hud-btn hud-unit-act-btn" data-up="stance-lock" title="Držet pozici (L)">
-            LOCK
-          </button>
-          <button type="button" class="hud-btn hud-unit-act-btn" data-up="stance-range" title="Volný režim v dosahu — připojuje se k šipkám (L)">
-            RANGE
-          </button>
-          <button type="button" class="hud-btn hud-unit-act-btn" data-up="merge" title="Sloučit vybrané svazky stejného typu (G)">
-            Sloučit (G)
-          </button>
-          <button type="button" class="hud-btn hud-unit-act-btn hud-btn-drop hidden" data-up="paradrop" title="Vysadit parašutisty do týlu (P)">
-            Výsadek (P)
-          </button>
-          <button type="button" class="hud-btn hud-unit-act-btn" data-up="clear" title="Zrušit výběr (Esc)">
+          <div class="hud-unit-badges">
+            <span class="hud-unit-badge-order hidden" data-up="sel-order">ŠIPKA</span>
+            <span class="hud-unit-badge-encircled hidden" data-up="sel-encircled" title="Jednotka je odříznutá na nepřátelském území bez zásobování — každou sekundu ztrácí morálku i HP!">OBKLÍČENO</span>
+            <span class="hud-unit-badge-drop hidden" data-up="sel-drop" title="Výsadkáři po dopadu mají dočasně zvýšenou zranitelnost.">VÝSADEK</span>
+          </div>
+          <button type="button" class="hud-btn hud-unit-act-btn" data-up="clear" title="Zrušit výběr jednotek (Esc)">
             ✕
           </button>
         </div>
+
+        <div class="hud-unit-metrics">
+          <div
+            class="hud-unit-metric"
+            title="Síla / HP vyjadřuje zbývající odolnost svazku a počet bojeschopných kusů. Při ztrátě HP ubývají kusy ve svazku."
+          >
+            <div class="hud-unit-metric-top">
+              <span class="hud-unit-metric-lbl">Síla / HP</span>
+              <strong class="hud-unit-metric-val" data-up="hp-val">100 %</strong>
+            </div>
+            <div class="hud-unit-meter"><div class="hud-unit-meter-fill is-hp" data-up="hp-bar"></div></div>
+            <div class="hud-unit-metric-hint" data-up="hp-hint">Odolnost a počet bojeschopných kusů svazku</div>
+          </div>
+
+          <div
+            class="hud-unit-metric"
+            title="Morálka určuje bojeschopnost jednotky (útočný výkon i rychlost přesunu). V obklíčení bez zásobování klesá, na vlastním zásobovaném území se obnovuje."
+          >
+            <div class="hud-unit-metric-top">
+              <span class="hud-unit-metric-lbl">Morálka</span>
+              <strong class="hud-unit-metric-val" data-up="morale-val">100 %</strong>
+            </div>
+            <div class="hud-unit-meter"><div class="hud-unit-meter-fill is-morale" data-up="morale-bar"></div></div>
+            <div class="hud-unit-metric-hint" data-up="morale-hint">Bojeschopnost · v obklíčení klesá, doma roste</div>
+          </div>
+        </div>
+
+        <div class="hud-unit-sel-actions">
+          <button type="button" class="hud-btn hud-unit-act-btn" data-up="stance-lock" title="Držet pozici (L) — jednotka stojí pevně na místě a nikdy se sama neposouvá.">
+            LOCK (Držet)
+          </button>
+          <button type="button" class="hud-btn hud-unit-act-btn" data-up="stance-range" title="Volný režim (L) — připojí se pouze k vlastní šipce nebo k nepříteli uvnitř svého dosahu.">
+            RANGE (Dosah)
+          </button>
+          <button type="button" class="hud-btn hud-unit-act-btn" data-up="merge" title="Sloučit vybrané svazky stejného typu do jednoho (G)">
+            Sloučit (G)
+          </button>
+          <button type="button" class="hud-btn hud-unit-act-btn hud-btn-drop hidden" data-up="paradrop" title="Vysadit parašutisty do týlu z letiště (P)">
+            Výsadek (P)
+          </button>
+        </div>
+
+        <div class="hud-unit-order-hint" data-up="order-hint">
+          Pravý klik (RMB) na průchodnou mapu okamžitě vyšle vybrané jednotky.
+        </div>
+      </div>
+
+      <div class="hud-unit-recruit-row">
+        <span class="hud-build-title">Verbování</span>
+        <div class="hud-unit-recruit-btns" data-up="recruit-btns"></div>
       </div>
     `;
 
@@ -124,9 +165,16 @@ export class UnitPanelController {
 
     this.selectionBoxEl = this.query('[data-up="sel-box"]');
     this.selTitleEl = this.query('[data-up="sel-title"]');
-    this.selMetaEl = this.query('[data-up="sel-meta"]');
+    this.selOrderBadgeEl = this.query('[data-up="sel-order"]');
     this.selEncircledEl = this.query('[data-up="sel-encircled"]');
     this.selDropEl = this.query('[data-up="sel-drop"]');
+    this.hpValEl = this.query('[data-up="hp-val"]');
+    this.hpBarEl = this.query('[data-up="hp-bar"]');
+    this.hpHintEl = this.query('[data-up="hp-hint"]');
+    this.moraleValEl = this.query('[data-up="morale-val"]');
+    this.moraleBarEl = this.query('[data-up="morale-bar"]');
+    this.moraleHintEl = this.query('[data-up="morale-hint"]');
+    this.orderHintEl = this.query('[data-up="order-hint"]');
     this.lockBtn = this.query<HTMLButtonElement>('[data-up="stance-lock"]');
     this.rangeBtn = this.query<HTMLButtonElement>('[data-up="stance-range"]');
     this.mergeBtn = this.query<HTMLButtonElement>('[data-up="merge"]');
@@ -266,6 +314,8 @@ export class UnitPanelController {
     let weightedMorale = 0;
     let anyEncircled = false;
     let anyVulnerable = false;
+    let anyAttached = false;
+    let anyMoving = false;
     let lockCount = 0;
     let rangeCount = 0;
     const typeCounts = new Map<UnitType, number>();
@@ -278,6 +328,8 @@ export class UnitPanelController {
       weightedMorale += u.morale * u.count;
       if (u.isEncircled) anyEncircled = true;
       if (u.dropVulnerabilityTicks > 0) anyVulnerable = true;
+      if (u.attachedOrderId !== null) anyAttached = true;
+      if (u.targetX !== null && u.targetY !== null) anyMoving = true;
       if (u.stance === 'LOCK') lockCount++;
       else rangeCount++;
       typeCounts.set(u.type, (typeCounts.get(u.type) ?? 0) + 1);
@@ -300,15 +352,39 @@ export class UnitPanelController {
     if (selectedUnits.length === 1) {
       const u = selectedUnits[0];
       const spec = UNIT_SPECS[u.type];
-      const attachedTxt = u.attachedOrderId !== null ? ' · Připojeno k šipce' : '';
-      this.selTitleEl.textContent = `${spec.nameCs} ×${u.count}${attachedTxt}`;
+      this.selTitleEl.textContent = `${spec.nameCs} ×${u.count}`;
     } else {
-      this.selTitleEl.textContent = `${selectedUnits.length} svazků (celkem ×${totalStack})`;
+      this.selTitleEl.textContent = `${selectedUnits.length} svazků (×${totalStack} kusů)`;
     }
 
-    this.selMetaEl.textContent = `HP ${hpPct} % · Morálka ${avgMorale} %`;
+    this.selOrderBadgeEl.classList.toggle('hidden', !anyAttached);
     this.selEncircledEl.classList.toggle('hidden', !anyEncircled);
     this.selDropEl.classList.toggle('hidden', !anyVulnerable);
+
+    this.hpValEl.textContent = `${Math.round(totalHp)} / ${Math.round(totalMaxHp)} (${hpPct} %)`;
+    this.hpBarEl.style.width = `${Math.max(0, Math.min(100, hpPct))}%`;
+    this.hpBarEl.classList.toggle('warn', hpPct <= 55 && hpPct > 28);
+    this.hpBarEl.classList.toggle('crit', hpPct <= 28);
+    this.hpHintEl.textContent =
+      hpPct > 75
+        ? `Odolnost svazku (${totalStack} bojeschopných kusů)`
+        : hpPct > 35
+          ? `Poškozený svazek (${totalStack} ks) — u vlastních měst/kasáren se opravuje`
+          : `Kritické ztráty (${totalStack} ks) — bez opravy svazek zanikne`;
+
+    this.moraleValEl.textContent = `${avgMorale} %`;
+    this.moraleBarEl.style.width = `${Math.max(0, Math.min(100, avgMorale))}%`;
+    this.moraleBarEl.classList.toggle('warn', avgMorale <= 60 && avgMorale > 30);
+    this.moraleBarEl.classList.toggle('crit', avgMorale <= 30);
+    this.moraleHintEl.textContent = anyEncircled
+      ? 'Obklíčeno bez zásobování — morálka klesá a snižuje útok i rychlost!'
+      : avgMorale >= 85
+        ? 'Plná bojeschopnost (na vlastním zásobovaném území se obnovuje)'
+        : 'Snížená morálka zpomaluje přesun i palbu — zotaví se na vlastním území';
+
+    this.orderHintEl.textContent = anyMoving
+      ? 'Přesun na zadaný cíl · RMB na jiný bod změní trasu'
+      : 'RMB na libovolnou průchodnou mapu vyšle vybrané jednotky';
 
     this.lockBtn.classList.toggle('active', lockCount > 0 && rangeCount === 0);
     this.rangeBtn.classList.toggle('active', rangeCount > 0 && lockCount === 0);

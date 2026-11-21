@@ -73,7 +73,7 @@ import {
 
 const HUMAN_PLAYER_ID = 1;
 const HUMAN_START_RADIUS = 14;
-const BOT_COUNT = 11;
+export const BOT_COUNT = 11;
 
 export interface SpeedStepPlan {
   readonly ticksToRun: number;

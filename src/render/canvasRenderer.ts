@@ -16,7 +16,9 @@ import {
 } from '../engine/types';
 import { Camera } from './camera';
 import {
+  MoveOrderPing,
   UnitSelectionRect,
+  drawMoveOrderPings,
   drawParadropOverlay,
   drawUnitSelectionRect,
   drawUnits,
@@ -83,6 +85,7 @@ export interface RenderOverlayState {
   readonly selectedUnitIds: ReadonlySet<number>;
   readonly unitSelectRect: UnitSelectionRect | null;
   readonly paradropUnitId: number | null;
+  readonly moveOrderPings: ReadonlyArray<MoveOrderPing>;
 }
 
 function computeDistanceField(
@@ -515,7 +518,9 @@ export class CanvasRenderer {
     this.drawAttackOrders(ctx, camera, state, overlays.activeBendOrderId);
     this.drawBuildings(ctx, camera, state.buildings, overlays.selectedBuildingId);
     this.drawCapitals(ctx, camera, state.players, state.humanPlayerId, state.buildings);
-    drawUnits(ctx, camera, state, overlays.selectedUnitIds);
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : 0;
+    drawMoveOrderPings(ctx, camera, overlays.moveOrderPings, nowMs);
+    drawUnits(ctx, camera, state, overlays.selectedUnitIds, nowMs);
 
     if (overlays.paradropUnitId !== null) {
       const dropUnit = state.units.find((u) => u.id === overlays.paradropUnitId);

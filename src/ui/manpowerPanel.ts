@@ -7,9 +7,7 @@ import {
   ClientRenderState,
   PublicBuildingInfo,
   PublicPlayerInfo,
-  UnitType,
 } from '../engine/types';
-import { UNIT_SPECS, getProducibleUnitsForBuilding } from '../engine/units';
 
 export interface ManpowerPanelCallbacks {
   readonly onSetTypeOccupancy: (buildingType: BuildingType, occupancyPct: number) => void;
@@ -18,7 +16,6 @@ export interface ManpowerPanelCallbacks {
   readonly onCloseBuildingInspector: () => void;
   readonly onStackBuilding: (buildingId: number, batchSize: BuildBatchSize) => void;
   readonly onDemolishBuilding: (buildingId: number, demolishAll: boolean) => void;
-  readonly onProduceUnit: (buildingId: number, unitType: UnitType) => void;
 }
 
 interface TypeRowRef {
@@ -67,7 +64,6 @@ export class ManpowerPanelController {
   private readonly inspectorConstrTextEl: HTMLElement;
   private readonly inspectorStackBtn: HTMLButtonElement;
   private readonly inspectorDemolishBtn: HTMLButtonElement;
-  private readonly inspectorUnitWrapEl: HTMLElement;
   private readonly inspectorSliderRowEl: HTMLElement;
   private readonly inspectorSliderEl: HTMLInputElement;
   private readonly inspectorSliderReadoutEl: HTMLElement;
@@ -76,7 +72,6 @@ export class ManpowerPanelController {
   private readonly callbacks: ManpowerPanelCallbacks;
   private collapsed = true;
   private currentSelectedBuildingId: number | null = null;
-  private lastInspectorUnitKey = '';
 
   public constructor(callbacks: ManpowerPanelCallbacks) {
     this.callbacks = callbacks;
@@ -145,7 +140,6 @@ export class ManpowerPanelController {
               Demontovat 1×
             </button>
           </div>
-          <div class="hud-insp-unit-wrap hidden" data-mp="insp-unit-wrap"></div>
           <div class="hud-insp-slider-wrap" data-mp="insp-slider-row">
             <div class="hud-mp-row-top">
               <span>Individuální obsazenost</span>
@@ -190,7 +184,6 @@ export class ManpowerPanelController {
     this.inspectorConstrTextEl = this.query('[data-mp="insp-constr-text"]');
     this.inspectorStackBtn = this.query<HTMLButtonElement>('[data-mp="insp-stack-1"]');
     this.inspectorDemolishBtn = this.query<HTMLButtonElement>('[data-mp="insp-demolish-1"]');
-    this.inspectorUnitWrapEl = this.query('[data-mp="insp-unit-wrap"]');
     this.inspectorSliderRowEl = this.query('[data-mp="insp-slider-row"]');
     this.inspectorSliderEl = this.query<HTMLInputElement>('[data-mp="insp-slider"]');
     this.inspectorSliderReadoutEl = this.query('[data-mp="insp-readout"]');
@@ -449,40 +442,6 @@ export class ManpowerPanelController {
     const totalUnits = selectedBuilding.stackCount + selectedBuilding.underConstructionCount;
     const removable = selectedBuilding.isCapital ? Math.max(0, totalUnits - 1) : totalUnits;
     this.inspectorDemolishBtn.disabled = removable <= 0;
-
-    const producibleUnits =
-      selectedBuilding.stackCount > 0 ? getProducibleUnitsForBuilding(selectedBuilding.type) : [];
-    this.inspectorUnitWrapEl.classList.toggle('hidden', producibleUnits.length === 0);
-    if (producibleUnits.length > 0) {
-      const unitKey = `${selectedBuilding.id}|${selectedBuilding.stackCount}|${selectedBuilding.unitQueue.length}|${Math.floor(human?.money ?? 0)}|${Math.floor(human?.buildingMaterial ?? 0)}|${Math.floor(human?.industry ?? 0)}|${Math.floor(human?.activeManpower ?? 0)}`;
-      if (unitKey !== this.lastInspectorUnitKey) {
-        this.lastInspectorUnitKey = unitKey;
-        this.inspectorUnitWrapEl.innerHTML = '';
-        for (const uType of producibleUnits) {
-          const uSpec = UNIT_SPECS[uType];
-          const canAfford =
-            (human?.money ?? 0) >= uSpec.cost.money &&
-            (human?.buildingMaterial ?? 0) >= uSpec.cost.buildingMaterial &&
-            (human?.industry ?? 0) >= uSpec.cost.industry &&
-            (human?.activeManpower ?? 0) >= uSpec.cost.manpower;
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'hud-btn hud-mp-reset-btn';
-          btn.disabled = !canAfford;
-          btn.textContent = `+ ${uSpec.nameCs}`;
-          btn.title = uSpec.descriptionCs;
-          btn.addEventListener('mousedown', (e) => {
-            if (e.button !== 0 || btn.disabled) return;
-            e.preventDefault();
-            e.stopPropagation();
-            if (this.currentSelectedBuildingId !== null) {
-              this.callbacks.onProduceUnit(this.currentSelectedBuildingId, uType);
-            }
-          });
-          this.inspectorUnitWrapEl.appendChild(btn);
-        }
-      }
-    }
 
     const usesOccupancy = spec.baseManpowerRequired > 0 || spec.baseEnergyConsumption > 0;
     this.inspectorSliderRowEl.classList.toggle('hidden', !usesOccupancy);

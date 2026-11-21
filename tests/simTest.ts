@@ -22,6 +22,7 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  BOT_COUNT,
   createClientRenderState,
   createEngineController,
   createInitialGameState,
@@ -2550,6 +2551,260 @@ function testLassoUnitSelectionPriorityOverFront(): void {
   console.log('PASS [t]: Terrain build filtering, QUICK_PRODUCE_UNIT & lasso unit priority verified.');
 }
 
+function testAllAiBotsSpawnSurviveAndStayActive(): void {
+  const state = createInitialGameState(1337);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const initialBots = [...state.players.values()].filter((p) => p.isBot && p.alive && !p.isEliminated);
+  assert(
+    initialBots.length === BOT_COUNT,
+    `Expected all ${BOT_COUNT} AI bots to spawn alive at start, got ${initialBots.length}`,
+  );
+
+  for (let t = 0; t < 1250; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  const allBots = [...state.players.values()].filter((p) => p.isBot);
+  const aliveBots = allBots.filter((p) => p.alive && !p.isEliminated);
+  const mpEliminated = allBots.filter((p) => p.eliminationReason === 'MANPOWER_DEPLETED');
+  const powerBuilt = allBots.filter((p) => p.freePowerPlantUsed);
+
+  assert(
+    mpEliminated.length === 0,
+    `No AI bot should die of MANPOWER_DEPLETED blackout, got ${mpEliminated.length}`,
+  );
+  assert(
+    powerBuilt.length === BOT_COUNT,
+    `Expected all ${BOT_COUNT} AI bots to build starter power plant, got ${powerBuilt.length}`,
+  );
+  assert(
+    aliveBots.length === BOT_COUNT,
+    `Expected all ${BOT_COUNT} AI bots alive at tick 1250, got ${aliveBots.length}`,
+  );
+  for (const bot of aliveBots) {
+    assert(
+      bot.territoryCells > 300,
+      `Bot ${bot.name} failed to expand/hold territory (${bot.territoryCells} cells)`,
+    );
+  }
+
+  const client = createClientRenderState(state);
+  const publicBots = client.players.filter((p) => p.isBot && p.alive);
+  assert(
+    publicBots.length === BOT_COUNT,
+    `Public leaderboard must list all ${BOT_COUNT} live bots, got ${publicBots.length}`,
+  );
+  for (const pub of publicBots) {
+    assert(
+      pub.money === undefined && pub.manpower === undefined,
+      `Anti-cheat failed: private bot stats leaked for ${pub.name}`,
+    );
+  }
+
+  console.log(
+    `PASS [u]: All ${BOT_COUNT}/${BOT_COUNT} AI bots spawn, build power, survive & expand cleanly.`,
+  );
+}
+
+function testRangeUnitDisciplineAndArtilleryAutoShelling(): void {
+  const state = createInitialGameState(9707);
+
+  // Locate a solid inland patch centered in Central/Eastern Europe plains so no water interferes
+  let sx = -1;
+  let sy = -1;
+  for (let y = 170; y < 290 && sx === -1; y += 5) {
+    for (let x = 390; x < 540; x += 5) {
+      let ok = true;
+      for (let dy = -20; dy <= 20 && ok; dy += 5) {
+        for (let dx = -12; dx <= 80; dx += 5) {
+          if (state.terrain[(y + dy) * state.width + (x + dx)] === TerrainType.WATER) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      if (ok) {
+        sx = x;
+        sy = y;
+        break;
+      }
+    }
+  }
+  assert(sx !== -1, 'Expected spacious land patch for unit discipline & artillery test');
+
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: sx, y: sy });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  human.energyReserve = human.energyReserveMax;
+
+  // Freeze unrelated bot AI decisions during deterministic coordinate test
+  let enemyBot = null;
+  for (const p of state.players.values()) {
+    if (p.isBot) {
+      p.nextBotDecisionTick = 999999;
+      if (!enemyBot && p.alive) {
+        enemyBot = p;
+      }
+    }
+  }
+  assert(enemyBot !== null, 'Expected an enemy bot');
+  const enemy = enemyBot!;
+
+  // Claim a corridor at x + 55..x + 65 well outside unit operationRadius (40)
+  for (let y = sy - 8; y <= sy + 8; y++) {
+    for (let x = sx + 55; x <= sx + 66; x++) {
+      state.owners[y * state.width + x] = humanId;
+    }
+  }
+
+  // 1. Spawn a RANGE infantry at (sx - 4, sy); launch an AttackOrder 70+ cells east (> operationRadius 40)
+  const rangeInf = spawnUnitStack(state, humanId, 'INFANTRY', sx - 4, sy, 2, {
+    stance: 'RANGE',
+  });
+  const startX = rangeInf.x;
+  const startY = rangeInf.y;
+
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: sx + 62, y: sy },
+      { x: sx + 78, y: sy },
+    ],
+    manpowerPercent: 25,
+    targetOwnerId: WILDERNESS_OWNER,
+  });
+
+  for (let t = 0; t < 25; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  assert(
+    Math.hypot(rangeInf.x - startX, rangeInf.y - startY) < 0.05 &&
+      rangeInf.attachedOrderId === null,
+    `RANGE unit must stay stationary when attack/border shifts outside operationRadius (moved=${Math.hypot(rangeInf.x - startX, rangeInf.y - startY).toFixed(2)})`,
+  );
+
+  // 2. Switching a moving unit to LOCK immediately halts movement & prevents auto-attach
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [rangeInf.id],
+    targetX: sx + 22,
+    targetY: sy,
+  });
+  for (let t = 0; t < 4; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(rangeInf.x > startX + 0.5 && rangeInf.targetX !== null, 'Unit should move toward RMB order');
+
+  dispatchAction(state, {
+    type: 'SET_UNITS_STANCE',
+    playerId: humanId,
+    unitIds: [rangeInf.id],
+    stance: 'LOCK',
+  });
+  assert(
+    rangeInf.stance === 'LOCK' && rangeInf.targetX === null && rangeInf.targetY === null,
+    'Switching to LOCK must halt unit immediately and clear targets',
+  );
+
+  // Launch an own AttackOrder right next to the LOCK unit & another RANGE unit
+  const nearbyRange = spawnUnitStack(state, humanId, 'INFANTRY', sx + 2, sy + 3, 2, {
+    stance: 'RANGE',
+  });
+  const nearX = nearbyRange.x;
+  const lockX = rangeInf.x;
+  const lockY = rangeInf.y;
+
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: sx + 10, y: sy },
+      { x: sx + 30, y: sy },
+    ],
+    manpowerPercent: 25,
+    targetOwnerId: WILDERNESS_OWNER,
+  });
+
+  let sawAttached = false;
+  for (let t = 0; t < 20; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    if (nearbyRange.attachedOrderId !== null) {
+      sawAttached = true;
+    }
+  }
+
+  assert(
+    Math.hypot(rangeInf.x - lockX, rangeInf.y - lockY) === 0,
+    'LOCK unit must never move automatically even when attack arrow is adjacent',
+  );
+  assert(
+    sawAttached && nearbyRange.x > nearX + 1.2,
+    `RANGE unit must auto-attach and advance with active arrow inside operationRadius (sawAttached=${sawAttached}, dx=${(nearbyRange.x - nearX).toFixed(2)})`,
+  );
+
+  // 3. ARTILLERY automatically shells enemy WAR BUNKER in attackRange (26 cells)
+  setWarRelation(state, humanId, enemy.id);
+  const bunkerX = sx + 18;
+  const bunkerY = sy - 8;
+  for (let y = bunkerY - 6; y <= bunkerY + 6; y++) {
+    for (let x = bunkerX - 6; x <= bunkerX + 6; x++) {
+      state.owners[y * state.width + x] = enemy.id;
+    }
+  }
+  enemy.money = 5000;
+  enemy.buildingMaterial = 5000;
+  enemy.industry = 5000;
+  const enemyBunker = placeBuilding(state, enemy.id, 'BUNKER', bunkerX, bunkerY, 1)!;
+  assert(enemyBunker !== null, 'Expected enemy BUNKER placement');
+  enemyBunker.stackCount = 4;
+  enemyBunker.underConstructionCount = 0;
+  enemyBunker.constructionTicksRemaining = 0;
+  enemy.energyReserve = enemy.energyReserveMax;
+  enemy.manpower = enemy.maxManpower;
+  const mpBefore = enemy.manpower;
+
+  const arty = spawnUnitStack(state, humanId, 'ARTILLERY', bunkerX - 15, bunkerY, 4, {
+    stance: 'LOCK',
+  });
+
+  let sawShellLock = false;
+  let sawMpDrain = false;
+  for (let t = 0; t < 20; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    if (
+      arty.combatCooldownTicks > 0 &&
+      arty.lastCombatTargetX === bunkerX + 0.5 &&
+      arty.lastCombatTargetY === bunkerY + 0.5
+    ) {
+      sawShellLock = true;
+    }
+    if (enemy.manpower < mpBefore) {
+      sawMpDrain = true;
+    }
+  }
+
+  const remainingBunker = state.buildings.find((b) => b.id === enemyBunker.id);
+  const stacksAfter = remainingBunker ? remainingBunker.stackCount : 0;
+
+  assert(
+    sawShellLock && arty.combatCooldownTicks > 0,
+    `Artillery must automatically lock and shell WAR enemy BUNKER in range (cooldown=${arty.combatCooldownTicks}, target=${arty.lastCombatTargetX})`,
+  );
+  assert(
+    sawMpDrain && stacksAfter < 4,
+    `Artillery bombardment must attrit enemy manpower (${mpBefore.toFixed(1)} -> ${enemy.manpower.toFixed(1)}) and damage bunker stacks (4 -> ${stacksAfter})`,
+  );
+
+  console.log(
+    `PASS [v]: RANGE discipline, LOCK halt & ARTILLERY bunker auto-shelling verified (bunker stacks 4 -> ${stacksAfter}).`,
+  );
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -2571,7 +2826,9 @@ function main(): void {
   testEncirclementSurvivalLootAndFogOfWar();
   testZeroManpowerEliminationAndDynamicOccupancyEnergy();
   testLassoUnitSelectionPriorityOverFront();
-  console.log('ALL 20 SIMULATION TESTS PASSED.');
+  testAllAiBotsSpawnSurviveAndStayActive();
+  testRangeUnitDisciplineAndArtilleryAutoShelling();
+  console.log('ALL 22 SIMULATION TESTS PASSED.');
 }
 
 main();

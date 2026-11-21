@@ -134,7 +134,6 @@ export class HudController {
       onCloseBuildingInspector: callbacks.onCloseBuildingInspector,
       onStackBuilding: callbacks.onStackBuilding,
       onDemolishBuilding: callbacks.onDemolishBuilding,
-      onProduceUnit: callbacks.onProduceUnit,
     });
 
     this.leaderboard = new LeaderboardController(this.root, {
@@ -174,9 +173,14 @@ export class HudController {
     middleSlot.appendChild(this.manpowerPanel.getPanelElement());
     middleSlot.appendChild(this.leaderboard.getPanelElement());
 
-    this.bottomStack.insertBefore(this.unitPanel.getPanelElement(), this.bottomRow);
-    this.bottomStack.insertBefore(this.buildMenu.getPanelElement(), this.unitPanel.getPanelElement());
+    this.bottomStack.insertBefore(this.buildMenu.getPanelElement(), this.bottomRow);
     this.bottomStack.insertBefore(this.targetBarEl, this.buildMenu.getPanelElement());
+
+    const bottomRightStack = this.query('[data-el="bottom-right-stack"]');
+    bottomRightStack.insertBefore(
+      this.unitPanel.getPanelElement(),
+      bottomRightStack.firstElementChild,
+    );
   }
 
   private buildDom(): void {
@@ -330,22 +334,24 @@ export class HudController {
           </div>
         </div>
 
-        <div class="hud-panel hud-legend">
-          <div class="hud-legend-row">
-            <span class="hud-legend-key">LMB klik / laso</span>
-            <span>Jednotky (přednost) · Cíl / šipka (2s Ambush)</span>
-          </div>
-          <div class="hud-legend-row">
-            <span class="hud-legend-key">RMB na mapu</span>
-            <span>Rozkaz jednotkám · Radiální stavba · Budova · Diplomacie</span>
-          </div>
-          <div class="hud-legend-row">
-            <span class="hud-legend-key">L / G / P / B</span>
-            <span>LOCK/RANGE · Sloučit · Výsadek · Paleta stavby</span>
-          </div>
-          <div class="hud-legend-row">
-            <span class="hud-legend-key">Shift + LMB / 2×LMB</span>
-            <span>Výběr lasem · Organický nápor</span>
+        <div class="hud-bottom-right-stack" data-el="bottom-right-stack">
+          <div class="hud-panel hud-legend">
+            <div class="hud-legend-row">
+              <span class="hud-legend-key">LMB klik / laso</span>
+              <span>Jednotky (přednost) · Cíl / šipka (2s Ambush)</span>
+            </div>
+            <div class="hud-legend-row">
+              <span class="hud-legend-key">RMB na mapu</span>
+              <span>Přesun vybraných jednotek · Budova · Diplomacie</span>
+            </div>
+            <div class="hud-legend-row">
+              <span class="hud-legend-key">B pod kurzorem</span>
+              <span>Radiální stavební menu platné pro daný terén</span>
+            </div>
+            <div class="hud-legend-row">
+              <span class="hud-legend-key">L / G / P / V</span>
+              <span>LOCK/RANGE · Sloučit · Výsadek · Rámeček jednotek</span>
+            </div>
           </div>
         </div>
       </div>

@@ -26,7 +26,7 @@ import {
   FrontPushPreview,
   SelectedTarget,
 } from './render/canvasRenderer';
-import { UnitSelectionRect } from './render/unitRenderer';
+import { MoveOrderPing, UnitSelectionRect } from './render/unitRenderer';
 import { HudController, SimSpeed, TacticalMode } from './ui/hud';
 
 interface BendHandleDrag {
@@ -70,8 +70,9 @@ function bootstrap(): void {
 
   let ambushTargetId: number | null = null;
   let ambushElapsedMs = 0;
-  let lastMouseScreenX = 0;
-  let lastMouseScreenY = 0;
+  let lastMouseScreenX = window.innerWidth * 0.5;
+  let lastMouseScreenY = window.innerHeight * 0.5;
+  let moveOrderPings: MoveOrderPing[] = [];
 
   let frontPushStart: Point | null = null;
   let frontPushPreview: FrontPushPreview | null = null;
@@ -140,6 +141,7 @@ function bootstrap(): void {
       selectedTarget = null;
       selectedUnitIds = [];
       paradropUnitId = null;
+      moveOrderPings = [];
       clearFrontSelection();
       clearInteractionPreviews();
       hud.terrainBuildMenu.close();
@@ -419,7 +421,18 @@ function bootstrap(): void {
   );
 
   window.addEventListener('resize', handleResize);
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  const blockContextMenu = (e: MouseEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener('contextmenu', blockContextMenu, true);
+  window.addEventListener('contextmenu', blockContextMenu, false);
+  document.addEventListener('contextmenu', blockContextMenu, true);
+  document.addEventListener('contextmenu', blockContextMenu, false);
+  canvas.addEventListener('contextmenu', blockContextMenu, true);
+  canvas.addEventListener('contextmenu', blockContextMenu, false);
+  hudRoot.addEventListener('contextmenu', blockContextMenu, true);
+  hudRoot.addEventListener('contextmenu', blockContextMenu, false);
 
   function isNearSelectedFrontier(worldPt: Point, mapWidth: number): boolean {
     for (const idx of selectedFrontierCells) {
@@ -475,7 +488,7 @@ function bootstrap(): void {
     screenY: number,
   ): PublicUnitInfo | null {
     let best: PublicUnitInfo | null = null;
-    let bestDist = 15;
+    let bestDist = 20;
     for (const unit of state.units) {
       if (unit.ownerId !== state.humanPlayerId) continue;
       const sc = camera.worldToScreen(unit.x, unit.y);
@@ -731,7 +744,7 @@ function bootstrap(): void {
     lastMouseScreenY = e.clientY;
 
     if (isPanning) {
-      if (Math.hypot(e.clientX - rmbDownScreenX, e.clientY - rmbDownScreenY) > 5) {
+      if (Math.hypot(e.clientX - rmbDownScreenX, e.clientY - rmbDownScreenY) > 9) {
         rmbDragged = true;
         hud.terrainBuildMenu.close();
       }
@@ -829,10 +842,15 @@ function bootstrap(): void {
               targetX: worldPt.x,
               targetY: worldPt.y,
             });
+            moveOrderPings.push({
+              x: worldPt.x,
+              y: worldPt.y,
+              createdAtMs: performance.now(),
+            });
             hud.terrainBuildMenu.close();
             hud.buildingMenu.close();
             hud.leaderboard.closeProfile();
-            syncHud();
+            syncHud(engine.getRenderState());
           }
           return;
         }
@@ -852,15 +870,7 @@ function bootstrap(): void {
         if (ix >= 0 && ix < state.width && iy >= 0 && iy < state.height) {
           const cellIdx = iy * state.width + ix;
           const owner = state.owners[cellIdx];
-          if (
-            owner === state.humanPlayerId &&
-            state.terrain[cellIdx] !== TerrainType.WATER
-          ) {
-            hud.buildingMenu.close();
-            hud.leaderboard.closeProfile();
-            hud.terrainBuildMenu.open(ix, iy, e.clientX, e.clientY, state);
-            syncHud(state);
-          } else if (owner >= 0 && owner !== state.humanPlayerId) {
+          if (owner >= 0 && owner !== state.humanPlayerId) {
             hud.buildingMenu.close();
             hud.terrainBuildMenu.close();
             hud.leaderboard.openProfile(owner, e.clientX + 8, e.clientY + 8);
@@ -1033,7 +1043,21 @@ function bootstrap(): void {
     }
 
     if (e.code === 'KeyB') {
-      hud.buildMenu.setExpanded(!hud.buildMenu.isExpanded());
+      if (e.repeat) return;
+      const state = engine.getRenderState();
+      if (state.phase === 'PLAYING') {
+        if (hud.terrainBuildMenu.isOpen()) {
+          hud.terrainBuildMenu.close();
+        } else {
+          const mx = lastMouseScreenX > 0 ? lastMouseScreenX : window.innerWidth * 0.5;
+          const my = lastMouseScreenY > 0 ? lastMouseScreenY : window.innerHeight * 0.5;
+          const worldPt = camera.screenToWorld(mx, my);
+          hud.buildingMenu.close();
+          hud.leaderboard.closeProfile();
+          hud.terrainBuildMenu.open(worldPt.x, worldPt.y, mx, my, state);
+          syncHud(state);
+        }
+      }
       return;
     }
 
@@ -1340,6 +1364,10 @@ function bootstrap(): void {
       };
     }
 
+    if (moveOrderPings.length > 0) {
+      moveOrderPings = moveOrderPings.filter((p) => nowMs - p.createdAtMs < 1400);
+    }
+
     syncHud(finalState);
     renderer.render(finalState, camera, {
       hoverCell,
@@ -1355,6 +1383,7 @@ function bootstrap(): void {
       selectedUnitIds: new Set(selectedUnitIds),
       unitSelectRect,
       paradropUnitId,
+      moveOrderPings,
     });
 
     requestAnimationFrame(frame);

@@ -1,8 +1,22 @@
 import { evaluateCellDefense } from './defenses';
 import { syncPlayerActiveManpower } from './economy';
 import { getCombatBlackoutMultiplier } from './energyGrid';
-import { GameState, TICK_DT, TerrainType, Unit, UnitType } from './types';
-import { UNIT_LOOT_RATIO, UNIT_SPECS, getUnitRelation } from './units';
+import {
+  Building,
+  BuildingType,
+  GameState,
+  PlayerState,
+  TICK_DT,
+  TerrainType,
+  Unit,
+  UnitType,
+} from './types';
+import {
+  UNIT_LOOT_RATIO,
+  UNIT_SPECS,
+  getAttackOrderFrontPoint,
+  getUnitRelation,
+} from './units';
 
 export interface FrontUnitSupportModifiers {
   readonly attackerCostMultiplier: number;
@@ -106,7 +120,141 @@ export function awardUnitDefeatLoot(
   victor.industry += Math.round(spec.cost.industry * UNIT_LOOT_RATIO * unitsLost);
 }
 
-/** Resolves unit-vs-unit tactical fire, encircled pocket attrition, count scaling, and defeat loot. */
+function getArtilleryBuildingPriority(type: BuildingType): number {
+  switch (type) {
+    case 'BUNKER':
+      return 6;
+    case 'TRENCH':
+      return 5;
+    case 'AA_BATTERY':
+      return 4;
+    case 'AIRFIELD':
+      return 3;
+    case 'FACTORY':
+      return 2;
+    case 'BARRACKS':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function shellEnemyDefenseOrFrontline(
+  state: GameState,
+  attacker: Unit,
+  attOwner: PlayerState | undefined,
+  deadBuildingIds: Set<number>,
+): void {
+  const attSpec = UNIT_SPECS.ARTILLERY;
+  let bestBuilding: Building | null = null;
+  let bestPriority = 0;
+  let bestDist = attSpec.attackRange;
+
+  for (const candidate of state.buildings) {
+    if (deadBuildingIds.has(candidate.id)) continue;
+    if (candidate.stackCount <= 0 && candidate.underConstructionCount <= 0) continue;
+    if (candidate.ownerId === attacker.ownerId) continue;
+    if (getUnitRelation(state, attacker.ownerId, candidate.ownerId) !== 'WAR') continue;
+
+    const prio = getArtilleryBuildingPriority(candidate.type);
+    if (prio <= 0) continue;
+
+    const dist = Math.hypot(candidate.x + 0.5 - attacker.x, candidate.y + 0.5 - attacker.y);
+    if (dist > attSpec.attackRange) continue;
+
+    if (prio > bestPriority || (prio === bestPriority && dist < bestDist)) {
+      bestPriority = prio;
+      bestDist = dist;
+      bestBuilding = candidate;
+    }
+  }
+
+  if (bestBuilding) {
+    attacker.combatCooldownTicks = 6;
+    attacker.lastCombatTargetX = bestBuilding.x + 0.5;
+    attacker.lastCombatTargetY = bestBuilding.y + 0.5;
+
+    const supplyMul = 0.45 + 0.55 * attacker.supplyLevel;
+    const moraleMul = 0.5 + 0.5 * (attacker.morale / 100);
+    const blackoutMul = getCombatBlackoutMultiplier(attOwner);
+    const hpEfficiency = 0.45 + 0.55 * Math.min(1, attacker.hp / Math.max(1, attacker.maxHp));
+    const countScale = Math.pow(attacker.count, 0.88);
+    const shellPower =
+      attSpec.attack * countScale * hpEfficiency * supplyMul * moraleMul * blackoutMul;
+
+    const occupier = state.players.get(bestBuilding.ownerId);
+    if (occupier && occupier.alive && !occupier.isEliminated) {
+      const mpAttrition = Math.min(20 * TICK_DT, shellPower * TICK_DT * 0.25);
+      const protectedFloor = occupier.allocatedManpower;
+      if (occupier.manpower > protectedFloor) {
+        occupier.manpower = Math.max(protectedFloor, occupier.manpower - mpAttrition);
+        syncPlayerActiveManpower(occupier);
+      }
+    }
+
+    if (!bestBuilding.isCapital) {
+      const chipInterval = Math.max(8, Math.round(32 / Math.max(1, Math.min(8, attacker.count))));
+      if ((state.tick + bestBuilding.id) % chipInterval === 0) {
+        if (bestBuilding.stackCount > 0) {
+          bestBuilding.stackCount--;
+        } else if (bestBuilding.underConstructionCount > 0) {
+          bestBuilding.underConstructionCount--;
+        }
+        if (bestBuilding.stackCount <= 0 && bestBuilding.underConstructionCount <= 0) {
+          deadBuildingIds.add(bestBuilding.id);
+        }
+        state.stateVersion++;
+      }
+    }
+    return;
+  }
+
+  // Fallback supporting barrage onto active friendly WAR frontline push inside attackRange
+  let bestFront: { x: number; y: number } | null = null;
+  let bestFrontDist = attSpec.attackRange;
+  for (const order of state.attackOrders) {
+    if (order.playerId !== attacker.ownerId) continue;
+    if (order.wildernessOnly) continue;
+    if (
+      order.targetOwnerIds.length > 0 &&
+      !order.targetOwnerIds.some((id) => getUnitRelation(state, attacker.ownerId, id) === 'WAR')
+    ) {
+      continue;
+    }
+    const head = getAttackOrderFrontPoint(order);
+    const dist = Math.hypot(head.x - attacker.x, head.y - attacker.y);
+    if (dist > bestFrontDist) continue;
+
+    const ix = Math.max(0, Math.min(state.width - 1, Math.floor(head.x)));
+    const iy = Math.max(0, Math.min(state.height - 1, Math.floor(head.y)));
+    let touchesWar = false;
+    for (let dy = -2; dy <= 2 && !touchesWar; dy++) {
+      const ny = iy + dy;
+      if (ny < 0 || ny >= state.height) continue;
+      for (let dx = -2; dx <= 2; dx++) {
+        const nx = ix + dx;
+        if (nx < 0 || nx >= state.width) continue;
+        const cOwner = state.owners[ny * state.width + nx];
+        if (cOwner >= 0 && cOwner !== attacker.ownerId && getUnitRelation(state, attacker.ownerId, cOwner) === 'WAR') {
+          touchesWar = true;
+          break;
+        }
+      }
+    }
+    if (touchesWar) {
+      bestFrontDist = dist;
+      bestFront = head;
+    }
+  }
+
+  if (bestFront) {
+    attacker.combatCooldownTicks = 6;
+    attacker.lastCombatTargetX = bestFront.x;
+    attacker.lastCombatTargetY = bestFront.y;
+  }
+}
+
+/** Resolves unit-vs-unit tactical fire, artillery bombardment, encircled pocket attrition, count scaling, and defeat loot. */
 export function stepUnitsCombat(state: GameState): void {
   if (state.phase !== 'PLAYING' || state.units.length === 0) {
     return;
@@ -114,6 +262,7 @@ export function stepUnitsCombat(state: GameState): void {
 
   const incomingDamage = new Map<number, number>();
   const lastAttacker = new Map<number, number>();
+  const deadBuildingIds = new Set<number>();
 
   for (const u of state.units) {
     if (u.combatCooldownTicks === 0) {
@@ -141,7 +290,12 @@ export function stepUnitsCombat(state: GameState): void {
       }
     }
 
-    if (!bestTarget) continue;
+    if (!bestTarget) {
+      if (attacker.type === 'ARTILLERY') {
+        shellEnemyDefenseOrFrontline(state, attacker, attOwner, deadBuildingIds);
+      }
+      continue;
+    }
 
     const defIx = Math.max(0, Math.min(state.width - 1, Math.floor(bestTarget.x)));
     const defIy = Math.max(0, Math.min(state.height - 1, Math.floor(bestTarget.y)));
@@ -277,6 +431,11 @@ export function stepUnitsCombat(state: GameState): void {
       unit.hp = Math.min(unit.hp, unit.maxHp);
       state.stateVersion++;
     }
+  }
+
+  if (deadBuildingIds.size > 0) {
+    state.buildings = state.buildings.filter((b) => !deadBuildingIds.has(b.id));
+    state.stateVersion++;
   }
 
   if (anyRemoved) {

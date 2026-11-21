@@ -4,7 +4,6 @@ import {
   PublicPlayerInfo,
   PublicUnitInfo,
   TerrainType,
-  UnitType,
   WILDERNESS_OWNER,
 } from '../engine/types';
 import { AIRFIELD_PARADROP_RANGE, UNIT_SPECS } from '../engine/units';
@@ -15,6 +14,12 @@ export interface UnitSelectionRect {
   readonly startY: number;
   readonly currX: number;
   readonly currY: number;
+}
+
+export interface MoveOrderPing {
+  readonly x: number;
+  readonly y: number;
+  readonly createdAtMs: number;
 }
 
 function drawRoundedRectPath(
@@ -39,123 +44,481 @@ function drawRoundedRectPath(
   ctx.closePath();
 }
 
-function drawUnitGlyph(
+function resolveUnitFacingAngle(unit: PublicUnitInfo, isOwn: boolean): number {
+  if (
+    unit.combatCooldownTicks > 0 &&
+    unit.lastCombatTargetX !== null &&
+    unit.lastCombatTargetY !== null
+  ) {
+    return Math.atan2(unit.lastCombatTargetY - unit.y, unit.lastCombatTargetX - unit.x);
+  }
+  if (unit.targetX !== null && unit.targetY !== null) {
+    const dx = unit.targetX - unit.x;
+    const dy = unit.targetY - unit.y;
+    if (Math.hypot(dx, dy) > 0.4) {
+      return Math.atan2(dy, dx);
+    }
+  }
+  return isOwn ? -0.28 : Math.PI - 0.35;
+}
+
+function drawUnitPedestal(
   ctx: CanvasRenderingContext2D,
-  type: UnitType,
   cx: number,
   cy: number,
-  halfW: number,
-  halfH: number,
-  accentColor: string,
+  rx: number,
+  ry: number,
+  ownerHex: string,
+  isOwn: boolean,
+  isSelected: boolean,
+  isEncircled: boolean,
+  isDropVulnerable: boolean,
+  relationToHuman?: string,
+): void {
+  const rimDepth = Math.max(3, ry * 0.36);
+
+  // 1. Cast ground shadow
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx + 1.5, cy + rimDepth + 1.8, rx * 1.08, ry * 1.06, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(4, 7, 11, 0.56)';
+  ctx.fill();
+
+  // 2. Selection / encircled / paradrop aura ring around base
+  if (isSelected) {
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + rimDepth * 0.2, rx + 4.2, ry + 3.6, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(245, 223, 150, 0.16)';
+    ctx.fill();
+    ctx.strokeStyle = '#f5df96';
+    ctx.lineWidth = 2.0;
+    ctx.stroke();
+  } else if (isEncircled) {
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + rimDepth * 0.2, rx + 3.4, ry + 2.8, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(235, 92, 84, 0.92)';
+    ctx.lineWidth = 1.7;
+    ctx.stroke();
+  } else if (isDropVulnerable) {
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + rimDepth * 0.2, rx + 3.2, ry + 2.6, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(118, 214, 244, 0.86)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // 3. 3D Extruded pedestal lower wall
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + rimDepth, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#0d131a';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Team color side band
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + rimDepth * 0.55, rx * 0.98, ry * 0.98, 0, 0, Math.PI);
+  ctx.strokeStyle = ownerHex;
+  ctx.lineWidth = Math.max(1.8, rimDepth * 0.55);
+  ctx.stroke();
+
+  // 4. Beveled upper pedestal deck with radial gradient
+  const deckGrad = ctx.createRadialGradient(
+    cx - rx * 0.3,
+    cy - ry * 0.4,
+    rx * 0.12,
+    cx,
+    cy,
+    rx * 1.05,
+  );
+  if (isOwn) {
+    deckGrad.addColorStop(0, '#2a4156');
+    deckGrad.addColorStop(0.65, '#192938');
+    deckGrad.addColorStop(1, '#101a24');
+  } else {
+    deckGrad.addColorStop(0, '#3a2429');
+    deckGrad.addColorStop(0.65, '#27171b');
+    deckGrad.addColorStop(1, '#180f12');
+  }
+
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = deckGrad;
+  ctx.fill();
+
+  // Top faction rim bevel
+  ctx.lineWidth = isSelected ? 2.0 : 1.6;
+  ctx.strokeStyle = isSelected
+    ? '#f7e49e'
+    : isEncircled
+      ? '#eb766c'
+      : isOwn
+        ? ownerHex
+        : relationToHuman === 'WAR'
+          ? '#eb7268'
+          : ownerHex;
+  ctx.stroke();
+
+  // Inner metallic highlight arc
+  ctx.beginPath();
+  ctx.ellipse(cx, cy - ry * 0.08, rx * 0.82, ry * 0.74, 0, Math.PI * 1.08, Math.PI * 1.92);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawUnitModel3D(
+  ctx: CanvasRenderingContext2D,
+  unit: PublicUnitInfo,
+  cx: number,
+  cy: number,
+  scale: number,
+  ownerHex: string,
+  facingRad: number,
 ): void {
   ctx.save();
-  ctx.strokeStyle = accentColor;
-  ctx.fillStyle = accentColor;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = Math.max(1.5, halfH * 0.24);
+  ctx.translate(cx, cy);
+  const cosF = Math.cos(facingRad);
+  const sinF = Math.sin(facingRad);
+  const flipX = cosF < -0.15 ? -1 : 1;
 
-  switch (type) {
-    case 'INFANTRY': {
-      // High-contrast NATO crossed infantry diagonals + top bar
-      const gx = halfW * 0.72;
-      const gy = halfH * 0.62;
-      ctx.beginPath();
-      ctx.moveTo(cx - gx, cy - gy);
-      ctx.lineTo(cx + gx, cy + gy);
-      ctx.moveTo(cx + gx, cy - gy);
-      ctx.lineTo(cx - gx, cy + gy);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(cx - gx * 0.85, cy - gy - 1.5);
-      ctx.lineTo(cx + gx * 0.85, cy - gy - 1.5);
-      ctx.lineWidth = Math.max(1.1, halfH * 0.16);
-      ctx.stroke();
-      break;
-    }
+  switch (unit.type) {
     case 'TANK': {
-      // Bold armored tank silhouette: tracks, hull, turret, barrel
-      const trackW = halfW * 1.45;
-      const trackH = halfH * 0.56;
-      drawRoundedRectPath(
-        ctx,
-        cx - trackW * 0.5,
-        cy + halfH * 0.05,
-        trackW,
-        trackH,
-        trackH * 0.45,
-      );
+      // Oblique 3/4 armored tank with tracks, sloped hull, rotating turret + barrel
+      const s = scale * 1.08;
+      ctx.save();
+      ctx.scale(flipX, 1);
+
+      // Ground hull shadow
+      ctx.fillStyle = 'rgba(4, 7, 11, 0.5)';
+      ctx.beginPath();
+      ctx.ellipse(0.5 * s, 3.6 * s, 10.5 * s, 4.4 * s, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Turret dome
-      ctx.beginPath();
-      ctx.roundRect(
-        cx - halfW * 0.36,
-        cy - halfH * 0.48,
-        halfW * 0.64,
-        halfH * 0.52,
-        2,
-      );
+      // Far track (slightly higher)
+      drawRoundedRectPath(ctx, -9.2 * s, -4.4 * s, 18.0 * s, 3.4 * s, 1.5 * s);
+      ctx.fillStyle = '#181e24';
       ctx.fill();
 
-      // Cannon barrel pointing forward right
-      ctx.beginPath();
-      ctx.moveTo(cx + halfW * 0.2, cy - halfH * 0.24);
-      ctx.lineTo(cx + halfW * 0.88, cy - halfH * 0.34);
-      ctx.lineWidth = Math.max(1.8, halfH * 0.24);
+      // Main hull chassis (3D beveled olive/steel gradient)
+      const hullGrad = ctx.createLinearGradient(-8 * s, -5 * s, 8 * s, 3 * s);
+      hullGrad.addColorStop(0, '#96a58e');
+      hullGrad.addColorStop(0.45, '#687761');
+      hullGrad.addColorStop(1, '#3d483a');
+      drawRoundedRectPath(ctx, -8.8 * s, -3.5 * s, 17.6 * s, 5.2 * s, 1.4 * s);
+      ctx.fillStyle = hullGrad;
+      ctx.fill();
+      ctx.strokeStyle = '#1b221a';
+      ctx.lineWidth = 0.95;
       ctx.stroke();
+
+      // Faction stripe across front glacis
+      ctx.fillStyle = ownerHex;
+      ctx.fillRect(4.5 * s, -3.0 * s, 2.2 * s, 4.2 * s);
+
+      // Foreground near track (extruded dark tread + specular road wheels)
+      drawRoundedRectPath(ctx, -9.5 * s, 0.4 * s, 18.8 * s, 3.9 * s, 1.8 * s);
+      ctx.fillStyle = '#20262c';
+      ctx.fill();
+      ctx.strokeStyle = '#0e1216';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+
+      ctx.fillStyle = '#687480';
+      for (let wx = -6.8; wx <= 6.8; wx += 3.4) {
+        ctx.beginPath();
+        ctx.arc(wx * s, 2.35 * s, 1.1 * s, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Elevated 3D turret shadow + dome
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.beginPath();
+      ctx.ellipse(-0.4 * s, -2.2 * s, 5.3 * s, 2.8 * s, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      const turretGrad = ctx.createLinearGradient(-4 * s, -7.2 * s, 4 * s, -1.5 * s);
+      turretGrad.addColorStop(0, '#c0ceb4');
+      turretGrad.addColorStop(0.55, '#7e8f75');
+      turretGrad.addColorStop(1, '#485443');
+      drawRoundedRectPath(ctx, -4.8 * s, -6.8 * s, 9.2 * s, 4.6 * s, 2.1 * s);
+      ctx.fillStyle = turretGrad;
+      ctx.fill();
+      ctx.strokeStyle = '#1e251d';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+
+      // Cupola highlight rim
+      ctx.beginPath();
+      ctx.ellipse(-1.4 * s, -6.2 * s, 2.0 * s, 0.9 * s, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#dce6d2';
+      ctx.fill();
+
+      // Rotating 3D cannon barrel (angled slightly in vertical relief toward facing)
+      const tilt = Math.max(-0.32, Math.min(0.28, sinF * flipX * 0.25));
+      ctx.save();
+      ctx.translate(3.4 * s, -4.6 * s);
+      ctx.rotate(-0.1 + tilt);
+      const barrelGrad = ctx.createLinearGradient(0, -1.1 * s, 0, 1.1 * s);
+      barrelGrad.addColorStop(0, '#dde4dc');
+      barrelGrad.addColorStop(0.5, '#869484');
+      barrelGrad.addColorStop(1, '#394238');
+      ctx.fillStyle = barrelGrad;
+      ctx.fillRect(0, -1.05 * s, 8.6 * s, 2.1 * s);
+      // Muzzle brake
+      ctx.fillStyle = '#2d352d';
+      ctx.fillRect(7.6 * s, -1.45 * s, 1.7 * s, 2.9 * s);
+
+      if (unit.combatCooldownTicks >= 4) {
+        ctx.beginPath();
+        ctx.arc(10.2 * s, 0, 3.0 * s, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 224, 128, 0.95)';
+        ctx.fill();
+      }
+      ctx.restore();
+      ctx.restore();
       break;
     }
+
     case 'ARTILLERY': {
-      // Bold wheeled howitzer carriage + angled heavy cannon barrel
-      const wheelR = Math.max(2.1, halfH * 0.3);
+      // 3D Field Howitzer: twin spades, dual armored wheels, shield plate & elevated long cannon
+      const s = scale * 1.06;
+      ctx.save();
+      ctx.scale(flipX, 1);
+
+      // Ground shadow
+      ctx.fillStyle = 'rgba(4, 7, 11, 0.48)';
       ctx.beginPath();
-      ctx.arc(cx - halfW * 0.15, cy + halfH * 0.38, wheelR, 0, Math.PI * 2);
+      ctx.ellipse(0, 3.8 * s, 9.6 * s, 3.8 * s, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Trail spade to left
+      // Spread trail spades anchored left
+      ctx.strokeStyle = '#313a42';
+      ctx.lineWidth = 2.6 * s;
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(cx - halfW * 0.15, cy + halfH * 0.38);
-      ctx.lineTo(cx - halfW * 0.72, cy + halfH * 0.58);
-      ctx.lineWidth = Math.max(1.5, halfH * 0.22);
+      ctx.moveTo(-1.0 * s, 0.5 * s);
+      ctx.lineTo(-9.2 * s, 2.8 * s);
+      ctx.moveTo(-1.5 * s, 1.2 * s);
+      ctx.lineTo(-8.4 * s, 4.1 * s);
       ctx.stroke();
 
-      // Elevated gun barrel
+      ctx.strokeStyle = '#7b8792';
+      ctx.lineWidth = 1.1 * s;
       ctx.beginPath();
-      ctx.moveTo(cx - halfW * 0.15, cy + halfH * 0.2);
-      ctx.lineTo(cx + halfW * 0.74, cy - halfH * 0.58);
-      ctx.lineWidth = Math.max(2.1, halfH * 0.28);
+      ctx.moveTo(-1.5 * s, 0.2 * s);
+      ctx.lineTo(-8.8 * s, 2.5 * s);
       ctx.stroke();
 
-      // Muzzle ring
+      // Rear wheel (depth)
       ctx.beginPath();
-      ctx.arc(cx + halfW * 0.74, cy - halfH * 0.58, Math.max(1.3, halfH * 0.16), 0, Math.PI * 2);
+      ctx.arc(-0.4 * s, -0.3 * s, 3.3 * s, 0, Math.PI * 2);
+      ctx.fillStyle = '#1b2026';
       ctx.fill();
+
+      // Gun shield (slanted 3D armor plate)
+      const shieldGrad = ctx.createLinearGradient(0, -6.8 * s, 4 * s, 1.5 * s);
+      shieldGrad.addColorStop(0, '#d8b47c');
+      shieldGrad.addColorStop(0.5, '#9d7c4c');
+      shieldGrad.addColorStop(1, '#584429');
+      ctx.beginPath();
+      ctx.moveTo(0.2 * s, -6.8 * s);
+      ctx.lineTo(3.6 * s, -5.6 * s);
+      ctx.lineTo(2.4 * s, 1.4 * s);
+      ctx.lineTo(-0.9 * s, 0.5 * s);
+      ctx.closePath();
+      ctx.fillStyle = shieldGrad;
+      ctx.fill();
+      ctx.strokeStyle = '#241c11';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+
+      // Long elevated howitzer barrel
+      ctx.save();
+      ctx.translate(-0.2 * s, -2.0 * s);
+      ctx.rotate(-0.56);
+      const tubeGrad = ctx.createLinearGradient(0, -1.4 * s, 0, 1.4 * s);
+      tubeGrad.addColorStop(0, '#f2ddc0');
+      tubeGrad.addColorStop(0.5, '#b68f5c');
+      tubeGrad.addColorStop(1, '#523e24');
+      ctx.fillStyle = tubeGrad;
+      // Breech block + main barrel
+      ctx.fillRect(-3.6 * s, -1.65 * s, 5.2 * s, 3.3 * s);
+      ctx.fillRect(1.2 * s, -1.15 * s, 10.2 * s, 2.3 * s);
+      ctx.fillStyle = '#332818';
+      ctx.fillRect(10.6 * s, -1.45 * s, 1.6 * s, 2.9 * s);
+
+      if (unit.combatCooldownTicks >= 3) {
+        ctx.beginPath();
+        ctx.arc(13.2 * s, 0, 3.6 * s, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 198, 92, 0.96)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(13.2 * s, 0, 1.7 * s, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Foreground spoked tire with metallic hub
+      ctx.beginPath();
+      ctx.arc(0.4 * s, 1.6 * s, 3.7 * s, 0, Math.PI * 2);
+      ctx.fillStyle = '#14191f';
+      ctx.fill();
+      ctx.strokeStyle = '#4c5763';
+      ctx.lineWidth = 1.0 * s;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(0.4 * s, 1.6 * s, 1.65 * s, 0, Math.PI * 2);
+      ctx.fillStyle = ownerHex;
+      ctx.fill();
+      ctx.restore();
       break;
     }
-    case 'PARATROOPERS': {
-      // Open parachute canopy + suspension lines + trooper chevron
-      const domeR = halfW * 0.66;
-      const domeY = cy - halfH * 0.08;
-      ctx.beginPath();
-      ctx.arc(cx, domeY, domeR, Math.PI, 0);
-      ctx.closePath();
-      ctx.fill();
 
-      ctx.lineWidth = Math.max(1.0, halfH * 0.15);
+    case 'INFANTRY': {
+      // Plastic 3-soldier staggered tactical squad with 3D helmets, shoulders & rifles
+      const s = scale * 1.04;
+      const troopers = [
+        { ox: -4.8, oy: -2.0, size: 0.86 },
+        { ox: 4.8, oy: -1.6, size: 0.86 },
+        { ox: 0.0, oy: 1.5, size: 1.02 },
+      ];
+
+      for (const tr of troopers) {
+        const tx = tr.ox * s;
+        const ty = tr.oy * s;
+        const r = tr.size * s;
+
+        // Cast ground shadow
+        ctx.fillStyle = 'rgba(4, 7, 11, 0.45)';
+        ctx.beginPath();
+        ctx.ellipse(tx + 0.5 * r, ty + 3.2 * r, 3.1 * r, 1.5 * r, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Torso / armor vest with gradient
+        const vestGrad = ctx.createLinearGradient(tx - 2.8 * r, ty - 1.5 * r, tx + 2.8 * r, ty + 3.0 * r);
+        vestGrad.addColorStop(0, '#c6d4e0');
+        vestGrad.addColorStop(0.5, '#7e90a1');
+        vestGrad.addColorStop(1, '#3d4954');
+        drawRoundedRectPath(ctx, tx - 2.7 * r, ty - 1.4 * r, 5.4 * r, 4.1 * r, 1.7 * r);
+        ctx.fillStyle = vestGrad;
+        ctx.fill();
+        ctx.strokeStyle = '#171e26';
+        ctx.lineWidth = 0.85;
+        ctx.stroke();
+
+        // Faction collar band
+        ctx.fillStyle = ownerHex;
+        ctx.fillRect(tx - 1.7 * r, ty - 0.8 * r, 3.4 * r, 1.15 * r);
+
+        // Angled rifle silhouette
+        ctx.strokeStyle = '#e7edf2';
+        ctx.lineWidth = 1.25 * r;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(tx + 0.6 * r * flipX, ty + 0.4 * r);
+        ctx.lineTo(tx + 4.3 * r * flipX, ty - 2.3 * r);
+        ctx.stroke();
+
+        // 3D Rounded steel helmet with specular dome highlight
+        const helmGrad = ctx.createRadialGradient(
+          tx - 0.8 * r,
+          ty - 3.9 * r,
+          0.3 * r,
+          tx,
+          ty - 3.1 * r,
+          2.6 * r,
+        );
+        helmGrad.addColorStop(0, '#f4f8fc');
+        helmGrad.addColorStop(0.55, '#a6b6c4');
+        helmGrad.addColorStop(1, '#4c5966');
+        ctx.beginPath();
+        ctx.arc(tx, ty - 3.1 * r, 2.35 * r, 0, Math.PI * 2);
+        ctx.fillStyle = helmGrad;
+        ctx.fill();
+        ctx.strokeStyle = '#182028';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+      }
+      break;
+    }
+
+    case 'PARATROOPERS': {
+      // Shaded 3D ribbed parachute canopy + harness cords + beveled airborne trooper
+      const s = scale * 1.05;
+      const canopyY = -4.2 * s;
+      const canopyRx = 8.4 * s;
+      const canopyRy = 5.4 * s;
+
+      // Suspension harness cords
+      ctx.strokeStyle = 'rgba(218, 240, 250, 0.85)';
+      ctx.lineWidth = 0.95 * s;
       ctx.beginPath();
-      ctx.moveTo(cx - domeR * 0.9, domeY);
-      ctx.lineTo(cx, cy + halfH * 0.55);
-      ctx.moveTo(cx + domeR * 0.9, domeY);
-      ctx.lineTo(cx, cy + halfH * 0.55);
-      ctx.moveTo(cx, domeY);
-      ctx.lineTo(cx, cy + halfH * 0.55);
+      ctx.moveTo(-canopyRx * 0.85, canopyY + 0.6 * s);
+      ctx.lineTo(-0.8 * s, 2.2 * s);
+      ctx.moveTo(-canopyRx * 0.35, canopyY + 0.3 * s);
+      ctx.lineTo(-0.3 * s, 2.2 * s);
+      ctx.moveTo(canopyRx * 0.35, canopyY + 0.3 * s);
+      ctx.lineTo(0.3 * s, 2.2 * s);
+      ctx.moveTo(canopyRx * 0.85, canopyY + 0.6 * s);
+      ctx.lineTo(0.8 * s, 2.2 * s);
       ctx.stroke();
 
+      // 3D Parachute dome
+      const domeGrad = ctx.createRadialGradient(
+        -2.2 * s,
+        canopyY - 3.4 * s,
+        1.0 * s,
+        0,
+        canopyY,
+        canopyRx,
+      );
+      domeGrad.addColorStop(0, '#f0fbff');
+      domeGrad.addColorStop(0.55, '#8dd4ec');
+      domeGrad.addColorStop(1, '#3b738f');
+
       ctx.beginPath();
-      ctx.arc(cx, cy + halfH * 0.6, Math.max(1.4, halfH * 0.18), 0, Math.PI * 2);
+      ctx.ellipse(0, canopyY, canopyRx, canopyRy, 0, Math.PI, 0);
+      ctx.quadraticCurveTo(canopyRx * 0.45, canopyY + 1.2 * s, 0, canopyY);
+      ctx.quadraticCurveTo(-canopyRx * 0.45, canopyY + 1.2 * s, -canopyRx, canopyY);
+      ctx.closePath();
+      ctx.fillStyle = domeGrad;
       ctx.fill();
+      ctx.strokeStyle = '#1f4152';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+
+      // Canopy ribs
+      ctx.strokeStyle = 'rgba(30, 62, 78, 0.55)';
+      ctx.lineWidth = 0.8 * s;
+      ctx.beginPath();
+      ctx.moveTo(0, canopyY - canopyRy);
+      ctx.quadraticCurveTo(-3.2 * s, canopyY - 2.6 * s, -canopyRx * 0.35, canopyY + 0.3 * s);
+      ctx.moveTo(0, canopyY - canopyRy);
+      ctx.quadraticCurveTo(3.2 * s, canopyY - 2.6 * s, canopyRx * 0.35, canopyY + 0.3 * s);
+      ctx.stroke();
+
+      // Trooper figure below harness
+      drawRoundedRectPath(ctx, -2.5 * s, 0.2 * s, 5.0 * s, 4.0 * s, 1.5 * s);
+      ctx.fillStyle = '#536778';
+      ctx.fill();
+      ctx.strokeStyle = '#161e26';
+      ctx.lineWidth = 0.85;
+      ctx.stroke();
+
+      ctx.fillStyle = ownerHex;
+      ctx.fillRect(-1.5 * s, 1.3 * s, 3.0 * s, 1.1 * s);
+
+      ctx.beginPath();
+      ctx.arc(0, -0.7 * s, 2.0 * s, 0, Math.PI * 2);
+      ctx.fillStyle = '#d8eef8';
+      ctx.fill();
+      ctx.stroke();
       break;
     }
   }
@@ -177,17 +540,88 @@ function drawPadlockIcon(
   ctx.fill();
   ctx.stroke();
 
-  // Shackle
   ctx.beginPath();
   ctx.arc(x, y - 0.8, 2.2, Math.PI, 0);
   ctx.strokeStyle = '#f6dca0';
   ctx.lineWidth = 1.2;
   ctx.stroke();
 
-  // Body
   ctx.fillStyle = '#f2c66d';
   ctx.fillRect(x - 2.6, y - 0.4, 5.2, 3.6);
   ctx.restore();
+}
+
+function drawChevronsAlongSegment(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+): void {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 16) return;
+  const ang = Math.atan2(dy, dx);
+  const step = 28;
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.7;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let d = step; d < dist - 10; d += step) {
+    const px = x1 + (dx / dist) * d;
+    const py = y1 + (dy / dist) * d;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.moveTo(-3.5, -3.5);
+    ctx.lineTo(1.5, 0);
+    ctx.lineTo(-3.5, 3.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+export function drawMoveOrderPings(
+  ctx: CanvasRenderingContext2D,
+  camera: Camera,
+  pings: ReadonlyArray<MoveOrderPing>,
+  nowMs: number,
+): void {
+  const durationMs = 1400;
+  for (const ping of pings) {
+    const age = nowMs - ping.createdAtMs;
+    if (age < 0 || age > durationMs) continue;
+    const t = age / durationMs;
+    const alpha = Math.max(0, 1 - t);
+    const sc = camera.worldToScreen(ping.x, ping.y);
+
+    ctx.save();
+    // Outer expanding tactical wave
+    ctx.beginPath();
+    ctx.arc(sc.x, sc.y, 5 + t * 18, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(246, 222, 138, ${(alpha * 0.85).toFixed(3)})`;
+    ctx.lineWidth = 2.0 - t * 0.8;
+    ctx.stroke();
+
+    // Inner bright waypoint diamond
+    const r = 5.0 * (1 - t * 0.3);
+    ctx.beginPath();
+    ctx.moveTo(sc.x, sc.y - r);
+    ctx.lineTo(sc.x + r, sc.y);
+    ctx.lineTo(sc.x, sc.y + r);
+    ctx.lineTo(sc.x - r, sc.y);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(255, 238, 170, ${(alpha * 0.92).toFixed(3)})`;
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 export function drawUnits(
@@ -195,6 +629,7 @@ export function drawUnits(
   camera: Camera,
   state: ClientRenderState,
   selectedUnitIds: ReadonlySet<number>,
+  nowMs: number = 0,
 ): void {
   if (state.units.length === 0) return;
 
@@ -204,10 +639,11 @@ export function drawUnits(
   }
 
   const scale = Math.max(0.88, Math.min(1.28, Math.sqrt(camera.zoom) * 0.72));
-  const plaqueW = Math.round(24 * scale);
-  const plaqueH = Math.round(18 * scale);
+  const pedestalRx = 14.2 * scale;
+  const pedestalRy = 8.8 * scale;
+  const pulse = nowMs > 0 ? 0.5 + 0.5 * Math.sin(nowMs * 0.008) : 0.7;
 
-  // Pass 1: Selected range/attack rings, move lines, and active combat fire tracers
+  // Pass 1: Operational/attack range rings, clear move trajectories with chevrons, and firing/shelling FX
   for (const unit of state.units) {
     const sc = camera.worldToScreen(unit.x, unit.y);
     const isSelected = selectedUnitIds.has(unit.id);
@@ -233,23 +669,33 @@ export function drawUnits(
         ctx.beginPath();
         ctx.arc(sc.x, sc.y, atkR, 0, Math.PI * 2);
         ctx.setLineDash([3, 3]);
-        ctx.lineWidth = 1.1;
-        ctx.strokeStyle = 'rgba(232, 168, 92, 0.52)';
+        ctx.lineWidth = 1.15;
+        ctx.strokeStyle = 'rgba(238, 172, 92, 0.55)';
         ctx.stroke();
         ctx.restore();
       }
 
       if (unit.targetX !== null && unit.targetY !== null) {
         const dst = camera.worldToScreen(unit.targetX, unit.targetY);
+        const routeColor = unit.attachedOrderId !== null ? '#9cd6f0' : '#f4de8c';
         ctx.save();
         ctx.beginPath();
         ctx.moveTo(sc.x, sc.y);
         ctx.lineTo(dst.x, dst.y);
-        ctx.setLineDash([5, 4]);
-        ctx.lineWidth = 1.8;
-        ctx.strokeStyle = unit.attachedOrderId !== null ? '#9cd6f0' : '#f0dca0';
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 2.0;
+        ctx.strokeStyle = routeColor;
         ctx.stroke();
         ctx.setLineDash([]);
+
+        drawChevronsAlongSegment(ctx, sc.x, sc.y, dst.x, dst.y, routeColor);
+
+        // Pulsing waypoint reticle
+        ctx.beginPath();
+        ctx.arc(dst.x, dst.y, 7.5 + pulse * 2.5, 0, Math.PI * 2);
+        ctx.strokeStyle = routeColor;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
 
         ctx.beginPath();
         ctx.moveTo(dst.x, dst.y - 4.5);
@@ -257,7 +703,7 @@ export function drawUnits(
         ctx.lineTo(dst.x, dst.y + 4.5);
         ctx.lineTo(dst.x - 4.5, dst.y);
         ctx.closePath();
-        ctx.fillStyle = unit.attachedOrderId !== null ? '#9cd6f0' : '#f0dca0';
+        ctx.fillStyle = routeColor;
         ctx.fill();
         ctx.restore();
       }
@@ -270,141 +716,130 @@ export function drawUnits(
     ) {
       const tgt = camera.worldToScreen(unit.lastCombatTargetX, unit.lastCombatTargetY);
       ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(sc.x, sc.y);
-      ctx.lineTo(tgt.x, tgt.y);
-      ctx.setLineDash(unit.type === 'ARTILLERY' ? [4, 3] : [2, 3]);
-      ctx.lineWidth = unit.type === 'ARTILLERY' ? 1.8 : 1.3;
-      ctx.strokeStyle =
-        unit.type === 'ARTILLERY'
-          ? 'rgba(248, 175, 92, 0.88)'
-          : 'rgba(246, 224, 130, 0.82)';
-      ctx.stroke();
+      if (unit.type === 'ARTILLERY') {
+        // Parabolic glowing howitzer shell arc + traveling shell + blast flare
+        const sDist = Math.hypot(tgt.x - sc.x, tgt.y - sc.y);
+        const arcLift = Math.min(60, Math.max(16, sDist * 0.34));
+        const ctrlX = (sc.x + tgt.x) * 0.5;
+        const ctrlY = Math.min(sc.y, tgt.y) - arcLift;
+
+        ctx.beginPath();
+        ctx.moveTo(sc.x, sc.y - 4 * scale);
+        ctx.quadraticCurveTo(ctrlX, ctrlY, tgt.x, tgt.y);
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.9;
+        ctx.strokeStyle = 'rgba(255, 184, 92, 0.85)';
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Animated shell orb along Bezier curve
+        const flightT = Math.max(0.08, Math.min(1, (6 - unit.combatCooldownTicks) / 5));
+        const invT = 1 - flightT;
+        const shellX = invT * invT * sc.x + 2 * invT * flightT * ctrlX + flightT * flightT * tgt.x;
+        const shellY =
+          invT * invT * (sc.y - 4 * scale) + 2 * invT * flightT * ctrlY + flightT * flightT * tgt.y;
+
+        ctx.beginPath();
+        ctx.arc(shellX, shellY, 2.7, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff2c4';
+        ctx.fill();
+
+        // Impact blast burst on last half of cooldown cycle
+        const blastR = (3.5 + flightT * 6.5) * scale;
+        ctx.beginPath();
+        ctx.arc(tgt.x, tgt.y, blastR, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 146, 62, 0.34)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 224, 140, 0.92)';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(sc.x, sc.y);
+        ctx.lineTo(tgt.x, tgt.y);
+        ctx.setLineDash([2, 3]);
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = 'rgba(248, 224, 134, 0.86)';
+        ctx.stroke();
+      }
       ctx.restore();
     }
   }
 
-  // Pass 2: High-contrast military unit counters, HP bars, stack badges & stance locks
+  // Pass 2: Shaded 3D pedestals, plastic 3D unit models, HP/Morale bars, ×N badges & stance icons
   for (const unit of state.units) {
     const sc = camera.worldToScreen(unit.x, unit.y);
     const isSelected = selectedUnitIds.has(unit.id);
     const owner = playerMap.get(unit.ownerId);
     const ownerHex = owner?.colorHex ?? '#8a99a8';
     const isOwn = unit.ownerId === state.humanPlayerId;
+    const facingRad = resolveUnitFacingAngle(unit, isOwn);
 
-    const left = sc.x - plaqueW * 0.5;
-    const top = sc.y - plaqueH * 0.5;
-
-    ctx.save();
-
-    // Selection halo / encircled / drop-vulnerability ring
-    if (isSelected) {
-      drawRoundedRectPath(ctx, left - 3, top - 3, plaqueW + 6, plaqueH + 6, 5);
-      ctx.strokeStyle = '#f5df96';
-      ctx.lineWidth = 2.0;
-      ctx.stroke();
-    } else if (unit.isEncircled) {
-      drawRoundedRectPath(ctx, left - 2.5, top - 2.5, plaqueW + 5, plaqueH + 5, 5);
-      ctx.strokeStyle = 'rgba(232, 86, 78, 0.92)';
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-    } else if (unit.dropVulnerabilityTicks > 0) {
-      drawRoundedRectPath(ctx, left - 2, top - 2, plaqueW + 4, plaqueH + 4, 4);
-      ctx.strokeStyle = 'rgba(116, 212, 240, 0.86)';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-    }
-
-    // Shadow
-    drawRoundedRectPath(ctx, left + 1, top + 1.5, plaqueW, plaqueH, 4);
-    ctx.fillStyle = 'rgba(8, 11, 16, 0.65)';
-    ctx.fill();
-
-    // Counter plaque body
-    drawRoundedRectPath(ctx, left, top, plaqueW, plaqueH, 4);
-    ctx.fillStyle = isOwn ? '#172634' : '#241b1e';
-    ctx.fill();
-
-    // Top faction header strip inside plaque
-    ctx.save();
-    drawRoundedRectPath(ctx, left, top, plaqueW, plaqueH, 4);
-    ctx.clip();
-    ctx.fillStyle = ownerHex;
-    ctx.fillRect(left, top, plaqueW, Math.max(3, plaqueH * 0.22));
-    ctx.restore();
-
-    // Crisp plaque outline
-    drawRoundedRectPath(ctx, left, top, plaqueW, plaqueH, 4);
-    ctx.lineWidth = isSelected ? 1.7 : 1.25;
-    ctx.strokeStyle = isSelected
-      ? '#f5df96'
-      : unit.isEncircled
-        ? '#eb766c'
-        : isOwn
-          ? '#9bc9e6'
-          : owner?.relationToHuman === 'WAR'
-            ? '#e07b73'
-            : '#b7c3cf';
-    ctx.stroke();
-
-    // High-contrast tactical glyph
-    const glyphColor =
-      unit.type === 'TANK'
-        ? '#f0d39a'
-        : unit.type === 'ARTILLERY'
-          ? '#f0ae76'
-          : unit.type === 'PARATROOPERS'
-            ? '#a3e2f5'
-            : '#edf3f8';
-    drawUnitGlyph(
+    drawUnitPedestal(
       ctx,
-      unit.type,
       sc.x,
-      sc.y + plaqueH * 0.08,
-      plaqueW * 0.38,
-      plaqueH * 0.34,
-      glyphColor,
+      sc.y + 2 * scale,
+      pedestalRx,
+      pedestalRy,
+      ownerHex,
+      isOwn,
+      isSelected,
+      unit.isEncircled,
+      unit.dropVulnerabilityTicks > 0,
+      owner?.relationToHuman,
     );
 
-    // HP bar underneath plaque
+    drawUnitModel3D(ctx, unit, sc.x, sc.y - 1 * scale, scale, ownerHex, facingRad);
+
+    ctx.save();
+
+    // HP bar + subtle Morale micro-strip underneath pedestal
     const hpRatio = Math.max(0, Math.min(1, unit.hp / Math.max(1, unit.maxHp)));
-    const barW = plaqueW - 2;
+    const moraleRatio = Math.max(0, Math.min(1, unit.morale / 100));
+    const barW = Math.round(24 * scale);
     const barH = 3.2;
-    const barX = left + 1;
-    const barY = top + plaqueH + 2;
-    ctx.fillStyle = 'rgba(10, 14, 18, 0.9)';
-    ctx.fillRect(barX - 0.5, barY - 0.5, barW + 1, barH + 1);
+    const barX = sc.x - barW * 0.5;
+    const barY = sc.y + pedestalRy + 5.5 * scale;
+
+    ctx.fillStyle = 'rgba(8, 12, 16, 0.92)';
+    ctx.fillRect(barX - 0.5, barY - 0.5, barW + 1, barH + 2.8);
     ctx.fillStyle =
       hpRatio > 0.55 ? '#66c989' : hpRatio > 0.28 ? '#dfb25c' : '#df675d';
     ctx.fillRect(barX, barY, barW * hpRatio, barH);
 
-    // Stack count badge ×N
+    // Thin morale indicator bar directly beneath HP
+    ctx.fillStyle =
+      moraleRatio > 0.6 ? '#76c5ee' : moraleRatio > 0.3 ? '#e2a854' : '#df675d';
+    ctx.fillRect(barX, barY + barH + 0.5, barW * moraleRatio, 1.5);
+
+    // Stack count badge ×N (top-right of pedestal)
     if (unit.count > 1) {
       const badgeText = `×${unit.count}`;
       ctx.font = '700 9.5px "Segoe UI", system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const bw = Math.max(15, ctx.measureText(badgeText).width + 6);
-      const bx = left + plaqueW - 1;
-      const by = top - 1;
-      ctx.fillStyle = isOwn ? '#1e394b' : '#402022';
+      const bw = Math.max(16, ctx.measureText(badgeText).width + 6);
+      const bx = sc.x + pedestalRx * 0.72;
+      const by = sc.y - pedestalRy - 3.5 * scale;
+      drawRoundedRectPath(ctx, bx - bw * 0.5, by - 5.5, bw, 11, 3);
+      ctx.fillStyle = isOwn ? '#173144' : '#3d1c20';
+      ctx.fill();
       ctx.strokeStyle = isSelected ? '#f5df96' : '#cfdbe6';
       ctx.lineWidth = 1;
-      ctx.fillRect(bx - bw * 0.5, by - 5.5, bw, 11);
-      ctx.strokeRect(bx - bw * 0.5, by - 5.5, bw, 11);
+      ctx.stroke();
       ctx.fillStyle = '#f5f7f9';
       ctx.fillText(badgeText, bx, by + 0.5);
     }
 
     // Stance lock icon (top-left)
     if (unit.stance === 'LOCK') {
-      drawPadlockIcon(ctx, left + 1, top + 1);
+      drawPadlockIcon(ctx, sc.x - pedestalRx * 0.78, sc.y - pedestalRy - 2.5 * scale);
     }
 
     // Encircled indicator (bottom-right)
     if (unit.isEncircled) {
-      const ex = left + plaqueW - 1;
-      const ey = top + plaqueH - 1;
+      const ex = sc.x + pedestalRx * 0.85;
+      const ey = sc.y + pedestalRy * 0.65;
       ctx.beginPath();
       ctx.arc(ex, ey, 5.2, 0, Math.PI * 2);
       ctx.fillStyle = '#8b241f';

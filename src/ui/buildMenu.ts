@@ -160,7 +160,7 @@ export class BuildMenuController {
     this.toggleBtn = document.createElement('button');
     this.toggleBtn.type = 'button';
     this.toggleBtn.className = 'hud-btn hud-build-toggle';
-    this.toggleBtn.textContent = 'Paleta (B) ▾';
+    this.toggleBtn.textContent = 'Paleta ▾';
     this.toggleBtn.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -257,7 +257,7 @@ export class BuildMenuController {
   public setExpanded(expanded: boolean): void {
     this.expanded = expanded;
     this.gridWrapEl.classList.toggle('hidden', !this.expanded);
-    this.toggleBtn.textContent = this.expanded ? 'Skrýt ▴' : 'Paleta (B) ▾';
+    this.toggleBtn.textContent = this.expanded ? 'Skrýt ▴' : 'Paleta ▾';
   }
 
   public update(
@@ -344,8 +344,8 @@ export class BuildMenuController {
 }
 
 /**
- * Right-click radial terrain build menu opened directly on own land or coastal tiles.
- * Shows ONLY buildings valid for the clicked terrain (Port only on coast) with owned counts.
+ * Radial cursor build menu opened via hotkey `B` at current cursor position `(screenX, screenY)`.
+ * Displays buildings valid for the cursor terrain with wide non-overlapping elliptical spacing and owned counts.
  */
 export class TerrainBuildMenuController {
   private readonly menuEl: HTMLElement;
@@ -429,19 +429,15 @@ export class TerrainBuildMenuController {
     screenY: number,
     state: ClientRenderState,
   ): boolean {
-    const ix = Math.floor(worldX);
-    const iy = Math.floor(worldY);
-    const validTypes = getValidBuildingsForCell(state, state.humanPlayerId, ix, iy);
-    if (validTypes.length === 0) {
-      this.close();
-      return false;
-    }
+    const ix = Math.max(0, Math.min(state.width - 1, Math.floor(worldX)));
+    const iy = Math.max(0, Math.min(state.height - 1, Math.floor(worldY)));
 
     this.openWorldX = ix;
     this.openWorldY = iy;
-    const pad = 178;
-    this.centerScreenX = Math.max(pad, Math.min(window.innerWidth - pad, screenX));
-    this.centerScreenY = Math.max(pad + 36, Math.min(window.innerHeight - pad, screenY));
+    const padX = 248;
+    const padY = 204;
+    this.centerScreenX = Math.max(padX, Math.min(window.innerWidth - padX, screenX));
+    this.centerScreenY = Math.max(padY + 28, Math.min(window.innerHeight - padY, screenY));
     this.lastStructureKey = '';
 
     this.menuEl.style.left = `${this.centerScreenX}px`;
@@ -470,25 +466,24 @@ export class TerrainBuildMenuController {
     const ix = this.openWorldX;
     const iy = this.openWorldY;
     const validTypes = getValidBuildingsForCell(state, state.humanPlayerId, ix, iy);
-    if (validTypes.length === 0) {
-      this.close();
-      return;
-    }
 
     for (const ref of this.batchButtons) {
       ref.button.classList.toggle('active', ref.batch === batchSize);
     }
 
     const terrainVal = state.terrain[iy * state.width + ix];
+    const cellOwner = state.owners[iy * state.width + ix];
     const coastal = isCoastalLandCell(state.terrain, state.width, state.height, ix, iy, 2);
     const terrainText =
-      terrainVal === TerrainType.MOUNTAINS
-        ? coastal
-          ? 'Hory · Pobřeží'
-          : 'Hory'
-        : coastal
-          ? 'Rovina · Pobřeží'
-          : 'Rovina';
+      terrainVal === TerrainType.WATER
+        ? 'Voda'
+        : terrainVal === TerrainType.MOUNTAINS
+          ? coastal
+            ? 'Hory · Pobřeží'
+            : 'Hory'
+          : coastal
+            ? 'Rovina · Pobřeží'
+            : 'Rovina';
     this.terrainLabelEl.textContent = `${terrainText} [${ix},${iy}]`;
 
     let zoneText = '';
@@ -499,11 +494,19 @@ export class TerrainBuildMenuController {
         break;
       }
     }
+    if (validTypes.length === 0) {
+      zoneText =
+        terrainVal === TerrainType.WATER
+          ? 'Voda — nelze stavět'
+          : cellOwner !== state.humanPlayerId
+            ? 'Mimo vlastní území'
+            : 'Zde nelze stavět';
+    }
     this.zoneLabelEl.classList.toggle('hidden', zoneText.length === 0);
     this.zoneLabelEl.textContent = zoneText;
 
     const human = state.players.find((p) => p.id === state.humanPlayerId);
-    const key = `${ix}|${iy}|${batchSize}|${state.stateVersion}|${Math.floor(human?.money ?? 0)}|${Math.floor(human?.buildingMaterial ?? 0)}|${Math.floor(human?.industry ?? 0)}`;
+    const key = `${ix}|${iy}|${batchSize}|${validTypes.length}|${state.stateVersion}|${Math.floor(human?.money ?? 0)}|${Math.floor(human?.buildingMaterial ?? 0)}|${Math.floor(human?.industry ?? 0)}`;
     if (key === this.lastStructureKey) {
       return;
     }
@@ -515,13 +518,18 @@ export class TerrainBuildMenuController {
     }
 
     this.itemsLayerEl.innerHTML = '';
-    const radiusPx = 122;
+    if (validTypes.length === 0) {
+      return;
+    }
+
+    const radiusX = 188;
+    const radiusY = 152;
     const total = validTypes.length;
 
     validTypes.forEach((bType, idx) => {
       const angle = -Math.PI / 2 + (idx / total) * Math.PI * 2;
-      const offsetX = Math.round(Math.cos(angle) * radiusPx);
-      const offsetY = Math.round(Math.sin(angle) * radiusPx);
+      const offsetX = Math.round(Math.cos(angle) * radiusX);
+      const offsetY = Math.round(Math.sin(angle) * radiusY);
 
       const spec = BUILDING_SPECS[bType];
       const check = validateBuildingPlacement(state, human, bType, ix, iy, batchSize);

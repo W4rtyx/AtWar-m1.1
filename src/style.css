@@ -583,6 +583,14 @@ body {
   gap: 8px;
 }
 
+.hud-bottom-right-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 380px;
+}
+
 .hud-build-bar {
   padding: 6px 10px;
   display: flex;
@@ -1166,13 +1174,13 @@ body {
 
 .hud-radial-ring {
   position: absolute;
-  left: -122px;
-  top: -122px;
-  width: 244px;
-  height: 244px;
+  left: -188px;
+  top: -152px;
+  width: 376px;
+  height: 304px;
   border-radius: 50%;
   border: 1px dashed rgba(126, 166, 194, 0.34);
-  background: radial-gradient(circle, rgba(16, 22, 28, 0.42) 45%, rgba(16, 22, 28, 0.08) 100%);
+  background: radial-gradient(ellipse, rgba(16, 22, 28, 0.44) 44%, rgba(16, 22, 28, 0.08) 100%);
   pointer-events: none;
 }
 
@@ -1224,8 +1232,8 @@ body {
 .hud-radial-item {
   position: absolute;
   transform: translate(-50%, -50%);
-  min-width: 84px;
-  max-width: 102px;
+  min-width: 82px;
+  max-width: 94px;
   padding: 4px 6px;
   display: flex;
   flex-direction: column;
@@ -1305,22 +1313,25 @@ body {
 
 .hud-unit-panel {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 14px;
-  padding: 6px 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  padding: 8px 10px;
+  width: 100%;
 }
 
 .hud-unit-recruit-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
 .hud-unit-recruit-btns {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .hud-unit-recruit-btn {
@@ -1332,7 +1343,7 @@ body {
 }
 
 .hud-unit-recruit-btn.no-producer {
-  opacity: 0.4;
+  opacity: 0.42;
 }
 
 .hud-unit-rec-lbl {
@@ -1348,33 +1359,44 @@ body {
 
 .hud-unit-sel-box {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  padding-left: 10px;
-  border-left: 1px solid #33404e;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid #2d3a47;
 }
 
-.hud-unit-sel-info {
+.hud-unit-sel-header {
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 6px;
 }
 
 .hud-unit-sel-title {
-  font-size: 11.5px;
-  color: #f0dca0;
+  font-size: 12px;
+  color: #f4df9a;
 }
 
-.hud-unit-sel-meta {
-  font-size: 11px;
-  color: #b4c0cc;
-  font-variant-numeric: tabular-nums;
+.hud-unit-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.hud-unit-badge-order {
+  padding: 1px 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  border-radius: 3px;
+  background: #1a3749;
+  border: 1px solid #4e90b8;
+  color: #bce5fa;
 }
 
 .hud-unit-badge-encircled {
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
   border-radius: 3px;
   background: #5c1e1a;
@@ -1384,7 +1406,7 @@ body {
 
 .hud-unit-badge-drop {
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
   border-radius: 3px;
   background: #1d4455;
@@ -1392,20 +1414,97 @@ body {
   color: #cceefa;
 }
 
+.hud-unit-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.hud-unit-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 7px;
+  border-radius: 4px;
+  background: rgba(14, 20, 26, 0.72);
+  border: 1px solid #2b3744;
+}
+
+.hud-unit-metric-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.hud-unit-metric-lbl {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #93a3b2;
+}
+
+.hud-unit-metric-val {
+  font-size: 11px;
+  color: #e8e4d8;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-unit-meter {
+  height: 4px;
+  border-radius: 2px;
+  background: #161e26;
+  overflow: hidden;
+}
+
+.hud-unit-meter-fill {
+  height: 100%;
+  width: 100%;
+  transition: width 0.12s ease-out;
+}
+
+.hud-unit-meter-fill.is-hp {
+  background: #64c887;
+}
+
+.hud-unit-meter-fill.is-morale {
+  background: #6dc2ea;
+}
+
+.hud-unit-meter-fill.warn {
+  background: #dfa94e;
+}
+
+.hud-unit-meter-fill.crit {
+  background: #de6358;
+}
+
+.hud-unit-metric-hint {
+  font-size: 9.5px;
+  line-height: 1.25;
+  color: #95a4b2;
+}
+
 .hud-unit-sel-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
 }
 
 .hud-unit-act-btn {
   padding: 3px 7px;
-  font-size: 11px;
+  font-size: 10.5px;
 }
 
 .hud-btn-drop {
   border-color: #4f8ca8;
   color: #bde6f8;
+}
+
+.hud-unit-order-hint {
+  font-size: 9.5px;
+  color: #8ba8be;
 }
 
 .hud-defeat-overlay {

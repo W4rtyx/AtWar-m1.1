@@ -570,10 +570,10 @@ export function setUnitsStance(
       if (stance === 'LOCK') {
         unit.attachedOrderId = null;
         unit.attachedOrderKind = null;
-        if (!unit.manualOrder) {
-          unit.targetX = null;
-          unit.targetY = null;
-        }
+        unit.targetX = null;
+        unit.targetY = null;
+        unit.manualOrder = false;
+        unit.mergeTargetUnitId = null;
       }
       updated++;
     }
@@ -739,6 +739,37 @@ export function executeParadrop(
   return true;
 }
 
+function getFrontPushPointForUnit(
+  state: GameState,
+  order: FrontPushOrder,
+  unit: Unit,
+): Point | null {
+  if (order.focalPoint) {
+    return { x: order.focalPoint.x, y: order.focalPoint.y };
+  }
+  if (order.sweepAllBorders && order.frontierCells.length > 0) {
+    let bestPt: Point | null = null;
+    let bestDistSq = Infinity;
+    const sampleStep = Math.max(1, Math.floor(order.frontierCells.length / 48));
+    for (let i = 0; i < order.frontierCells.length; i += sampleStep) {
+      const idx = order.frontierCells[i];
+      const cx = (idx % state.width) + 0.5;
+      const cy = (idx - (idx % state.width)) / state.width + 0.5;
+      const dx = cx - unit.x;
+      const dy = cy - unit.y;
+      const dSq = dx * dx + dy * dy;
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestPt = { x: cx, y: cy };
+      }
+    }
+    if (bestPt) {
+      return bestPt;
+    }
+  }
+  return getFrontPushCenterPoint(state, order);
+}
+
 function findOrderFrontForAttachment(
   state: GameState,
   unit: Unit,
@@ -762,7 +793,8 @@ function findOrderFrontForAttachment(
 
   for (const order of state.frontPushOrders) {
     if (order.playerId !== unit.ownerId) continue;
-    const frontPt = getFrontPushCenterPoint(state, order);
+    const frontPt = getFrontPushPointForUnit(state, order, unit);
+    if (!frontPt) continue;
     const dist = Math.hypot(frontPt.x - unit.x, frontPt.y - unit.y);
     if (dist <= bestDist) {
       bestDist = dist;
@@ -787,7 +819,7 @@ function getAttachedOrderFrontPoint(state: GameState, unit: Unit): Point | null 
     const order = state.frontPushOrders.find(
       (o) => o.id === unit.attachedOrderId && o.playerId === unit.ownerId,
     );
-    return order ? getFrontPushCenterPoint(state, order) : null;
+    return order ? getFrontPushPointForUnit(state, order, unit) : null;
   }
   return null;
 }
@@ -801,6 +833,46 @@ function isUnitNearRepairBase(state: GameState, unit: Unit): boolean {
     }
   }
   return false;
+}
+
+function isPassableUnitCell(
+  state: GameState,
+  playerId: number,
+  ix: number,
+  iy: number,
+): boolean {
+  if (ix < 0 || ix >= state.width || iy < 0 || iy >= state.height) {
+    return false;
+  }
+  const idx = iy * state.width + ix;
+  if (state.terrain[idx] === TerrainType.WATER) {
+    return false;
+  }
+  const cellOwner = state.owners[idx];
+  if (
+    cellOwner >= 0 &&
+    cellOwner !== playerId &&
+    getUnitRelation(state, playerId, cellOwner) === 'NEUTRAL'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function findEnemyUnitInOperationRadius(state: GameState, unit: Unit): Unit | null {
+  let best: Unit | null = null;
+  let bestDist = unit.operationRadius;
+  for (const candidate of state.units) {
+    if (candidate.count <= 0 || candidate.hp <= 0) continue;
+    if (candidate.ownerId === unit.ownerId) continue;
+    if (getUnitRelation(state, unit.ownerId, candidate.ownerId) !== 'WAR') continue;
+    const dist = Math.hypot(candidate.x - unit.x, candidate.y - unit.y);
+    if (dist > bestDist) continue;
+    if (!isUnitVisibleToPlayer(state, unit.ownerId, candidate)) continue;
+    bestDist = dist;
+    best = candidate;
+  }
+  return best;
 }
 
 export function stepUnitsMovementAndSupply(state: GameState): void {
@@ -850,11 +922,19 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       unit.morale = Math.min(100, unit.morale + 6.0 * TICK_DT * Math.max(0.25, ownerSupply));
     }
 
-    // RANGE auto-attach to friendly offensive arrows inside operational radius
+    // RANGE auto-attach ONLY when friendly offensive order or WAR enemy is inside operationRadius
     if (unit.stance === 'RANGE' && !unit.manualOrder && !unit.isEncircled) {
       let frontPt = getAttachedOrderFrontPoint(state, unit);
+      if (
+        unit.attachedOrderId !== null &&
+        frontPt !== null &&
+        Math.hypot(frontPt.x - unit.x, frontPt.y - unit.y) > unit.operationRadius * 1.35
+      ) {
+        // Order moved well past operational radius — detach cleanly and hold ground
+        frontPt = null;
+      }
+
       if (unit.attachedOrderId !== null && frontPt === null) {
-        // Order ended — hold newly captured position
         unit.attachedOrderId = null;
         unit.attachedOrderKind = null;
         unit.targetX = null;
@@ -885,10 +965,25 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           unit.targetX = frontPt.x;
           unit.targetY = frontPt.y;
         }
+      } else if (unit.mergeTargetUnitId === null) {
+        const enemyInRange =
+          unit.type !== 'ARTILLERY' ? findEnemyUnitInOperationRadius(state, unit) : null;
+        if (enemyInRange) {
+          unit.targetX = enemyInRange.x;
+          unit.targetY = enemyInRange.y;
+        } else {
+          // Stay firmly stationary when no own attack arrow or enemy is within operationRadius
+          unit.targetX = null;
+          unit.targetY = null;
+        }
       }
     } else if (unit.stance === 'LOCK') {
       unit.attachedOrderId = null;
       unit.attachedOrderKind = null;
+      if (!unit.manualOrder && unit.mergeTargetUnitId === null) {
+        unit.targetX = null;
+        unit.targetY = null;
+      }
     }
 
     if (unit.mergeTargetUnitId !== null) {
@@ -901,7 +996,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       }
     }
 
-    // Movement integration
+    // Movement integration with coastline/neutral obstacle steering
     if (unit.targetX !== null && unit.targetY !== null) {
       const dx = unit.targetX - unit.x;
       const dy = unit.targetY - unit.y;
@@ -919,56 +1014,87 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
         const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
         let stepDist = Math.min(dist, baseSpeed * supplyMul * moraleMul * TICK_DT);
 
-        const ux = dx / dist;
-        const uy = dy / dist;
-        const probeDist = Math.max(stepDist, 0.8);
-        const probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + ux * probeDist)));
-        const probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + uy * probeDist)));
-        const probeIdx = probeY * width + probeX;
-        const probeTerrain = terrain[probeIdx];
-        const probeOwner = owners[probeIdx];
+        const baseUx = dx / dist;
+        const baseUy = dy / dist;
+        let steerX = baseUx;
+        let steerY = baseUy;
+        let canStep = true;
 
-        if (probeTerrain === TerrainType.WATER) {
-          stepDist = 0;
-        } else if (
-          probeOwner >= 0 &&
-          probeOwner !== unit.ownerId &&
-          getUnitRelation(state, unit.ownerId, probeOwner) === 'NEUTRAL'
-        ) {
-          stepDist = 0;
-        } else if (
-          probeOwner >= 0 &&
-          probeOwner !== unit.ownerId &&
-          getUnitRelation(state, unit.ownerId, probeOwner) === 'WAR'
-        ) {
-          const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY);
-          const armorPenalty =
-            unit.type === 'TANK' ? 1 / (1 + def.antiArmorFactor * 1.15) : def.advanceSpeedMultiplier;
-          const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
-
-          if (unit.isEncircled) {
-            // Trapped in pocket: cannot glide freely through enemy tiles without fighting out
-            stepDist *= 0.08 * defenseMul;
-            unit.breakoutAccum += stepDist;
-            if (unit.breakoutAccum >= 1.2) {
-              unit.breakoutAccum -= 1.2;
-              unit.hp = Math.max(1, unit.hp - 1.2 * def.attackerCostMultiplier);
+        const probeDist = Math.max(stepDist, 0.9);
+        const directProbeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + baseUx * probeDist)));
+        const directProbeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + baseUy * probeDist)));
+        if (!isPassableUnitCell(state, unit.ownerId, directProbeX, directProbeY)) {
+          canStep = false;
+          const steerAngles = [0.42, -0.42, 0.92, -0.92, 1.34, -1.34];
+          for (const rad of steerAngles) {
+            const c = Math.cos(rad);
+            const s = Math.sin(rad);
+            const candUx = baseUx * c - baseUy * s;
+            const candUy = baseUx * s + baseUy * c;
+            const p1x = Math.max(0, Math.min(width - 1, Math.floor(unit.x + candUx * probeDist)));
+            const p1y = Math.max(0, Math.min(height - 1, Math.floor(unit.y + candUy * probeDist)));
+            const farDist = Math.max(2.2, probeDist * 2.2);
+            const p2x = Math.max(0, Math.min(width - 1, Math.floor(unit.x + candUx * farDist)));
+            const p2y = Math.max(0, Math.min(height - 1, Math.floor(unit.y + candUy * farDist)));
+            if (
+              isPassableUnitCell(state, unit.ownerId, p1x, p1y) &&
+              isPassableUnitCell(state, unit.ownerId, p2x, p2y)
+            ) {
+              steerX = candUx;
+              steerY = candUy;
+              canStep = true;
+              break;
             }
-          } else {
-            stepDist *= 0.42 * defenseMul;
           }
-        } else if (unit.isEncircled && (probeOwner === unit.ownerId || probeOwner === WILDERNESS_OWNER)) {
-          // Stepping directly back onto adjacent friendly/open land breaks out cleanly
-          stepDist *= 0.48;
+        }
+
+        if (!canStep) {
+          stepDist = 0;
+        } else {
+          const probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + steerX * probeDist)));
+          const probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + steerY * probeDist)));
+          const probeIdx = probeY * width + probeX;
+          const probeOwner = owners[probeIdx];
+
+          if (
+            probeOwner >= 0 &&
+            probeOwner !== unit.ownerId &&
+            getUnitRelation(state, unit.ownerId, probeOwner) === 'WAR'
+          ) {
+            const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY);
+            const armorPenalty =
+              unit.type === 'TANK'
+                ? 1 / (1 + def.antiArmorFactor * 1.15)
+                : def.advanceSpeedMultiplier;
+            const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
+
+            if (unit.isEncircled) {
+              // Trapped in pocket: cannot glide freely through enemy tiles without fighting out
+              stepDist *= 0.08 * defenseMul;
+              unit.breakoutAccum += stepDist;
+              if (unit.breakoutAccum >= 1.2) {
+                unit.breakoutAccum -= 1.2;
+                unit.hp = Math.max(1, unit.hp - 1.2 * def.attackerCostMultiplier);
+              }
+            } else {
+              stepDist *= 0.42 * defenseMul;
+            }
+          } else if (
+            unit.isEncircled &&
+            (probeOwner === unit.ownerId || probeOwner === WILDERNESS_OWNER)
+          ) {
+            // Stepping directly back onto adjacent friendly/open land breaks out cleanly
+            stepDist *= 0.48;
+          }
         }
 
         if (stepDist > 0) {
-          const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + ux * stepDist));
-          const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + uy * stepDist));
+          const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + steerX * stepDist));
+          const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + steerY * stepDist));
           const nIx = Math.floor(nx);
           const nIy = Math.floor(ny);
           const nIdx = nIy * width + nIx;
-          if (terrain[nIdx] !== TerrainType.WATER) {
+          if (isPassableUnitCell(state, unit.ownerId, nIx, nIy)) {
             unit.x = nx;
             unit.y = ny;
 

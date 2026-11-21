@@ -1,3 +1,4 @@
+import { placeBuilding, validateBuildingPlacement } from './buildings';
 import { createInitialPlayerState, syncPlayerActiveManpower } from './economy';
 import {
   MAX_ORDER_TICKS,
@@ -12,6 +13,8 @@ import {
 import { nextRandom } from './mapGenerator';
 import {
   GameState,
+  MIN_BUILDING_SPACING,
+  PlayerState,
   Point,
   TerrainType,
   WILDERNESS_OWNER,
@@ -107,6 +110,67 @@ export function spawnBots(state: GameState, count: number): void {
     }
 
     if (bestX === -1) {
+      // Relaxed fallback pass so all BOT_COUNT bots find a valid start even on crowded boards
+      let fallbackScore = -Infinity;
+      const relaxedMinDist = Math.max(20, startRadius * 2.1);
+      const relaxedMinDistSq = relaxedMinDist * relaxedMinDist;
+      const margin = startRadius + 2;
+
+      for (let y = margin; y < height - margin; y += 5) {
+        for (let x = margin; x < width - margin; x += 5) {
+          const idx = y * width + x;
+          if (terrain[idx] === TerrainType.WATER || owners[idx] !== WILDERNESS_OWNER) {
+            continue;
+          }
+
+          let minCapitalDistSq = Infinity;
+          let tooClose = false;
+          for (const existing of state.players.values()) {
+            if (existing.capitalX < 0 || existing.capitalY < 0) continue;
+            const dx = x - existing.capitalX;
+            const dy = y - existing.capitalY;
+            const dSq = dx * dx + dy * dy;
+            if (dSq < relaxedMinDistSq) {
+              tooClose = true;
+              break;
+            }
+            if (dSq < minCapitalDistSq) {
+              minCapitalDistSq = dSq;
+            }
+          }
+          if (tooClose) continue;
+
+          let freeLand = 0;
+          const rCheck = Math.max(6, startRadius - 2);
+          const rCheckSq = rCheck * rCheck;
+          for (let dy = -rCheck; dy <= rCheck; dy += 2) {
+            const cy = y + dy;
+            if (cy < 0 || cy >= height) continue;
+            for (let dx = -rCheck; dx <= rCheck; dx += 2) {
+              if (dx * dx + dy * dy > rCheckSq) continue;
+              const cx = x + dx;
+              if (cx < 0 || cx >= width) continue;
+              const cIdx = cy * width + cx;
+              if (terrain[cIdx] !== TerrainType.WATER && owners[cIdx] === WILDERNESS_OWNER) {
+                freeLand++;
+              }
+            }
+          }
+          if (freeLand < 12) continue;
+
+          const score =
+            freeLand * 4 +
+            (minCapitalDistSq === Infinity ? 120 : Math.min(minCapitalDistSq, 4500));
+          if (score > fallbackScore) {
+            fallbackScore = score;
+            bestX = x;
+            bestY = y;
+          }
+        }
+      }
+    }
+
+    if (bestX === -1) {
       continue;
     }
 
@@ -152,6 +216,96 @@ function hasActiveWarOpponent(state: GameState, botId: number): boolean {
   return false;
 }
 
+function findBotPowerPlantSpot(state: GameState, player: PlayerState): Point | null {
+  // 1. Check ENERGY resource zones overlapping owned territory near capital first
+  let bestEnergyZonePt: Point | null = null;
+  let bestZoneDistSq = Infinity;
+  for (const zone of state.publicResourceZones) {
+    if (zone.type !== 'BASIC_ENERGY') continue;
+    const minX = Math.max(1, Math.floor(zone.centerX - zone.radius));
+    const maxX = Math.min(state.width - 2, Math.ceil(zone.centerX + zone.radius));
+    const minY = Math.max(1, Math.floor(zone.centerY - zone.radius));
+    const maxY = Math.min(state.height - 2, Math.ceil(zone.centerY + zone.radius));
+    for (let y = minY; y <= maxY; y += 2) {
+      for (let x = minX; x <= maxX; x += 2) {
+        const check = validateBuildingPlacement(state, player, 'POWER_PLANT', x, y, 1);
+        if (!check.valid) continue;
+        const dx = x - zone.centerX;
+        const dy = y - zone.centerY;
+        const dSq = dx * dx + dy * dy;
+        if (dSq < bestZoneDistSq) {
+          bestZoneDistSq = dSq;
+          bestEnergyZonePt = { x, y };
+        }
+      }
+    }
+  }
+  if (bestEnergyZonePt) {
+    return bestEnergyZonePt;
+  }
+
+  // 2. Stack onto an existing completed or queued POWER_PLANT if player already has one
+  for (const b of state.buildings) {
+    if (b.ownerId !== player.id || b.type !== 'POWER_PLANT') continue;
+    const check = validateBuildingPlacement(state, player, 'POWER_PLANT', b.x, b.y, 1);
+    if (check.valid) {
+      return { x: b.x, y: b.y };
+    }
+  }
+
+  // 3. Concentric rings around bot capital
+  const capX = player.capitalX >= 0 ? player.capitalX : Math.floor(state.width * 0.5);
+  const capY = player.capitalY >= 0 ? player.capitalY : Math.floor(state.height * 0.5);
+  for (let r = MIN_BUILDING_SPACING; r <= 32; r += 3) {
+    for (let i = 0; i < 16; i++) {
+      const ang = (i / 16) * Math.PI * 2;
+      const x = Math.round(capX + Math.cos(ang) * r);
+      const y = Math.round(capY + Math.sin(ang) * r);
+      if (x < 1 || x >= state.width - 1 || y < 1 || y >= state.height - 1) continue;
+      const check = validateBuildingPlacement(state, player, 'POWER_PLANT', x, y, 1);
+      if (check.valid) {
+        return { x, y };
+      }
+    }
+  }
+
+  // 4. Fallback map scan across all owned cells
+  for (let y = 2; y < state.height - 2; y += 3) {
+    for (let x = 2; x < state.width - 2; x += 3) {
+      if (state.owners[y * state.width + x] !== player.id) continue;
+      const check = validateBuildingPlacement(state, player, 'POWER_PLANT', x, y, 1);
+      if (check.valid) {
+        return { x, y };
+      }
+    }
+  }
+
+  return null;
+}
+
+function ensureBotPowerGrid(state: GameState, player: PlayerState): void {
+  const hasQueuedPlant = state.buildings.some(
+    (b) => b.ownerId === player.id && b.type === 'POWER_PLANT' && b.underConstructionCount > 0,
+  );
+  if (hasQueuedPlant) {
+    return;
+  }
+
+  const needsPower =
+    !player.freePowerPlantUsed ||
+    player.blackoutActive ||
+    player.energyProductionPerSec < player.energyConsumptionPerSec + 1.5;
+  if (!needsPower) {
+    return;
+  }
+
+  const spot = findBotPowerPlantSpot(state, player);
+  if (!spot) {
+    return;
+  }
+  placeBuilding(state, player.id, 'POWER_PLANT', spot.x, spot.y, 1);
+}
+
 export function stepBots(state: GameState): void {
   const { width, height, owners, terrain } = state;
   const rngBox = { rngState: state.rngState };
@@ -166,6 +320,8 @@ export function stepBots(state: GameState): void {
     }
     player.nextBotDecisionTick =
       state.tick + 14 + Math.floor(nextRandom(rngBox) * 6);
+
+    ensureBotPowerGrid(state, player);
 
     // One well-coordinated attack at a time to avoid scattered manpower waste
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
