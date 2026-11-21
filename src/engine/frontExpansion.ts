@@ -1,3 +1,4 @@
+import { evaluateFrontUnitSupport } from './combat';
 import { evaluateCellDefense } from './defenses';
 import { syncPlayerActiveManpower } from './economy';
 import { getCombatBlackoutMultiplier } from './energyGrid';
@@ -25,7 +26,7 @@ export const MAX_ORDER_TICKS = 110;
 export const MAX_STAGNANT_TICKS = 12;
 
 const WILDERNESS_BASE_COST = 0.62;
-const ENEMY_BORDER_BASE_COST = 3.0;
+const ENEMY_BORDER_BASE_COST = 3.9;
 
 const annexVisited = new Uint8Array(MAP_WIDTH * MAP_HEIGHT);
 const annexQueue = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
@@ -449,10 +450,12 @@ function getProtectedReserveFloor(defender: PlayerState): number {
 
 function applyDefenderAttrition(defender: PlayerState, rawLoss: number): void {
   if (!defender.alive || rawLoss <= 0) return;
-  const minTotalFloor = Math.min(
-    defender.maxManpower,
-    defender.allocatedManpower + getProtectedReserveFloor(defender),
-  );
+  const minTotalFloor = defender.blackoutActive
+    ? Math.min(defender.maxManpower, defender.allocatedManpower)
+    : Math.min(
+        defender.maxManpower,
+        defender.allocatedManpower + getProtectedReserveFloor(defender),
+      );
   if (defender.manpower > minTotalFloor) {
     defender.manpower = Math.max(minTotalFloor, defender.manpower - rawLoss);
     syncPlayerActiveManpower(defender);
@@ -496,15 +499,23 @@ function computeCellCaptureCost(
   const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
 
   const defense = evaluateCellDefense(state.buildings, prevOwner, nx, ny);
+  const support = evaluateFrontUnitSupport(state, attackerId, prevOwner, nx, ny, cellTerrain);
   const defenderBlackoutMul = getCombatBlackoutMultiplier(defender);
   const attackerBlackoutMul = getCombatBlackoutMultiplier(attacker);
+
+  const effectiveFortCostMul =
+    1 + (defense.attackerCostMultiplier - 1) * (1 - support.fortificationSuppression);
+  const effectiveFortSpeedMul =
+    1 - (1 - defense.advanceSpeedMultiplier) * (1 - support.fortificationSuppression);
 
   let effectiveCost =
     ENEMY_BORDER_BASE_COST *
     defenderStrength *
     cohesionFactor *
     terrainFactor *
-    defense.attackerCostMultiplier *
+    effectiveFortCostMul *
+    support.attackerCostMultiplier *
+    support.defenderResistanceCostMultiplier *
     (defenderBlackoutMul / attackerBlackoutMul);
   // Scale defender losses proportionally so low reserves don't spiral permanently to zero
   let defenderLoss =
@@ -519,10 +530,20 @@ function computeCellCaptureCost(
     defenderLoss *= 1.4;
   }
 
+  const advanceSpeedMultiplier = Math.max(
+    0.18,
+    Math.min(
+      2.0,
+      effectiveFortSpeedMul *
+        support.attackerSpeedMultiplier *
+        support.defenderResistanceSpeedMultiplier,
+    ),
+  );
+
   return {
     effectiveCost,
     defenderLoss,
-    advanceSpeedMultiplier: defense.advanceSpeedMultiplier,
+    advanceSpeedMultiplier,
     isForeign: true,
   };
 }
@@ -1100,9 +1121,16 @@ function sweepMicroPocketsForAttacker(
   const total = width * height;
   const seen = total <= sweepSeen.length ? sweepSeen : new Int32Array(total);
 
-  const buildingCells = new Set<number>();
+  const protectedCells = new Set<number>();
   for (const b of state.buildings) {
-    buildingCells.add(b.y * width + b.x);
+    protectedCells.add(b.y * width + b.x);
+  }
+  for (const u of state.units) {
+    if (u.count > 0 && u.hp > 0) {
+      const ux = Math.max(0, Math.min(width - 1, Math.floor(u.x)));
+      const uy = Math.max(0, Math.min(height - 1, Math.floor(u.y)));
+      protectedCells.add(uy * width + ux);
+    }
   }
 
   const candidateSeeds: number[] = [];
@@ -1141,7 +1169,7 @@ function sweepMicroPocketsForAttacker(
 
     for (let head = 0; head < comp.length && valid; head++) {
       const idx = comp[head];
-      if (buildingCells.has(idx)) {
+      if (protectedCells.has(idx)) {
         valid = false;
         break;
       }
@@ -1425,6 +1453,15 @@ export function annexEncircledPockets(state: GameState): boolean {
   visited.fill(0, 0, total);
   let anyAnnexed = false;
 
+  const occupiedUnitCells = new Set<number>();
+  for (const u of state.units) {
+    if (u.count > 0 && u.hp > 0) {
+      const ux = Math.max(0, Math.min(width - 1, Math.floor(u.x)));
+      const uy = Math.max(0, Math.min(height - 1, Math.floor(u.y)));
+      occupiedUnitCells.add(uy * width + ux);
+    }
+  }
+
   for (let startIdx = 0; startIdx < total; startIdx++) {
     if (visited[startIdx] || terrain[startIdx] === TerrainType.WATER) {
       continue;
@@ -1436,7 +1473,7 @@ export function annexEncircledPockets(state: GameState): boolean {
     queue[tail++] = startIdx;
     visited[startIdx] = 1;
 
-    let disqualified = false;
+    let disqualified = occupiedUnitCells.has(startIdx);
     let singleEncloser: number | null = null;
 
     while (head < tail) {
@@ -1444,7 +1481,7 @@ export function annexEncircledPockets(state: GameState): boolean {
       const x = idx % width;
       const y = (idx - x) / width;
 
-      if (x === 0 || x === maxX || y === 0 || y === maxY) {
+      if (x === 0 || x === maxX || y === 0 || y === maxY || occupiedUnitCells.has(idx)) {
         disqualified = true;
       }
 

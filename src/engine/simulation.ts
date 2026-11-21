@@ -7,11 +7,13 @@ import {
   stepBuildingConstruction,
   syncBuildingOwnership,
 } from './buildings';
+import { stepUnitsCombat } from './combat';
 import {
   OPTIMUM_FILL_RATIO,
   areNeighbors,
   computeTradePairIncomePerSec,
   createInitialPlayerState,
+  eliminatePlayer,
   recomputeNeighborPairs,
   syncTerritoriesCapitalsAndNeighbors,
   updateAllPlayersEconomy,
@@ -48,11 +50,26 @@ import {
   Point,
   PublicBuildingInfo,
   PublicPlayerInfo,
+  PublicUnitInfo,
   TICK_DT,
   TerrainType,
   WILDERNESS_OWNER,
   getRelationKey,
 } from './types';
+import {
+  executeParadrop,
+  findHumanUnitsInPolygon,
+  findHumanUnitsInRect,
+  isUnitVisibleToPlayer,
+  issueUnitMoveOrder,
+  mergeUnitStacks,
+  queueUnitProduction,
+  quickQueueUnitProduction,
+  setUnitsStance,
+  stepUnitProduction,
+  stepUnitsMovementAndSupply,
+  toPublicUnitInfo,
+} from './units';
 
 const HUMAN_PLAYER_ID = 1;
 const HUMAN_START_RADIUS = 14;
@@ -105,6 +122,8 @@ function createBaseState(seed: number): GameState {
     neighborPairs: new Set<string>(),
     buildings: [],
     nextBuildingId: 1,
+    units: [],
+    nextUnitId: 1,
     lastTerritorySyncVersion: -1,
     attackOrders: [],
     frontPushOrders: [],
@@ -179,7 +198,11 @@ function recalculateTerritoryAndCapitals(state: GameState): void {
 
   for (const player of players.values()) {
     if (player.territoryCells === 0) {
-      player.alive = false;
+      if (!player.isEliminated) {
+        eliminatePlayer(state, player.id, 'TERRITORY_LOST', null);
+      } else {
+        player.alive = false;
+      }
       continue;
     }
 
@@ -1029,6 +1052,9 @@ function handleTick(state: GameState): void {
   state.tick++;
   const versionBefore = state.stateVersion;
   stepBuildingConstruction(state);
+  stepUnitProduction(state);
+  stepUnitsMovementAndSupply(state);
+  stepUnitsCombat(state);
   stepFrontExpansion(state);
   if (syncBuildingOwnership(state)) {
     state.stateVersion++;
@@ -1262,6 +1288,8 @@ export function dispatchAction(state: GameState, action: Action): void {
       state.neighborPairs.clear();
       state.buildings = [];
       state.nextBuildingId = 1;
+      state.units = [];
+      state.nextUnitId = 1;
       state.lastTerritorySyncVersion = -1;
       state.attackOrders = [];
       state.frontPushOrders = [];
@@ -1282,6 +1310,47 @@ export function dispatchAction(state: GameState, action: Action): void {
     }
     case 'TICK':
       handleTick(state);
+      break;
+    case 'PRODUCE_UNIT':
+      queueUnitProduction(
+        state,
+        action.playerId,
+        action.buildingId,
+        action.unitType,
+        action.count ?? 1,
+      );
+      break;
+    case 'QUICK_PRODUCE_UNIT':
+      quickQueueUnitProduction(
+        state,
+        action.playerId,
+        action.unitType,
+        action.count ?? 1,
+      );
+      break;
+    case 'MOVE_UNITS':
+      issueUnitMoveOrder(
+        state,
+        action.playerId,
+        action.unitIds,
+        action.targetX,
+        action.targetY,
+      );
+      break;
+    case 'SET_UNITS_STANCE':
+      setUnitsStance(state, action.playerId, action.unitIds, action.stance);
+      break;
+    case 'MERGE_UNITS':
+      mergeUnitStacks(state, action.playerId, action.unitIds);
+      break;
+    case 'PARADROP_UNIT':
+      executeParadrop(
+        state,
+        action.playerId,
+        action.unitId,
+        action.targetX,
+        action.targetY,
+      );
       break;
   }
 }
@@ -1309,6 +1378,12 @@ function toPublicBuilding(b: Building): PublicBuildingInfo {
     allocatedManpower: b.allocatedManpower,
     currentEnergyUse: b.currentEnergyUse,
     currentEnergyProd: b.currentEnergyProd,
+    unitQueue: b.unitQueue.map((j) => ({
+      unitType: j.unitType,
+      ticksRemaining: j.ticksRemaining,
+      ticksTotal: j.ticksTotal,
+    })),
+    paradropCooldownTicks: b.paradropCooldownTicks,
   };
 }
 
@@ -1342,6 +1417,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         capitalY: p.capitalY,
         territoryCells: p.territoryCells,
         alive: p.alive,
+        isEliminated: p.isEliminated,
+        eliminationReason: p.eliminationReason,
         betrayalDebuffTicks: p.betrayalDebuffTicks,
         relationToHuman,
         isNeighborOfHuman: false,
@@ -1389,6 +1466,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         capitalY: p.capitalY,
         territoryCells: p.territoryCells,
         alive: p.alive,
+        isEliminated: p.isEliminated,
+        eliminationReason: p.eliminationReason,
         betrayalDebuffTicks: p.betrayalDebuffTicks,
         relationToHuman,
         isNeighborOfHuman,
@@ -1412,6 +1491,13 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     }
   }
 
+  const units: PublicUnitInfo[] = [];
+  for (const u of state.units) {
+    if (isUnitVisibleToPlayer(state, state.humanPlayerId, u)) {
+      units.push(toPublicUnitInfo(u, state.humanPlayerId));
+    }
+  }
+
   return {
     tick: state.tick,
     phase: state.phase,
@@ -1426,6 +1512,7 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     relations: relationsObj,
     tradeAgreements: Array.from(state.tradeAgreements),
     buildings,
+    units,
     attackOrders: state.attackOrders.map((o) => ({
       ...o,
       origin: { ...o.origin },
@@ -1486,6 +1573,8 @@ export interface EngineController {
   isPlayingAndUnpaused(): boolean;
   findHumanBorderCellsFromLasso(points: ReadonlyArray<Point>): number[];
   pruneHumanBorderCells(cells: ReadonlyArray<number>, originalCount: number): number[];
+  findHumanUnitsInLasso(points: ReadonlyArray<Point>): number[];
+  findHumanUnitsInRect(x0: number, y0: number, x1: number, y1: number): number[];
 }
 
 export function createEngineController(seed?: number): EngineController {
@@ -1553,6 +1642,12 @@ export function createEngineController(seed?: number): EngineController {
         return [];
       }
       return surviving;
+    },
+    findHumanUnitsInLasso(points: ReadonlyArray<Point>): number[] {
+      return findHumanUnitsInPolygon(state, points);
+    },
+    findHumanUnitsInRect(x0: number, y0: number, x1: number, y1: number): number[] {
+      return findHumanUnitsInRect(state, x0, y0, x1, y1);
     },
   };
 }

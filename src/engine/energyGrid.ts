@@ -100,3 +100,26 @@ export function getCombatBlackoutMultiplier(player: PlayerState | undefined): nu
     1 - BLACKOUT_COMBAT_PENALTY * player.blackoutSeverity,
   );
 }
+
+/**
+ * Computes dynamic building operating energy consumption scaled by actual occupancyPct (0..200%):
+ * - 0% occupancy => 0 energy consumed
+ * - 0..100% => linear scaling (0..1.0x)
+ * - 100..200% => overload curve (1.0x..1.5x at 80% conversion efficiency)
+ */
+export function computeDynamicBuildingEnergyConsumption(
+  baseEnergyConsumption: number,
+  occupancyPct: number,
+  stackUnits: number,
+): number {
+  if (stackUnits <= 0 || baseEnergyConsumption <= 0 || occupancyPct <= 0) {
+    return 0;
+  }
+  const clamped = Math.max(0, Math.min(200, occupancyPct));
+  const occ = clamped / 100;
+  const mult =
+    occ <= 1
+      ? occ
+      : (1 + 0.2 * (occ - 1)) / Math.max(0.5, 1 - 0.2 * (occ - 1));
+  return baseEnergyConsumption * mult * stackUnits;
+}

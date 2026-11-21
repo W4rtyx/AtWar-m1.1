@@ -12,8 +12,19 @@ export const DEMOLISH_REFUND_RATIO = 0.5;
 export const BUILDING_COST_SCALING_PER_UNIT = 0.14;
 export const FINISH_OFF_MAX_LAND_RATIO = 0.025;
 export const FINISH_OFF_MAX_CELLS = 140;
+export const MAX_UNIT_STACK = 50;
 
 export type BuildBatchSize = 1 | 5 | 10 | 'MAX';
+export type UnitType = 'INFANTRY' | 'TANK' | 'ARTILLERY' | 'PARATROOPERS';
+export type UnitStance = 'LOCK' | 'RANGE';
+export type EliminationReason = 'TERRITORY_LOST' | 'MANPOWER_DEPLETED';
+
+export const ALL_UNIT_TYPES: ReadonlyArray<UnitType> = [
+  'INFANTRY',
+  'TANK',
+  'ARTILLERY',
+  'PARATROOPERS',
+];
 
 export enum TerrainType {
   WATER = 0,
@@ -96,6 +107,95 @@ export interface BuildingSpec {
   readonly resourceZoneType: ResourceType | null;
 }
 
+export interface UnitCost {
+  readonly money: number;
+  readonly buildingMaterial: number;
+  readonly industry: number;
+  readonly manpower: number;
+}
+
+export interface UnitSpec {
+  readonly type: UnitType;
+  readonly nameCs: string;
+  readonly shortCode: string;
+  readonly descriptionCs: string;
+  readonly producerBuilding: 'BARRACKS' | 'FACTORY' | 'AIRFIELD';
+  readonly cost: UnitCost;
+  readonly productionTicks: number;
+  readonly speedPlains: number;
+  readonly speedMountains: number;
+  readonly hpPerUnit: number;
+  readonly attack: number;
+  readonly defense: number;
+  readonly attackRange: number;
+  readonly operationRadius: number;
+  readonly visionRadius: number;
+}
+
+export interface UnitProductionJob {
+  readonly unitType: UnitType;
+  ticksRemaining: number;
+  readonly ticksTotal: number;
+}
+
+export interface PublicUnitProductionJob {
+  readonly unitType: UnitType;
+  readonly ticksRemaining: number;
+  readonly ticksTotal: number;
+}
+
+export interface Unit {
+  readonly id: number;
+  readonly ownerId: number;
+  readonly type: UnitType;
+  x: number;
+  y: number;
+  count: number;
+  hp: number;
+  maxHp: number;
+  morale: number;
+  stance: UnitStance;
+  readonly operationRadius: number;
+  targetX: number | null;
+  targetY: number | null;
+  attachedOrderId: number | null;
+  attachedOrderKind: 'ATTACK' | 'FRONT_PUSH' | null;
+  manualOrder: boolean;
+  mergeTargetUnitId: number | null;
+  isEncircled: boolean;
+  supplyLevel: number;
+  canParadrop: boolean;
+  dropVulnerabilityTicks: number;
+  combatCooldownTicks: number;
+  lastCombatTargetX: number | null;
+  lastCombatTargetY: number | null;
+  breakoutAccum: number;
+}
+
+export interface PublicUnitInfo {
+  readonly id: number;
+  readonly ownerId: number;
+  readonly type: UnitType;
+  readonly x: number;
+  readonly y: number;
+  readonly count: number;
+  readonly hp: number;
+  readonly maxHp: number;
+  readonly morale: number;
+  readonly stance: UnitStance;
+  readonly operationRadius: number;
+  readonly targetX: number | null;
+  readonly targetY: number | null;
+  readonly attachedOrderId: number | null;
+  readonly isEncircled: boolean;
+  readonly supplyLevel: number;
+  readonly canParadrop: boolean;
+  readonly dropVulnerabilityTicks: number;
+  readonly combatCooldownTicks: number;
+  readonly lastCombatTargetX: number | null;
+  readonly lastCombatTargetY: number | null;
+}
+
 export interface Building {
   readonly id: number;
   readonly type: BuildingType;
@@ -118,6 +218,8 @@ export interface Building {
   allocatedManpower: number;
   currentEnergyUse: number;
   currentEnergyProd: number;
+  unitQueue: UnitProductionJob[];
+  paradropCooldownTicks: number;
 }
 
 export interface PublicBuildingInfo {
@@ -142,6 +244,8 @@ export interface PublicBuildingInfo {
   readonly allocatedManpower: number;
   readonly currentEnergyUse: number;
   readonly currentEnergyProd: number;
+  readonly unitQueue: ReadonlyArray<PublicUnitProductionJob>;
+  readonly paradropCooldownTicks: number;
 }
 
 export type OccupancyByType = Record<BuildingType, number>;
@@ -211,6 +315,8 @@ export interface PlayerState {
   nextBotDecisionTick: number;
   territoryCells: number;
   alive: boolean;
+  isEliminated: boolean;
+  eliminationReason: EliminationReason | null;
 }
 
 export interface PublicPlayerInfo {
@@ -223,6 +329,8 @@ export interface PublicPlayerInfo {
   readonly capitalY: number;
   readonly territoryCells: number;
   readonly alive: boolean;
+  readonly isEliminated: boolean;
+  readonly eliminationReason: EliminationReason | null;
   readonly betrayalDebuffTicks: number;
   readonly relationToHuman: DiplomaticRelation;
   readonly isNeighborOfHuman: boolean;
@@ -314,6 +422,8 @@ export interface GameState {
   readonly neighborPairs: Set<string>;
   buildings: Building[];
   nextBuildingId: number;
+  units: Unit[];
+  nextUnitId: number;
   lastTerritorySyncVersion: number;
   attackOrders: AttackOrder[];
   frontPushOrders: FrontPushOrder[];
@@ -338,6 +448,7 @@ export interface ClientRenderState {
   readonly relations: Readonly<Record<string, DiplomaticRelation>>;
   readonly tradeAgreements: ReadonlyArray<string>;
   readonly buildings: ReadonlyArray<PublicBuildingInfo>;
+  readonly units: ReadonlyArray<PublicUnitInfo>;
   readonly attackOrders: ReadonlyArray<Readonly<AttackOrder>>;
   readonly frontPushOrders: ReadonlyArray<Readonly<FrontPushOrder>>;
   readonly publicResourceZones: ReadonlyArray<ResourceZonePublic>;
@@ -441,4 +552,42 @@ export type Action =
   | { readonly type: 'CANCEL_PLAYER_ORDERS'; readonly playerId: number }
   | { readonly type: 'TOGGLE_PAUSE' }
   | { readonly type: 'RESTART_GAME'; readonly seed?: number }
-  | { readonly type: 'TICK' };
+  | { readonly type: 'TICK' }
+  | {
+      readonly type: 'PRODUCE_UNIT';
+      readonly playerId: number;
+      readonly buildingId: number;
+      readonly unitType: UnitType;
+      readonly count?: number;
+    }
+  | {
+      readonly type: 'QUICK_PRODUCE_UNIT';
+      readonly playerId: number;
+      readonly unitType: UnitType;
+      readonly count?: number;
+    }
+  | {
+      readonly type: 'MOVE_UNITS';
+      readonly playerId: number;
+      readonly unitIds: ReadonlyArray<number>;
+      readonly targetX: number;
+      readonly targetY: number;
+    }
+  | {
+      readonly type: 'SET_UNITS_STANCE';
+      readonly playerId: number;
+      readonly unitIds: ReadonlyArray<number>;
+      readonly stance: UnitStance;
+    }
+  | {
+      readonly type: 'MERGE_UNITS';
+      readonly playerId: number;
+      readonly unitIds: ReadonlyArray<number>;
+    }
+  | {
+      readonly type: 'PARADROP_UNIT';
+      readonly playerId: number;
+      readonly unitId: number;
+      readonly targetX: number;
+      readonly targetY: number;
+    };

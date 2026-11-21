@@ -10,24 +10,30 @@ export type DefenseDomain = 'GROUND_INFANTRY' | 'GROUND_ARMOR' | 'AIR_DEFENSE';
 export interface DefenseSpec {
   readonly type: DefenseBuildingType;
   readonly domain: DefenseDomain;
+  readonly roleLabelCs: string;
+  readonly techTreeBranchCs: string;
   readonly radius: number;
   readonly maxLevel: number;
   readonly frontCostBonusPerStack: number;
   readonly frontSlowdownPerStack: number;
+  readonly antiInfantryRating: number;
   readonly antiArmorRating: number;
   readonly antiAirRating: number;
   readonly buildingProtectionRatio: number;
 }
 
-/** Static defense specifications structured with Tech-Tree level & Step 5-6 armor/AA hooks. */
+/** Static defense specifications structured with clear roles & Tech-Tree branches. */
 export const DEFENSE_SPECS: Readonly<Record<DefenseBuildingType, DefenseSpec>> = {
   TRENCH: {
     type: 'TRENCH',
     domain: 'GROUND_INFANTRY',
+    roleLabelCs: 'Základní frontová obrana (od startu)',
+    techTreeBranchCs: 'Dostupné od startu · vylepšení: Obrana (Tech Tree)',
     radius: 14,
     maxLevel: 5,
     frontCostBonusPerStack: 0.4,
     frontSlowdownPerStack: 0.28,
+    antiInfantryRating: 0.9,
     antiArmorRating: 0.2,
     antiAirRating: 0.0,
     buildingProtectionRatio: 0.1,
@@ -35,23 +41,29 @@ export const DEFENSE_SPECS: Readonly<Record<DefenseBuildingType, DefenseSpec>> =
   BUNKER: {
     type: 'BUNKER',
     domain: 'GROUND_ARMOR',
+    roleLabelCs: 'Těžká protitanková pevnost',
+    techTreeBranchCs: 'Obranné technologie · protitanková větev (Tech Tree)',
     radius: 18,
     maxLevel: 5,
     frontCostBonusPerStack: 0.85,
     frontSlowdownPerStack: 0.46,
-    antiArmorRating: 1.0,
+    antiInfantryRating: 0.65,
+    antiArmorRating: 1.35,
     antiAirRating: 0.1,
     buildingProtectionRatio: 0.25,
   },
   AA_BATTERY: {
     type: 'AA_BATTERY',
     domain: 'AIR_DEFENSE',
+    roleLabelCs: 'PVO baterie proti výsadkům a náletům',
+    techTreeBranchCs: 'Obranné technologie / PVO větev (Tech Tree)',
     radius: 26,
     maxLevel: 5,
     frontCostBonusPerStack: 0,
     frontSlowdownPerStack: 0,
+    antiInfantryRating: 0.0,
     antiArmorRating: 0.0,
-    antiAirRating: 1.0,
+    antiAirRating: 1.2,
     buildingProtectionRatio: 0.45,
   },
 };
@@ -60,6 +72,7 @@ export interface CellDefenseModifiers {
   readonly attackerCostMultiplier: number;
   readonly advanceSpeedMultiplier: number;
   readonly defenderLossMultiplier: number;
+  readonly antiInfantryFactor: number;
   readonly antiArmorFactor: number;
   readonly antiAirFactor: number;
   readonly nodeProtectionFactor: number;
@@ -89,6 +102,7 @@ export function evaluateCellDefense(
   let bestBarracksBonus = 0;
   let costBonus = 0;
   let slowdown = 0;
+  let antiInfantry = 0;
   let antiArmor = 0;
   let antiAir = 0;
   let nodeProt = 0;
@@ -125,6 +139,7 @@ export function evaluateCellDefense(
 
     costBonus += spec.frontCostBonusPerStack * weight;
     slowdown += spec.frontSlowdownPerStack * weight;
+    antiInfantry += spec.antiInfantryRating * weight;
     antiArmor += spec.antiArmorRating * weight;
     antiAir += spec.antiAirRating * weight;
     nodeProt += spec.buildingProtectionRatio * weight;
@@ -135,6 +150,7 @@ export function evaluateCellDefense(
     attackerCostMultiplier: 1 + Math.min(2.4, cappedBarracks + costBonus),
     advanceSpeedMultiplier: Math.max(0.22, 1 - Math.min(0.78, slowdown)),
     defenderLossMultiplier: Math.max(0.5, 1 - Math.min(0.5, (cappedBarracks + costBonus) * 0.24)),
+    antiInfantryFactor: antiInfantry,
     antiArmorFactor: antiArmor,
     antiAirFactor: antiAir,
     nodeProtectionFactor: Math.min(0.75, nodeProt),

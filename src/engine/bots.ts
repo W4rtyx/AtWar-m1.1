@@ -157,7 +157,7 @@ export function stepBots(state: GameState): void {
   const rngBox = { rngState: state.rngState };
 
   for (const player of state.players.values()) {
-    if (!player.isBot || !player.alive) {
+    if (!player.isBot || !player.alive || player.isEliminated) {
       continue;
     }
 

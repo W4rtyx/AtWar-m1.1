@@ -86,7 +86,8 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     type: 'FACTORY',
     nameCs: 'Zbrojovka / Továrna',
     shortCode: 'ZBR',
-    descriptionCs: 'Vyrábí Průmysl a násobí příjmy z obchodních dohod.',
+    descriptionCs:
+      'Vyrábí Průmysl, umožňuje výrobu Tanků (TANK) a Dělostřelectva (ARTILLERY), násobí obchod.',
     cost: { money: 260, buildingMaterial: 150, industry: 0 },
     baseEnergyConsumption: 5.0,
     baseEnergyProduction: 0,
@@ -126,7 +127,8 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     type: 'BARRACKS',
     nameCs: 'Kasárna',
     shortCode: 'KAS',
-    descriptionCs: 'Zrychluje obnovu aktivního Manpoweru a posiluje obranu okolního sektoru.',
+    descriptionCs:
+      'Verbování Pěší divize (INFANTRY), zrychluje obnovu Manpoweru a posiluje obranu sektoru.',
     cost: { money: 210, buildingMaterial: 120, industry: 0 },
     baseEnergyConsumption: 1.5,
     baseEnergyProduction: 0,
@@ -166,7 +168,8 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     type: 'AIRFIELD',
     nameCs: 'Letiště',
     shortCode: 'LET',
-    descriptionCs: 'Základna letecké infrastruktury pro navazující taktické fáze.',
+    descriptionCs:
+      'Umožňuje výcvik a taktické výsadky Výsadkářů (PARATROOPERS) do týlu v dosahu letiště.',
     cost: { money: 300, buildingMaterial: 150, industry: 110 },
     baseEnergyConsumption: 4.0,
     baseEnergyProduction: 0,
@@ -187,7 +190,7 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     nameCs: 'Zákopy',
     shortCode: 'ZÁK',
     descriptionCs:
-      'Polní opevnění. Zpomaluje postup nepřátelské fronty v dosahu a zvyšuje její ztráty.',
+      'Levná základní frontová obrana (od startu). Brzdí pěchotní šipky a pěchotu v sektoru. (Tech Tree: Obrana)',
     cost: { money: 95, buildingMaterial: 75, industry: 0 },
     baseEnergyConsumption: 0,
     baseEnergyProduction: 0,
@@ -208,7 +211,7 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     nameCs: 'Pevnost',
     shortCode: 'PEV',
     descriptionCs:
-      'Opevněný bunkr s protitankovými zátarasy. Silně brzdí frontový průnik v okruhu.',
+      'Těžká protitanková pevnost. Výrazně brzdí a ničí tanky, obrněné průlomy i těžký nápor. (Tech Tree: Obrana)',
     cost: { money: 220, buildingMaterial: 160, industry: 90 },
     baseEnergyConsumption: 3.5,
     baseEnergyProduction: 0,
@@ -229,7 +232,7 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     nameCs: 'PVO baterie',
     shortCode: 'PVO',
     descriptionCs:
-      'Protivzdušná obrana chránící okolní budovy a uzly v dosahu (Krok 6: sestřelování letadel).',
+      'Protiletadlová / PVO baterie. Kryje sektor proti výsadkům parašutistů (PARATROOPERS) a budoucím náletům. (Tech Tree: PVO)',
     cost: { money: 240, buildingMaterial: 0, industry: 140 },
     baseEnergyConsumption: 4.5,
     baseEnergyProduction: 0,
@@ -788,6 +791,8 @@ export function placeBuilding(
     allocatedManpower: 0,
     currentEnergyUse: 0,
     currentEnergyProd: 0,
+    unitQueue: [],
+    paradropCooldownTicks: 0,
   };
 
   state.buildings.push(building);
@@ -918,6 +923,8 @@ export function demolishBuilding(
   }
 
   if (building.stackCount === 0 && building.underConstructionCount === 0) {
+    building.unitQueue = [];
+    building.paradropCooldownTicks = 0;
     state.buildings.splice(idx, 1);
   }
 
@@ -988,6 +995,8 @@ export function createCapitalCityBuilding(
     allocatedManpower: 0,
     currentEnergyUse: spec.baseEnergyConsumption,
     currentEnergyProd: 0,
+    unitQueue: [],
+    paradropCooldownTicks: 0,
   };
   state.buildings.push(city);
   return city;
@@ -1003,9 +1012,31 @@ export function syncBuildingOwnership(state: GameState): boolean {
     if (cellOwner >= 0 && cellOwner !== building.ownerId) {
       building.ownerId = cellOwner;
       building.occupancyOverride = null;
+      building.unitQueue = [];
+      building.paradropCooldownTicks = 0;
       anyTransferred = true;
     }
   }
 
   return anyTransferred;
+}
+
+/** Returns all building types valid for placement on cell (x, y) owned by playerId (coast-aware). */
+export function getValidBuildingsForCell(
+  view: PlacementValidationState,
+  playerId: number,
+  x: number,
+  y: number,
+): BuildingType[] {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  if (ix < 0 || ix >= view.width || iy < 0 || iy >= view.height) {
+    return [];
+  }
+  const idx = iy * view.width + ix;
+  if (view.terrain[idx] === TerrainType.WATER || view.owners[idx] !== playerId) {
+    return [];
+  }
+  const coastal = isCoastalLandCell(view.terrain, view.width, view.height, ix, iy, 2);
+  return ALL_BUILDING_TYPES.filter((bType) => !BUILDING_SPECS[bType].requiresCoast || coastal);
 }

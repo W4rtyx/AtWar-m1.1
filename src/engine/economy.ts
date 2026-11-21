@@ -2,14 +2,17 @@ import { BUILDING_SPECS, createDefaultOccupancyByType } from './buildings';
 import {
   BASE_ENERGY_RESERVE_CAPACITY,
   BLACKOUT_MP_DRAIN_RATIO_PER_SEC,
+  computeDynamicBuildingEnergyConsumption,
   stepEnergyGrid,
 } from './energyGrid';
 import {
   Building,
+  EliminationReason,
   GameState,
   PlayerState,
   TICK_DT,
   TerrainType,
+  WILDERNESS_OWNER,
   getRelationKey,
 } from './types';
 
@@ -148,7 +151,11 @@ export function syncTerritoriesCapitalsAndNeighbors(state: GameState): void {
 
   for (const player of players.values()) {
     if (player.territoryCells === 0) {
-      player.alive = false;
+      if (!player.isEliminated) {
+        eliminatePlayer(state, player.id, 'TERRITORY_LOST', null);
+      } else {
+        player.alive = false;
+      }
       continue;
     }
 
@@ -257,7 +264,119 @@ export function createInitialPlayerState(params: {
     nextBotDecisionTick: params.nextBotDecisionTick,
     territoryCells: params.territoryCells,
     alive: true,
+    isEliminated: false,
+    eliminationReason: null,
   };
+}
+
+/**
+ * Eliminates a state immediately (either from losing all land or reaching 0 total Manpower).
+ * On MANPOWER_DEPLETED, transfers remaining territory/buildings to the strongest bordering WAR
+ * enemy or reverts them to WILDERNESS_OWNER.
+ */
+export function eliminatePlayer(
+  state: GameState,
+  playerId: number,
+  reason: EliminationReason,
+  explicitConquerorId: number | null = null,
+): void {
+  const player = state.players.get(playerId);
+  if (!player || player.isEliminated) {
+    return;
+  }
+
+  player.alive = false;
+  player.isEliminated = true;
+  player.eliminationReason = reason;
+  player.manpower = 0;
+  player.activeManpower = 0;
+  player.allocatedManpower = 0;
+  player.manpowerIncomePerSec = 0;
+
+  state.attackOrders = state.attackOrders.filter((o) => o.playerId !== playerId);
+  state.frontPushOrders = state.frontPushOrders.filter((o) => o.playerId !== playerId);
+  state.units = state.units.filter((u) => u.ownerId !== playerId);
+
+  for (const key of Array.from(state.tradeAgreements)) {
+    const [aStr, bStr] = key.split(':');
+    if (Number(aStr) === playerId || Number(bStr) === playerId) {
+      state.tradeAgreements.delete(key);
+    }
+  }
+
+  if (reason === 'MANPOWER_DEPLETED') {
+    const { width, height, owners, terrain } = state;
+    let conquerorId: number | null = null;
+    if (explicitConquerorId !== null) {
+      const explicit = state.players.get(explicitConquerorId);
+      if (explicit && explicit.alive && !explicit.isEliminated && explicitConquerorId !== playerId) {
+        conquerorId = explicitConquerorId;
+      }
+    }
+
+    if (conquerorId === null) {
+      const warBorderCounts = new Map<number, number>();
+      for (let y = 0; y < height; y++) {
+        const row = y * width;
+        for (let x = 0; x < width; x++) {
+          const idx = row + x;
+          if (owners[idx] !== playerId) continue;
+          const neighbors = [
+            x > 0 ? owners[idx - 1] : -2,
+            x + 1 < width ? owners[idx + 1] : -2,
+            y > 0 ? owners[idx - width] : -2,
+            y + 1 < height ? owners[idx + width] : -2,
+          ];
+          for (const nOwner of neighbors) {
+            if (nOwner < 0 || nOwner === playerId) continue;
+            if (getRelationFromMap(state, playerId, nOwner) !== 'WAR') continue;
+            const neighborPlayer = state.players.get(nOwner);
+            if (!neighborPlayer || !neighborPlayer.alive || neighborPlayer.isEliminated) continue;
+            warBorderCounts.set(nOwner, (warBorderCounts.get(nOwner) ?? 0) + 1);
+          }
+        }
+      }
+
+      let bestCount = 0;
+      for (const [candidateId, count] of warBorderCounts) {
+        if (count > bestCount) {
+          bestCount = count;
+          conquerorId = candidateId;
+        }
+      }
+    }
+
+    const nextOwner = conquerorId !== null ? conquerorId : WILDERNESS_OWNER;
+    let transferredCells = 0;
+    for (let i = 0; i < owners.length; i++) {
+      if (owners[i] === playerId && terrain[i] !== TerrainType.WATER) {
+        owners[i] = nextOwner;
+        transferredCells++;
+      }
+    }
+
+    if (conquerorId !== null) {
+      const conqueror = state.players.get(conquerorId);
+      if (conqueror) {
+        conqueror.territoryCells += transferredCells;
+      }
+      for (const b of state.buildings) {
+        if (b.ownerId === playerId) {
+          b.ownerId = conquerorId;
+          b.occupancyOverride = null;
+          b.unitQueue = [];
+          b.paradropCooldownTicks = 0;
+        }
+      }
+    } else {
+      state.buildings = state.buildings.filter((b) => b.ownerId !== playerId);
+    }
+
+    player.territoryCells = 0;
+    recomputeNeighborPairs(state);
+  }
+
+  state.stateVersion++;
 }
 
 /**
@@ -303,12 +422,31 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     list.push(building);
   }
 
+  const deployedOrderManpower = new Map<number, number>();
+  for (const order of state.attackOrders) {
+    deployedOrderManpower.set(
+      order.playerId,
+      (deployedOrderManpower.get(order.playerId) ?? 0) + order.manpowerRemaining,
+    );
+  }
+  for (const order of state.frontPushOrders) {
+    deployedOrderManpower.set(
+      order.playerId,
+      (deployedOrderManpower.get(order.playerId) ?? 0) + order.manpowerRemaining,
+    );
+  }
+
   for (const player of state.players.values()) {
-    if (!player.alive) continue;
+    if (!player.alive || player.isEliminated) continue;
+
+    if (player.manpower <= 1e-6 && (deployedOrderManpower.get(player.id) ?? 0) <= 1e-6) {
+      eliminatePlayer(state, player.id, 'MANPOWER_DEPLETED', null);
+      continue;
+    }
 
     const ownedBuildings = buildingsByOwner.get(player.id) ?? [];
 
-    // Step A: Manpower staffing allocation
+    // Step A: Manpower staffing allocation & target occupancy resolution (0..200%)
     let totalDesiredMp = 0;
     const buildingTargetPcts: number[] = [];
     const buildingDesiredMps: number[] = [];
@@ -317,15 +455,19 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       const b = ownedBuildings[i];
       const units = b.stackCount;
       const spec = BUILDING_SPECS[b.type];
-      if (units <= 0 || spec.baseManpowerRequired <= 0) {
-        buildingTargetPcts.push(units > 0 ? 100 : 0);
+      if (units <= 0) {
+        buildingTargetPcts.push(0);
         buildingDesiredMps.push(0);
         continue;
       }
       const rawPct = b.occupancyOverride ?? player.buildingOccupancyByType[b.type] ?? 100;
       const clampedPct = Math.max(0, Math.min(200, rawPct));
-      const desiredMp = spec.baseManpowerRequired * (clampedPct / 100) * units;
       buildingTargetPcts.push(clampedPct);
+      if (spec.baseManpowerRequired <= 0) {
+        buildingDesiredMps.push(0);
+        continue;
+      }
+      const desiredMp = spec.baseManpowerRequired * (clampedPct / 100) * units;
       buildingDesiredMps.push(desiredMp);
       totalDesiredMp += desiredMp;
     }
@@ -344,14 +486,14 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
           ? 0
           : BUILDING_SPECS[b.type].baseManpowerRequired > 0
             ? buildingTargetPcts[i] * staffingFulfillment
-            : 100;
+            : buildingTargetPcts[i];
       allocatedManpower += assignedMp;
     }
 
     player.allocatedManpower = allocatedManpower;
     player.activeManpower = Math.max(0, player.manpower - allocatedManpower);
 
-    // Step B: Energy grid balance, capped reserve & cascading blackout progression
+    // Step B: Energy grid balance, capped reserve & dynamic occupancy energy scaling
     let energyProd = 0;
     let energyCons = 0;
     let completedPowerPlantUnits = 0;
@@ -374,10 +516,11 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
         prod = spec.baseEnergyProduction * (effPct / 100) * curve.outputMultiplier * units;
         energyProd += prod;
       } else if (spec.baseEnergyConsumption > 0) {
-        cons =
-          (spec.baseManpowerRequired > 0
-            ? spec.baseEnergyConsumption * curve.energyMultiplier
-            : spec.baseEnergyConsumption) * units;
+        cons = computeDynamicBuildingEnergyConsumption(
+          spec.baseEnergyConsumption,
+          b.effectiveOccupancyPct,
+          units,
+        );
         energyCons += cons;
       }
 
@@ -414,6 +557,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     let industryIncome = 0;
     let knowledgeIncome = 0;
     let cityCount = 0;
+    let cityManpowerIncomeBonus = 0;
     let barracksMaxBonus = 0;
     let barracksIncomeBonus = 0;
 
@@ -431,8 +575,9 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
 
       if (b.type === 'CITY') {
         cityCount += units;
-        moneyIncome += spec.baseMoneyPerSec * economyPowerScale * units;
-        b.effectiveOutputPct = Math.round(economyPowerScale * 100);
+        moneyIncome += spec.baseMoneyPerSec * curve.outputMultiplier * economyPowerScale * units;
+        cityManpowerIncomeBonus += spec.baseManpowerIncomeBonus * curve.outputMultiplier * units;
+        b.effectiveOutputPct = Math.round(curve.outputMultiplier * economyPowerScale * 100);
       } else if (b.type === 'MINE') {
         materialIncome +=
           spec.baseMaterialPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
@@ -485,7 +630,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     const peakManpowerIncome =
       4.5 +
       Math.pow(Math.max(1, player.territoryCells), 0.48) * 0.18 +
-      cityCount * BUILDING_SPECS.CITY.baseManpowerIncomeBonus +
+      cityManpowerIncomeBonus +
       barracksIncomeBonus;
 
     let manpowerIncome =
@@ -518,6 +663,11 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       player.manpower = clampedManpower;
     }
 
+    if (player.manpower <= 1e-6 && (deployedOrderManpower.get(player.id) ?? 0) <= 1e-6) {
+      eliminatePlayer(state, player.id, 'MANPOWER_DEPLETED', null);
+      continue;
+    }
+
     // Re-sync staffing & active manpower after clamped/grown total manpower
     const finalFulfillment =
       totalDesiredMp > 0 ? Math.min(1, Math.max(0, player.manpower / totalDesiredMp)) : 1;
@@ -532,7 +682,7 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
           ? 0
           : BUILDING_SPECS[b.type].baseManpowerRequired > 0
             ? buildingTargetPcts[i] * finalFulfillment
-            : 100;
+            : buildingTargetPcts[i];
       finalAllocated += assigned;
     }
     player.allocatedManpower = finalAllocated;

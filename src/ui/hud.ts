@@ -12,18 +12,23 @@ import {
   BuildMenuController,
   BuildingContextCallbacks,
   BuildingContextMenuController,
+  TerrainBuildMenuCallbacks,
+  TerrainBuildMenuController,
 } from './buildMenu';
 import { DiplomacyCallbacks, LeaderboardController } from './leaderboard';
 import { ManpowerPanelCallbacks, ManpowerPanelController } from './manpowerPanel';
+import { UnitPanelCallbacks, UnitPanelController } from './unitPanel';
 
-export type TacticalMode = 'ARROW' | 'FRONT_SELECT';
+export type TacticalMode = 'ARROW' | 'UNIT_SELECT' | 'FRONT_SELECT';
 export type SimSpeed = 1 | 2 | 5 | 10 | 50;
 
 export interface HudCallbacks
   extends DiplomacyCallbacks,
     BuildMenuCallbacks,
+    TerrainBuildMenuCallbacks,
     BuildingContextCallbacks,
-    ManpowerPanelCallbacks {
+    ManpowerPanelCallbacks,
+    UnitPanelCallbacks {
   readonly onTogglePause: () => void;
   readonly onRestart: () => void;
   readonly onModeChange: (mode: TacticalMode) => void;
@@ -54,7 +59,9 @@ export class HudController {
   public readonly leaderboard: LeaderboardController;
   public readonly manpowerPanel: ManpowerPanelController;
   public readonly buildMenu: BuildMenuController;
+  public readonly terrainBuildMenu: TerrainBuildMenuController;
   public readonly buildingMenu: BuildingContextMenuController;
+  public readonly unitPanel: UnitPanelController;
 
   private phaseBadge!: HTMLElement;
   private statsGroup!: HTMLElement;
@@ -89,8 +96,16 @@ export class HudController {
   private sliderEl!: HTMLInputElement;
   private sliderReadoutEl!: HTMLElement;
   private modeArrowBtn!: HTMLButtonElement;
+  private modeUnitBtn!: HTMLButtonElement;
   private modeFrontBtn!: HTMLButtonElement;
   private cancelOrdersBtn!: HTMLButtonElement;
+
+  private defeatOverlayEl!: HTMLElement;
+  private defeatReasonEl!: HTMLElement;
+  private defeatMetaEl!: HTMLElement;
+  private defeatRestartBtn!: HTMLButtonElement;
+  private defeatDismissBtn!: HTMLButtonElement;
+  private defeatDismissed = false;
 
   private targetBarEl!: HTMLElement;
   private targetTitleEl!: HTMLElement;
@@ -119,6 +134,7 @@ export class HudController {
       onCloseBuildingInspector: callbacks.onCloseBuildingInspector,
       onStackBuilding: callbacks.onStackBuilding,
       onDemolishBuilding: callbacks.onDemolishBuilding,
+      onProduceUnit: callbacks.onProduceUnit,
     });
 
     this.leaderboard = new LeaderboardController(this.root, {
@@ -134,17 +150,32 @@ export class HudController {
       onBatchSizeChange: callbacks.onBatchSizeChange,
     });
 
+    this.terrainBuildMenu = new TerrainBuildMenuController(this.root, {
+      onPlaceBuildingAt: callbacks.onPlaceBuildingAt,
+      onBatchSizeChange: callbacks.onBatchSizeChange,
+    });
+
     this.buildingMenu = new BuildingContextMenuController(this.root, {
       onStackBuilding: callbacks.onStackBuilding,
       onDemolishBuilding: callbacks.onDemolishBuilding,
       onInspectBuilding: callbacks.onInspectBuilding,
+      onProduceUnit: callbacks.onProduceUnit,
+    });
+
+    this.unitPanel = new UnitPanelController({
+      onQuickProduceUnit: callbacks.onQuickProduceUnit,
+      onSetUnitsStance: callbacks.onSetUnitsStance,
+      onMergeUnits: callbacks.onMergeUnits,
+      onStartParadrop: callbacks.onStartParadrop,
+      onClearUnitSelection: callbacks.onClearUnitSelection,
     });
 
     const middleSlot = this.query('[data-el="middle-slot"]');
     middleSlot.appendChild(this.manpowerPanel.getPanelElement());
     middleSlot.appendChild(this.leaderboard.getPanelElement());
 
-    this.bottomStack.insertBefore(this.buildMenu.getPanelElement(), this.bottomRow);
+    this.bottomStack.insertBefore(this.unitPanel.getPanelElement(), this.bottomRow);
+    this.bottomStack.insertBefore(this.buildMenu.getPanelElement(), this.unitPanel.getPanelElement());
     this.bottomStack.insertBefore(this.targetBarEl, this.buildMenu.getPanelElement());
   }
 
@@ -269,10 +300,13 @@ export class HudController {
 
             <div class="hud-control-group">
               <button type="button" class="hud-btn active" data-mode="ARROW">
-                Zakřivená šipka
+                Šipka
+              </button>
+              <button type="button" class="hud-btn" data-mode="UNIT_SELECT" title="Výběr jednotek tažením rámce (V)">
+                Jednotky (V)
               </button>
               <button type="button" class="hud-btn" data-mode="FRONT_SELECT">
-                Výběr úseku fronty
+                Fronta (M)
               </button>
               <button
                 type="button"
@@ -298,20 +332,39 @@ export class HudController {
 
         <div class="hud-panel hud-legend">
           <div class="hud-legend-row">
-            <span class="hud-legend-key">LMB klik / tažení</span>
-            <span>Označit cíl (Útok / Dorazit) / kreslit šipku (2s Ambush)</span>
+            <span class="hud-legend-key">LMB klik / laso</span>
+            <span>Jednotky (přednost) · Cíl / šipka (2s Ambush)</span>
           </div>
           <div class="hud-legend-row">
-            <span class="hud-legend-key">Klávesy 1–0, - / Stavba</span>
-            <span>Stavět či stackovat · RMB na budovu: Správa/Demontáž</span>
+            <span class="hud-legend-key">RMB na mapu</span>
+            <span>Rozkaz jednotkám · Radiální stavba · Budova · Diplomacie</span>
           </div>
           <div class="hud-legend-row">
-            <span class="hud-legend-key">RMB bez tahu</span>
-            <span>Zrušit cíl / Diplomacie a obchodní dohody</span>
+            <span class="hud-legend-key">L / G / P / B</span>
+            <span>LOCK/RANGE · Sloučit · Výsadek · Paleta stavby</span>
           </div>
           <div class="hud-legend-row">
             <span class="hud-legend-key">Shift + LMB / 2×LMB</span>
-            <span>Výběr fronty · Organický nápor</span>
+            <span>Výběr lasem · Organický nápor</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-defeat-overlay hidden" data-el="defeat-overlay">
+        <div class="hud-panel hud-defeat-modal">
+          <div class="hud-defeat-badge">PORÁŽKA</div>
+          <h2 class="hud-defeat-title">Váš stát padl</h2>
+          <p class="hud-defeat-reason" data-el="defeat-reason">
+            Stát ztratil veškerou populaci a Manpower.
+          </p>
+          <div class="hud-defeat-meta" data-el="defeat-meta">Doba partie: 00:00</div>
+          <div class="hud-defeat-actions">
+            <button type="button" class="hud-btn hud-btn-ally" data-el="defeat-restart">
+              Nová partie
+            </button>
+            <button type="button" class="hud-btn" data-el="defeat-dismiss">
+              Sledovat mapu
+            </button>
           </div>
         </div>
       </div>
@@ -349,10 +402,17 @@ export class HudController {
     this.sliderEl = this.query<HTMLInputElement>('[data-el="mp-slider"]');
     this.sliderReadoutEl = this.query('[data-el="mp-readout"]');
     this.modeArrowBtn = this.query<HTMLButtonElement>('[data-mode="ARROW"]');
+    this.modeUnitBtn = this.query<HTMLButtonElement>('[data-mode="UNIT_SELECT"]');
     this.modeFrontBtn = this.query<HTMLButtonElement>('[data-mode="FRONT_SELECT"]');
     this.cancelOrdersBtn = this.query<HTMLButtonElement>('[data-action="cancel-orders"]');
     this.frontPadEl = this.query('[data-el="front-pad"]');
     this.frontCountEl = this.query('[data-el="front-count"]');
+
+    this.defeatOverlayEl = this.query('[data-el="defeat-overlay"]');
+    this.defeatReasonEl = this.query('[data-el="defeat-reason"]');
+    this.defeatMetaEl = this.query('[data-el="defeat-meta"]');
+    this.defeatRestartBtn = this.query<HTMLButtonElement>('[data-el="defeat-restart"]');
+    this.defeatDismissBtn = this.query<HTMLButtonElement>('[data-el="defeat-dismiss"]');
 
     this.targetBarEl = this.query('[data-el="target-bar"]');
     this.targetTitleEl = this.query('[data-el="target-title"]');
@@ -416,7 +476,18 @@ export class HudController {
     });
 
     this.modeArrowBtn.addEventListener('click', () => this.setMode('ARROW'));
+    this.modeUnitBtn.addEventListener('click', () => this.setMode('UNIT_SELECT'));
     this.modeFrontBtn.addEventListener('click', () => this.setMode('FRONT_SELECT'));
+
+    this.defeatOverlayEl.addEventListener('mousedown', (e) => e.stopPropagation());
+    this.defeatRestartBtn.addEventListener('click', () => {
+      this.defeatDismissed = false;
+      this.callbacks.onRestart();
+    });
+    this.defeatDismissBtn.addEventListener('click', () => {
+      this.defeatDismissed = true;
+      this.defeatOverlayEl.classList.add('hidden');
+    });
 
     const dirButtons = this.root.querySelectorAll<HTMLButtonElement>('[data-dir]');
     for (const btn of dirButtons) {
@@ -455,6 +526,7 @@ export class HudController {
   public setMode(mode: TacticalMode): void {
     this.currentMode = mode;
     this.modeArrowBtn.classList.toggle('active', mode === 'ARROW');
+    this.modeUnitBtn.classList.toggle('active', mode === 'UNIT_SELECT');
     this.modeFrontBtn.classList.toggle('active', mode === 'FRONT_SELECT');
     this.callbacks.onModeChange(mode);
   }
@@ -474,6 +546,8 @@ export class HudController {
     selectedBuildingId: number | null = null,
     buildBatchSize: BuildBatchSize = 1,
     selectedTarget: SelectedTarget | null = null,
+    selectedUnitIds: ReadonlySet<number> = new Set(),
+    paradropUnitId: number | null = null,
   ): void {
     const isPlaying = state.phase === 'PLAYING';
 
@@ -496,9 +570,13 @@ export class HudController {
     this.leaderboard.update(state);
     this.manpowerPanel.update(state, selectedBuildingId);
     this.buildMenu.update(state, selectedBuildType, buildBatchSize);
+    this.terrainBuildMenu.update(state, buildBatchSize);
     this.buildingMenu.update(state);
+    this.unitPanel.update(state, selectedUnitIds, paradropUnitId);
 
     if (!isPlaying) {
+      this.defeatDismissed = false;
+      this.defeatOverlayEl.classList.add('hidden');
       this.blackoutAlertEl.classList.add('hidden');
       this.betrayalAlertEl.classList.add('hidden');
       this.targetBarEl.classList.add('hidden');
@@ -508,6 +586,20 @@ export class HudController {
     const human: PublicPlayerInfo | undefined = state.players.find(
       (p) => p.id === state.humanPlayerId,
     );
+
+    if (human?.isEliminated) {
+      if (!this.defeatDismissed) {
+        this.defeatReasonEl.textContent =
+          human.eliminationReason === 'MANPOWER_DEPLETED'
+            ? 'Populace a celkový Manpower vašeho státu klesly na 0 — nemá kdo obsluhovat elektrárny ani bránit hranice.'
+            : 'Vaše říše ztratila veškeré území na mapě.';
+        this.defeatMetaEl.textContent = `Doba partie: ${formatGameTimer(state.tick)}`;
+        this.defeatOverlayEl.classList.remove('hidden');
+      }
+    } else {
+      this.defeatDismissed = false;
+      this.defeatOverlayEl.classList.add('hidden');
+    }
 
     const money = human?.money ?? 0;
     const moneyRate = human?.moneyIncomePerSec ?? 0;

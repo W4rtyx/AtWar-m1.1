@@ -15,6 +15,12 @@ import {
   WILDERNESS_OWNER,
 } from '../engine/types';
 import { Camera } from './camera';
+import {
+  UnitSelectionRect,
+  drawParadropOverlay,
+  drawUnitSelectionRect,
+  drawUnits,
+} from './unitRenderer';
 
 export interface ArrowPreview {
   readonly waypoints: ReadonlyArray<Point>;
@@ -74,6 +80,9 @@ export interface RenderOverlayState {
   readonly buildPreview: BuildPlacementPreview | null;
   readonly selectedBuildingId: number | null;
   readonly selectedTarget: SelectedTarget | null;
+  readonly selectedUnitIds: ReadonlySet<number>;
+  readonly unitSelectRect: UnitSelectionRect | null;
+  readonly paradropUnitId: number | null;
 }
 
 function computeDistanceField(
@@ -506,6 +515,17 @@ export class CanvasRenderer {
     this.drawAttackOrders(ctx, camera, state, overlays.activeBendOrderId);
     this.drawBuildings(ctx, camera, state.buildings, overlays.selectedBuildingId);
     this.drawCapitals(ctx, camera, state.players, state.humanPlayerId, state.buildings);
+    drawUnits(ctx, camera, state, overlays.selectedUnitIds);
+
+    if (overlays.paradropUnitId !== null) {
+      const dropUnit = state.units.find((u) => u.id === overlays.paradropUnitId);
+      if (dropUnit) {
+        drawParadropOverlay(ctx, camera, state, dropUnit, overlays.hoverCell);
+      }
+    }
+    if (overlays.unitSelectRect) {
+      drawUnitSelectionRect(ctx, camera, overlays.unitSelectRect);
+    }
 
     if (state.phase === 'SELECT_START' && overlays.hoverCell) {
       this.drawStartHoverPreview(ctx, camera, state, overlays.hoverCell);

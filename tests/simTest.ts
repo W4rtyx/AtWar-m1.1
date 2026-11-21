@@ -2,6 +2,7 @@ import {
   BUILDING_SPECS,
   demolishBuilding,
   getUnitBuildCost,
+  getValidBuildingsForCell,
   placeBuilding,
   stackBuilding,
 } from '../src/engine/buildings';
@@ -38,6 +39,10 @@ import {
   WILDERNESS_OWNER,
   getRelationKey,
 } from '../src/engine/types';
+import {
+  UNIT_SPECS,
+  spawnUnitStack,
+} from '../src/engine/units';
 
 declare const console: { log(message: string): void };
 
@@ -1829,6 +1834,722 @@ function testDefenseBuildingsTrenchBunkerAndAA(): void {
   );
 }
 
+function testUnitProductionMovementMergeAndParadropAA(): void {
+  const state = createInitialGameState(9601);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 9999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 32, 24);
+  paintBlock(state, arena.x - 28, arena.y - 18, arena.x + 8, arena.y + 18, humanId);
+  paintBlock(state, arena.x + 9, arena.y - 18, arena.x + 28, arena.y + 18, enemyId);
+  setWarRelation(state, humanId, enemyId);
+  dispatchAction(state, { type: 'TICK' });
+
+  human.money = 12000;
+  human.buildingMaterial = 6000;
+  human.industry = 6000;
+  human.energyReserve = 2500;
+  human.maxManpower = 1500;
+  human.manpower = 1200;
+
+  const ppSpot = findSpacedOwnedSpot(state, humanId, arena.x - 16, arena.y - 8, 8, false)!;
+  placeBuilding(state, humanId, 'POWER_PLANT', ppSpot.x, ppSpot.y, 5);
+  const barSpot = findSpacedOwnedSpot(state, humanId, arena.x - 16, arena.y + 6, 8, false)!;
+  const barracks = placeBuilding(state, humanId, 'BARRACKS', barSpot.x, barSpot.y, 1)!;
+  const facSpot = findSpacedOwnedSpot(state, humanId, arena.x - 4, arena.y - 8, 8, false)!;
+  const factory = placeBuilding(state, humanId, 'FACTORY', facSpot.x, facSpot.y, 1)!;
+  const afSpot = findSpacedOwnedSpot(state, humanId, arena.x - 4, arena.y + 6, 8, false)!;
+  const airfield = placeBuilding(state, humanId, 'AIRFIELD', afSpot.x, afSpot.y, 1)!;
+
+  for (let t = 0; t < BUILDING_SPECS.AIRFIELD.constructionTicks + 5; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    barracks.stackCount === 1 && factory.stackCount === 1 && airfield.stackCount === 1,
+    'Barracks, Factory, and Airfield must finish construction',
+  );
+
+  // Produce all 4 ground unit types
+  const moneyBefore = human.money;
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: barracks.id,
+    unitType: 'INFANTRY',
+  });
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: factory.id,
+    unitType: 'TANK',
+  });
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: factory.id,
+    unitType: 'ARTILLERY',
+  });
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: airfield.id,
+    unitType: 'PARATROOPERS',
+  });
+
+  const expectedCost =
+    UNIT_SPECS.INFANTRY.cost.money +
+    UNIT_SPECS.TANK.cost.money +
+    UNIT_SPECS.ARTILLERY.cost.money +
+    UNIT_SPECS.PARATROOPERS.cost.money;
+  assert(
+    Math.abs(human.money - (moneyBefore - expectedCost)) < 1,
+    'Unit production must deduct exact money cost',
+  );
+
+  for (let t = 0; t < 110; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const humanUnits = state.units.filter((u) => u.ownerId === humanId);
+  assert(
+    humanUnits.some((u) => u.type === 'INFANTRY') &&
+      humanUnits.some((u) => u.type === 'TANK') &&
+      humanUnits.some((u) => u.type === 'ARTILLERY') &&
+      humanUnits.some((u) => u.type === 'PARATROOPERS'),
+    'All 4 ground unit types (INFANTRY, TANK, ARTILLERY, PARATROOPERS) must spawn after productionTicks',
+  );
+
+  // Move & Merge two TANK stacks
+  const tank1 = humanUnits.find((u) => u.type === 'TANK')!;
+  const tank2 = spawnUnitStack(state, humanId, 'TANK', tank1.x + 6, tank1.y);
+  dispatchAction(state, {
+    type: 'MERGE_UNITS',
+    playerId: humanId,
+    unitIds: [tank1.id, tank2.id],
+  });
+  const remainingTanks = state.units.filter((u) => u.ownerId === humanId && u.type === 'TANK');
+  assert(
+    remainingTanks.length === 1 &&
+      remainingTanks[0].count === 2 &&
+      remainingTanks[0].hp === 2 * UNIT_SPECS.TANK.hpPerUnit,
+    `Nearby same-type units must merge into x2 stack (got len=${remainingTanks.length}, count=${remainingTanks[0]?.count})`,
+  );
+
+  const moveTargetX = remainingTanks[0].x - 10;
+  const moveTargetY = remainingTanks[0].y;
+  const startTankX = remainingTanks[0].x;
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [remainingTanks[0].id],
+    targetX: moveTargetX,
+    targetY: moveTargetY,
+  });
+  for (let t = 0; t < 12; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    remainingTanks[0].x < startTankX - 3,
+    `MOVE_UNITS must move tank across plains (${startTankX.toFixed(1)} -> ${remainingTanks[0].x.toFixed(1)})`,
+  );
+
+  // Verify TANK slows down on MOUNTAINS compared to PLAINS
+  const mtnTank = spawnUnitStack(state, humanId, 'TANK', arena.x - 10, arena.y + 12, 1);
+  for (let x = arena.x - 12; x <= arena.x + 2; x++) {
+    for (let y = arena.y + 10; y <= arena.y + 14; y++) {
+      state.terrain[y * state.width + x] = TerrainType.MOUNTAINS;
+    }
+  }
+  const mtnStartX = mtnTank.x;
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [mtnTank.id],
+    targetX: arena.x + 2,
+    targetY: arena.y + 12,
+  });
+  for (let t = 0; t < 12; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const plainsDist = startTankX - remainingTanks[0].x;
+  const mountainDist = mtnTank.x - mtnStartX;
+  assert(
+    UNIT_SPECS.TANK.speedMountains < UNIT_SPECS.TANK.speedPlains &&
+      mountainDist > 0 &&
+      mountainDist < plainsDist * 0.55,
+    `TANK must move significantly slower in mountains (${mountainDist.toFixed(2)}) than plains (${plainsDist.toFixed(2)})`,
+  );
+
+  // Uncontested paradrop away from AA (before enemy builds AA)
+  const para1 = humanUnits.find((u) => u.type === 'PARATROOPERS')!;
+  dispatchAction(state, {
+    type: 'PARADROP_UNIT',
+    playerId: humanId,
+    unitId: para1.id,
+    targetX: arena.x + 16,
+    targetY: arena.y - 12,
+  });
+  assert(
+    para1.canParadrop === false &&
+      para1.dropVulnerabilityTicks > 0 &&
+      airfield.paradropCooldownTicks > 0 &&
+      para1.hp === para1.maxHp,
+    'Uncontested paradrop must land cleanly, set vulnerability + cooldown, and consume one-time drop',
+  );
+
+  // Build enemy 2x AA_BATTERY and wait for airfield cooldown, then drop para2 into AA coverage
+  enemy.money = 5000;
+  enemy.buildingMaterial = 5000;
+  enemy.industry = 5000;
+  enemy.energyReserve = 2000;
+  enemy.manpower = 600;
+  const aaSpot = { x: arena.x + 20, y: arena.y + 8 };
+  const aa = placeBuilding(state, enemyId, 'AA_BATTERY', aaSpot.x, aaSpot.y, 1)!;
+  assert(aa !== null, 'Enemy AA_BATTERY placement must succeed');
+  stackBuilding(state, enemyId, aa.id, 1);
+  for (let t = 0; t < 110; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(aa.stackCount === 2, 'Enemy 2x AA_BATTERY must complete');
+  assert(airfield.paradropCooldownTicks === 0, 'Airfield paradrop cooldown must expire');
+
+  const para2 = spawnUnitStack(state, humanId, 'PARATROOPERS', airfield.x + 0.5, airfield.y + 0.5, 2);
+  dispatchAction(state, {
+    type: 'PARADROP_UNIT',
+    playerId: humanId,
+    unitId: para2.id,
+    targetX: aa.x + 2,
+    targetY: aa.y,
+  });
+  assert(
+    para2.hp < para2.maxHp * 0.7,
+    `Enemy AA_BATTERY must heavily damage paratroopers landing inside AA coverage (hp=${para2.hp.toFixed(1)} vs max=${para2.maxHp})`,
+  );
+
+  console.log('PASS [p]: Production, MOVE_UNITS, stack MERGE, Paradrop cooldown & AA_BATTERY interception verified.');
+}
+
+function testLockVsRangeAutoAttachAndArrowUnitBalance(): void {
+  const state = createInitialGameState(9602);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 9999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 28, 18);
+  paintBlock(state, arena.x - 20, arena.y - 12, arena.x - 1, arena.y + 12, humanId);
+  paintBlock(state, arena.x, arena.y - 12, arena.x + 20, arena.y + 12, WILDERNESS_OWNER);
+
+  const lockUnit = spawnUnitStack(state, humanId, 'TANK', arena.x - 10, arena.y - 4, 2, {
+    stance: 'LOCK',
+  });
+  const rangeUnit = spawnUnitStack(state, humanId, 'TANK', arena.x - 10, arena.y + 4, 2, {
+    stance: 'RANGE',
+  });
+  const lockStartX = lockUnit.x;
+  const rangeStartX = rangeUnit.x;
+
+  human.manpower = 450;
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: arena.x - 2, y: arena.y },
+      { x: arena.x + 14, y: arena.y },
+    ],
+    manpowerPercent: 50,
+  });
+
+  for (let t = 0; t < 15; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    rangeUnit.attachedOrderId !== null && rangeUnit.x > rangeStartX + 2,
+    `RANGE unit within operationRadius must auto-attach and advance (${rangeStartX} -> ${rangeUnit.x.toFixed(1)})`,
+  );
+  assert(
+    lockUnit.attachedOrderId === null && Math.abs(lockUnit.x - lockStartX) < 0.01,
+    `LOCK unit must hold position and never attach (${lockStartX} vs ${lockUnit.x})`,
+  );
+
+  // Let order finish and check field vs base repair rate
+  for (let t = 0; t < MAX_ORDER_TICKS; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    rangeUnit.attachedOrderId === null,
+    'RANGE unit must detach cleanly after order finishes and hold newly captured ground',
+  );
+
+  // Repair comparison: field vs near friendly CITY/FACTORY
+  const fieldUnit = spawnUnitStack(state, humanId, 'INFANTRY', arena.x + 12, arena.y + 10, 1);
+  const baseUnit = spawnUnitStack(state, humanId, 'INFANTRY', human.capitalX + 1, human.capitalY + 1, 1);
+  fieldUnit.hp = fieldUnit.maxHp * 0.4;
+  baseUnit.hp = baseUnit.maxHp * 0.4;
+  for (let t = 0; t < 20; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    baseUnit.hp > fieldUnit.hp + 4,
+    `Repair near friendly base must outpace field repair (${baseUnit.hp.toFixed(1)} vs ${fieldUnit.hp.toFixed(1)})`,
+  );
+
+  // Arrow-vs-unit balance against fortified enemy border (TRENCH + BUNKER)
+  const runFortifiedTrial = (withUnits: boolean): { readonly captured: number; readonly costPerCell: number } => {
+    const s = createInitialGameState(9603);
+    const st = findPlainsLandSpot(s, 220, 270);
+    dispatchAction(s, { type: 'SELECT_START_POSITION', x: st.x, y: st.y });
+    const hId = s.humanPlayerId;
+    const eId = 2;
+    const h = s.players.get(hId)!;
+    const e = s.players.get(eId)!;
+    for (const p of s.players.values()) {
+      if (p.isBot) p.nextBotDecisionTick = 9999;
+    }
+
+    const box = findInlandPlainsCenter(s, 24, 16);
+    paintBlock(s, box.x - 16, box.y - 10, box.x - 1, box.y + 10, hId);
+    paintBlock(s, box.x, box.y - 10, box.x + 16, box.y + 10, eId);
+    setWarRelation(s, hId, eId);
+    dispatchAction(s, { type: 'TICK' });
+
+    e.money = 5000;
+    e.buildingMaterial = 5000;
+    e.industry = 5000;
+    e.energyReserve = 2000;
+    e.manpower = 800;
+    placeBuilding(s, eId, 'TRENCH', box.x + 3, box.y - 5, 1);
+    placeBuilding(s, eId, 'BUNKER', box.x + 3, box.y + 5, 1);
+    for (let t = 0; t < BUILDING_SPECS.BUNKER.constructionTicks + 2; t++) {
+      dispatchAction(s, { type: 'TICK' });
+    }
+
+    e.manpower = 450 + e.allocatedManpower;
+    h.maxManpower = 1000;
+    h.manpower = 600;
+    dispatchAction(s, { type: 'TICK' });
+    h.manpower = 600;
+
+    if (withUnits) {
+      spawnUnitStack(s, hId, 'INFANTRY', box.x - 3, box.y - 3, 2);
+      spawnUnitStack(s, hId, 'TANK', box.x - 3, box.y + 2, 2);
+      spawnUnitStack(s, hId, 'ARTILLERY', box.x - 9, box.y, 2);
+    }
+
+    let beforeOwned = 0;
+    for (let i = 0; i < s.owners.length; i++) {
+      if (s.owners[i] === hId) beforeOwned++;
+    }
+
+    dispatchAction(s, {
+      type: 'CREATE_ATTACK_ORDER',
+      playerId: hId,
+      waypoints: [
+        { x: box.x - 1, y: box.y },
+        { x: box.x + 14, y: box.y },
+      ],
+      manpowerPercent: 55,
+      targetOwnerId: eId,
+    });
+    const ord = s.attackOrders.find((o) => o.playerId === hId)!;
+
+    for (let t = 0; t < 16; t++) {
+      dispatchAction(s, { type: 'TICK' });
+    }
+    let afterOwned = 0;
+    for (let i = 0; i < s.owners.length; i++) {
+      if (s.owners[i] === hId) afterOwned++;
+    }
+    const captured = afterOwned - beforeOwned;
+    const spent = ord.manpowerCommitted - ord.manpowerRemaining;
+    return { captured, costPerCell: spent / Math.max(1, captured) };
+  };
+
+  const bare = runFortifiedTrial(false);
+  const supported = runFortifiedTrial(true);
+  assert(
+    supported.captured > bare.captured && supported.costPerCell < bare.costPerCell,
+    `Tactical units supporting arrow must beat bare arrow vs fortifications (cells: ${supported.captured} vs ${bare.captured}, cost/cell: ${supported.costPerCell.toFixed(2)} vs ${bare.costPerCell.toFixed(2)})`,
+  );
+  // Suppress unused variable warning for enemy
+  assert(enemy.id === enemyId, 'Enemy identity intact');
+
+  console.log(
+    `PASS [q]: LOCK vs RANGE auto-attach, field/base repair & arrow-vs-unit balance (${bare.captured} vs ${supported.captured} cells) verified.`,
+  );
+}
+
+function testEncirclementSurvivalLootAndFogOfWar(): void {
+  const state = createInitialGameState(9604);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 9999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 36, 26);
+  paintBlock(state, arena.x - 30, arena.y - 20, arena.x + 30, arena.y + 20, enemyId);
+  setWarRelation(state, humanId, enemyId);
+
+  // Place a deep enemy tank far outside human border/unit vision (Fog of War test)
+  const hiddenTank = spawnUnitStack(state, enemyId, 'TANK', arena.x + 22, arena.y, 3);
+  hiddenTank.targetX = arena.x + 10;
+  hiddenTank.targetY = arena.y + 5;
+
+  const fogSnap = createClientRenderState(state);
+  assert(
+    !fogSnap.units.some((u) => u.id === hiddenTank.id),
+    'Enemy unit outside border/unit vision MUST be omitted from ClientRenderState (Fog of War)',
+  );
+
+  // Move a human INFANTRY scout within visionRadius (30) -> enemy tank becomes visible (without target leak)
+  const scout = spawnUnitStack(state, humanId, 'INFANTRY', arena.x + 4, arena.y, 1);
+  const revealedSnap = createClientRenderState(state);
+  const revealedEnemy = revealedSnap.units.find((u) => u.id === hiddenTank.id);
+  assert(
+    revealedEnemy !== undefined,
+    'Enemy unit inside friendly INFANTRY visionRadius must appear in ClientRenderState',
+  );
+  assert(
+    revealedEnemy!.targetX === null && revealedEnemy!.targetY === null,
+    'Visible enemy unit must NEVER leak destination targetX/targetY to client',
+  );
+
+  // Remove scout and test encirclement under captured tile
+  state.units = state.units.filter((u) => u.id === scout.id);
+  const trapped = scout;
+  trapped.x = arena.x;
+  trapped.y = arena.y;
+  paintBlock(state, arena.x - 2, arena.y - 2, arena.x + 2, arena.y + 2, humanId);
+  dispatchAction(state, { type: 'TICK' });
+  assert(!trapped.isEncircled, 'Unit on own territory starts supplied and not encircled');
+
+  // Enemy captures all tiles under and around trapped unit
+  paintBlock(state, arena.x - 4, arena.y - 4, arena.x + 4, arena.y + 4, enemyId);
+  annexEncircledPockets(state);
+  assert(state.units.some((u) => u.id === trapped.id), 'Unit must NOT vanish when territory under it is lost');
+
+  dispatchAction(state, { type: 'TICK' });
+  assert(trapped.isEncircled === true, 'Unit on enemy land must enter isEncircled combat state');
+
+  for (let t = 0; t < 18; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    trapped.supplyLevel < 0.3 && trapped.morale < 96 && trapped.hp < trapped.maxHp,
+    `Encircled unit without energy supply must lose supply/morale/HP (sup=${trapped.supplyLevel.toFixed(2)}, mor=${trapped.morale.toFixed(1)}, hp=${trapped.hp.toFixed(1)})`,
+  );
+
+  // Encircled unit cannot freely cross enemy land without fighting through
+  const xBeforeBreak = trapped.x;
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [trapped.id],
+    targetX: trapped.x + 24,
+    targetY: trapped.y,
+  });
+  for (let t = 0; t < 10; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    trapped.x - xBeforeBreak < 2.2,
+    `Encircled unit must NOT glide freely across enemy land (moved ${(trapped.x - xBeforeBreak).toFixed(2)} cells)`,
+  );
+
+  // Enemy crushes encircled unit and claims battle loot
+  const moneyBeforeLoot = enemy.money;
+  const matBeforeLoot = enemy.buildingMaterial;
+  spawnUnitStack(state, enemyId, 'TANK', trapped.x + 1, trapped.y, 4);
+  for (let t = 0; t < 50 && state.units.some((u) => u.id === trapped.id); t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    !state.units.some((u) => u.id === trapped.id),
+    'Overwhelmed encircled unit should fall in battle',
+  );
+  assert(
+    enemy.money > moneyBeforeLoot && enemy.buildingMaterial > matBeforeLoot,
+    `Defeating encircled unit must award resource loot (${enemy.money} > ${moneyBeforeLoot}, ${enemy.buildingMaterial} > ${matBeforeLoot})`,
+  );
+
+  console.log('PASS [r]: Encirclement survival, breakout restriction, battle loot & Fog of War verified.');
+}
+
+function testZeroManpowerEliminationAndDynamicOccupancyEnergy(): void {
+  const state = createInitialGameState(9605);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 9999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 24, 24);
+  paintBlock(state, arena.x - 16, arena.y - 16, arena.x + 16, arena.y + 16, humanId);
+  dispatchAction(state, { type: 'TICK' });
+
+  human.money = 12000;
+  human.buildingMaterial = 6000;
+  human.industry = 4000;
+  human.energyReserve = 3000;
+  human.maxManpower = 1200;
+  human.manpower = 1000;
+
+  const ppSpot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 12, false)!;
+  placeBuilding(state, humanId, 'POWER_PLANT', ppSpot.x, ppSpot.y, 5);
+  const facSpot = findSpacedOwnedSpot(state, humanId, arena.x, arena.y, 12, false)!;
+  const factory = placeBuilding(state, humanId, 'FACTORY', facSpot.x, facSpot.y, 1)!;
+  const capCity = state.buildings.find((b) => b.ownerId === humanId && b.isCapital)!;
+
+  for (let t = 0; t < BUILDING_SPECS.FACTORY.constructionTicks + 5; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(factory.stackCount === 1, 'Factory must finish construction');
+
+  // Dynamic occupancy energy scaling: 0% -> 0, 50% -> 0.5x, 100% -> 1.0x, 200% -> 1.5x
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: factory.id,
+    occupancyPct: 0,
+  });
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: capCity.id,
+    occupancyPct: 0,
+  });
+  assert(
+    factory.currentEnergyUse === 0 && capCity.currentEnergyUse === 0,
+    `0% occupancy must consume 0 energy (factory=${factory.currentEnergyUse}, city=${capCity.currentEnergyUse})`,
+  );
+
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: factory.id,
+    occupancyPct: 50,
+  });
+  assert(
+    Math.abs(factory.currentEnergyUse - BUILDING_SPECS.FACTORY.baseEnergyConsumption * 0.5) < 0.01,
+    `50% occupancy must consume 0.5x energy (got ${factory.currentEnergyUse})`,
+  );
+
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: factory.id,
+    occupancyPct: 200,
+  });
+  assert(
+    Math.abs(factory.currentEnergyUse - BUILDING_SPECS.FACTORY.baseEnergyConsumption * 1.5) < 0.01,
+    `200% occupancy must consume 1.5x energy (got ${factory.currentEnergyUse})`,
+  );
+
+  // Immediate defeat / elimination when total Manpower drops to 0
+  const bot3 = state.players.get(3)!;
+  const bot4 = state.players.get(4)!;
+  const bot2 = state.players.get(2)!;
+  assert(bot3.alive && bot4.alive && bot2.alive, 'Bots 2, 3, 4 must start alive');
+
+  // Case A: Bot 3 in blackout drops to 0 MP with no WAR neighbor -> territory reverts to wilderness
+  bot3.blackoutActive = true;
+  bot3.blackoutSeverity = 1;
+  bot3.energyReserve = 0;
+  bot3.manpower = 0.05;
+  spawnUnitStack(state, 3, 'INFANTRY', bot3.capitalX, bot3.capitalY, 1);
+  for (let t = 0; t < 15 && bot3.alive; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    bot3.isEliminated === true &&
+      bot3.alive === false &&
+      bot3.eliminationReason === 'MANPOWER_DEPLETED' &&
+      bot3.territoryCells === 0 &&
+      !state.units.some((u) => u.ownerId === 3),
+    `State at 0 Manpower must immediately be eliminated (alive=${bot3.alive}, reason=${bot3.eliminationReason}, cells=${bot3.territoryCells})`,
+  );
+
+  // Case B: Bot 4 bordering WAR neighbor Bot 2 hits 0 MP -> territory transfers to conqueror Bot 2
+  const b4Arena = findInlandPlainsCenter(state, 16, 16);
+  paintBlock(state, b4Arena.x - 6, b4Arena.y - 4, b4Arena.x - 1, b4Arena.y + 4, 2);
+  const b4Cells = paintBlock(state, b4Arena.x, b4Arena.y - 4, b4Arena.x + 4, b4Arena.y + 4, 4);
+  setWarRelation(state, 4, 2);
+  dispatchAction(state, { type: 'TICK' });
+  bot4.manpower = 0;
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    bot4.isEliminated === true &&
+      bot4.eliminationReason === 'MANPOWER_DEPLETED' &&
+      b4Cells.every((idx) => state.owners[idx] === 2),
+    'WAR conqueror bordering 0-MP collapsed state must inherit its territory',
+  );
+
+  // Human player reaching 0 MP exposes defeat in ClientRenderState
+  human.manpower = 0;
+  dispatchAction(state, { type: 'TICK' });
+  const defeatSnap = createClientRenderState(state);
+  const humanPub = defeatSnap.players.find((p) => p.id === humanId)!;
+  assert(
+    humanPub.isEliminated === true &&
+      humanPub.alive === false &&
+      humanPub.eliminationReason === 'MANPOWER_DEPLETED',
+    'Human hitting 0 Manpower must report immediate defeat in ClientRenderState',
+  );
+
+  console.log('PASS [s]: Dynamic occupancy energy scaling & immediate 0-Manpower elimination verified.');
+}
+
+function testLassoUnitSelectionPriorityOverFront(): void {
+  const controller = createEngineController(9606);
+  const pre = controller.getRenderState();
+  let sx = 360;
+  let sy = 260;
+  let foundInland = false;
+  for (let cy = 180; cy < pre.height - 60 && !foundInland; cy += 4) {
+    for (let cx = 360; cx < pre.width - 60; cx += 4) {
+      if (pre.terrain[cy * pre.width + cx] !== TerrainType.PLAINS) continue;
+      let allLand = true;
+      for (let dy = -24; dy <= 24 && allLand; dy += 2) {
+        for (let dx = -24; dx <= 24; dx += 2) {
+          if (pre.terrain[(cy + dy) * pre.width + (cx + dx)] === TerrainType.WATER) {
+            allLand = false;
+            break;
+          }
+        }
+      }
+      if (allLand) {
+        sx = cx;
+        sy = cy;
+        foundInland = true;
+        break;
+      }
+    }
+  }
+  assert(foundInland, 'Should find genuinely inland plains center');
+  controller.dispatch({ type: 'SELECT_START_POSITION', x: sx, y: sy });
+
+  const playing = controller.getRenderState();
+  const humanId = playing.humanPlayerId;
+
+  // Test terrain-aware build filtering: inland excludes PORT; coastal includes PORT
+  const validInland = getValidBuildingsForCell(playing, humanId, sx, sy);
+  assert(
+    !validInland.includes('PORT') && validInland.includes('BARRACKS') && validInland.includes('TRENCH'),
+    'Inland right-click build options must exclude PORT and include land buildings & defenses',
+  );
+
+  const coastState = createInitialGameState(9607);
+  let csx = -1;
+  let csy = -1;
+  for (let y = 120; y < 380 && csx === -1; y++) {
+    for (let x = 120; x < 620; x++) {
+      if (
+        coastState.terrain[y * coastState.width + x] === TerrainType.WATER &&
+        coastState.terrain[y * coastState.width + (x + 1)] !== TerrainType.WATER
+      ) {
+        csx = x + 1;
+        csy = y;
+        break;
+      }
+    }
+  }
+  assert(csx !== -1, 'Should find coastal land tile');
+  coastState.owners[csy * coastState.width + csx] = humanId;
+  const validCoast = getValidBuildingsForCell(coastState, humanId, csx, csy);
+  assert(
+    validCoast.includes('PORT'),
+    'Coastal right-click build options must include PORT',
+  );
+
+  controller.dispatch({
+    type: 'PLACE_BUILDING',
+    playerId: humanId,
+    buildingType: 'BARRACKS',
+    x: sx + 10,
+    y: sy,
+  });
+  for (let t = 0; t < BUILDING_SPECS.BARRACKS.constructionTicks; t++) {
+    controller.dispatch({ type: 'TICK' });
+  }
+
+  for (let t = 0; t < 240; t++) {
+    const snap = controller.getRenderState();
+    const h = snap.players.find((p) => p.id === humanId);
+    if (
+      h &&
+      (h.money ?? 0) >= UNIT_SPECS.INFANTRY.cost.money &&
+      (h.buildingMaterial ?? 0) >= UNIT_SPECS.INFANTRY.cost.buildingMaterial &&
+      (h.activeManpower ?? 0) >= UNIT_SPECS.INFANTRY.cost.manpower
+    ) {
+      break;
+    }
+    controller.dispatch({ type: 'TICK' });
+  }
+
+  controller.dispatch({
+    type: 'QUICK_PRODUCE_UNIT',
+    playerId: humanId,
+    unitType: 'INFANTRY',
+  });
+  for (let t = 0; t < UNIT_SPECS.INFANTRY.productionTicks + 4; t++) {
+    controller.dispatch({ type: 'TICK' });
+  }
+
+  const withUnit = controller.getRenderState();
+  const inf = withUnit.units.find((u) => u.ownerId === humanId && u.type === 'INFANTRY');
+  assert(inf !== undefined, 'QUICK_PRODUCE_UNIT must produce INFANTRY unit');
+
+  // Move infantry onto the eastern human frontier, then draw a lasso spanning both unit and border cells
+  controller.dispatch({
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [inf!.id],
+    targetX: sx + 13,
+    targetY: sy,
+  });
+  for (let t = 0; t < 15; t++) {
+    controller.dispatch({ type: 'TICK' });
+  }
+
+  const afterMove = controller.getRenderState();
+  const movedInf = afterMove.units.find((u) => u.id === inf!.id)!;
+  const lasso = [
+    { x: movedInf.x - 5, y: movedInf.y - 6 },
+    { x: movedInf.x + 5, y: movedInf.y - 6 },
+    { x: movedInf.x + 5, y: movedInf.y + 6 },
+    { x: movedInf.x - 5, y: movedInf.y + 6 },
+  ];
+  const hitUnits = controller.findHumanUnitsInLasso(lasso);
+  const hitFront = controller.findHumanBorderCellsFromLasso(lasso);
+  assert(
+    hitUnits.includes(movedInf.id) && hitFront.length > 0,
+    `Overlapping lasso must detect unit (${hitUnits.length}) and border (${hitFront.length}) so UI prioritizes unit`,
+  );
+
+  console.log('PASS [t]: Terrain build filtering, QUICK_PRODUCE_UNIT & lasso unit priority verified.');
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -1845,7 +2566,12 @@ function main(): void {
   testEnergyReserveCapAndCascadingBlackout();
   testFinishOffTargetAndMultiPocketCleanup();
   testDefenseBuildingsTrenchBunkerAndAA();
-  console.log('ALL 15 SIMULATION TESTS PASSED.');
+  testUnitProductionMovementMergeAndParadropAA();
+  testLockVsRangeAutoAttachAndArrowUnitBalance();
+  testEncirclementSurvivalLootAndFogOfWar();
+  testZeroManpowerEliminationAndDynamicOccupancyEnergy();
+  testLassoUnitSelectionPriorityOverFront();
+  console.log('ALL 20 SIMULATION TESTS PASSED.');
 }
 
 main();
