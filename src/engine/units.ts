@@ -57,9 +57,9 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
     nameCs: 'Obrněný svaz',
     shortCode: 'TANK',
     descriptionCs:
-      'Těžký obrněný svaz ze Zbrojovky. Vysoká průbojnost a rychlost na rovinách, zpomalený v horách a u bunkrů.',
-    producerBuilding: 'FACTORY',
-    cost: { money: 210, buildingMaterial: 0, industry: 95, manpower: 35 },
+      'Těžký obrněný svaz ze Zbrojovky (ARMORY). Vysoká průbojnost a rychlost na rovinách, zpomalený v horách a u bunkrů.',
+    producerBuilding: 'ARMORY',
+    cost: { money: 210, buildingMaterial: 45, industry: 95, manpower: 35 },
     productionTicks: 50,
     speedPlains: 5.0,
     speedMountains: 1.5,
@@ -75,8 +75,8 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
     nameCs: 'Dělostřelectvo',
     shortCode: 'DĚLO',
     descriptionCs:
-      'Palebná podpora na střední dosah ze Zbrojovky. Ničí opevněné sektory (Zákopy/Pevnosti) a nepřátelské svazky.',
-    producerBuilding: 'FACTORY',
+      'Palebná podpora ze Zbrojovky (ARMORY). Automaticky i manuálně (F) ostřeluje opevnění, frontu i jednotky na velký dosah.',
+    producerBuilding: 'ARMORY',
     cost: { money: 190, buildingMaterial: 55, industry: 85, manpower: 30 },
     productionTicks: 45,
     speedPlains: 2.6,
@@ -84,7 +84,7 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
     hpPerUnit: 95,
     attack: 32,
     defense: 9,
-    attackRange: 26,
+    attackRange: 34,
     operationRadius: 54,
     visionRadius: 20,
   },
@@ -221,6 +221,10 @@ export function spawnUnitStack(
     operationRadius: spec.operationRadius,
     targetX: null,
     targetY: null,
+    waypoints: [],
+    fireMissionX: null,
+    fireMissionY: null,
+    fireMissionTicksRemaining: 0,
     attachedOrderId: null,
     attachedOrderKind: null,
     manualOrder: false,
@@ -518,6 +522,321 @@ export function stepUnitProduction(state: GameState): void {
   }
 }
 
+export const NAV_CELL_STEP = 4;
+export const ARTILLERY_FIRE_MISSION_TICKS = 60;
+
+function pushHumanNotice(state: GameState, playerId: number, messageCs: string): void {
+  if (playerId !== state.humanPlayerId) {
+    return;
+  }
+  state.lastNotice = {
+    id: state.nextNoticeId++,
+    messageCs,
+    tick: state.tick,
+  };
+  state.stateVersion++;
+}
+
+function isPassableUnitCell(
+  state: GameState,
+  playerId: number,
+  ix: number,
+  iy: number,
+  waterOnly = false,
+): boolean {
+  if (ix < 0 || ix >= state.width || iy < 0 || iy >= state.height) {
+    return false;
+  }
+  const idx = iy * state.width + ix;
+  if (state.terrain[idx] === TerrainType.WATER) {
+    return false;
+  }
+  if (!waterOnly) {
+    const cellOwner = state.owners[idx];
+    if (
+      cellOwner >= 0 &&
+      cellOwner !== playerId &&
+      getUnitRelation(state, playerId, cellOwner) === 'NEUTRAL'
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasDirectPassableLine(
+  state: GameState,
+  playerId: number,
+  a: Point,
+  b: Point,
+  waterOnly = false,
+): boolean {
+  const dist = Math.hypot(b.x - a.x, b.y - a.y);
+  const steps = Math.max(1, Math.ceil(dist / 0.55));
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    const px = Math.floor(a.x + (b.x - a.x) * t);
+    const py = Math.floor(a.y + (b.y - a.y) * t);
+    if (!isPassableUnitCell(state, playerId, px, py, waterOnly)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findCoarseBlockAnchor(
+  state: GameState,
+  playerId: number,
+  gx: number,
+  gy: number,
+  waterOnly: boolean,
+): Point | null {
+  const x0 = gx * NAV_CELL_STEP;
+  const y0 = gy * NAV_CELL_STEP;
+  const cx = x0 + NAV_CELL_STEP * 0.5;
+  const cy = y0 + NAV_CELL_STEP * 0.5;
+  let best: Point | null = null;
+  let bestDistSq = Infinity;
+
+  for (let dy = 0; dy < NAV_CELL_STEP; dy++) {
+    const y = y0 + dy;
+    if (y >= state.height) continue;
+    for (let dx = 0; dx < NAV_CELL_STEP; dx++) {
+      const x = x0 + dx;
+      if (x >= state.width) continue;
+      if (!isPassableUnitCell(state, playerId, x, y, waterOnly)) continue;
+      const dSq = (x + 0.5 - cx) * (x + 0.5 - cx) + (y + 0.5 - cy) * (y + 0.5 - cy);
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        best = { x: x + 0.5, y: y + 0.5 };
+      }
+    }
+  }
+  return best;
+}
+
+interface HeapNode {
+  readonly idx: number;
+  readonly f: number;
+}
+
+/**
+ * Coarse-grid (4x4 cell) A* land pathfinder with line-of-sight edge checks and greedy
+ * string-pulling waypoint smoothing. Never crosses water or unapproved neutral states.
+ */
+export function findLandPath(
+  state: GameState,
+  playerId: number,
+  unitType: UnitType,
+  startX: number,
+  startY: number,
+  goalX: number,
+  goalY: number,
+  waterOnly = false,
+): Point[] | null {
+  const startPt: Point = {
+    x: Math.max(0.5, Math.min(state.width - 0.5, startX)),
+    y: Math.max(0.5, Math.min(state.height - 0.5, startY)),
+  };
+  const goalPt: Point = {
+    x: Math.max(0.5, Math.min(state.width - 0.5, goalX)),
+    y: Math.max(0.5, Math.min(state.height - 0.5, goalY)),
+  };
+
+  if (
+    !isPassableUnitCell(state, playerId, Math.floor(goalPt.x), Math.floor(goalPt.y), waterOnly)
+  ) {
+    return null;
+  }
+
+  if (hasDirectPassableLine(state, playerId, startPt, goalPt, waterOnly)) {
+    return [goalPt];
+  }
+
+  const gw = Math.ceil(state.width / NAV_CELL_STEP);
+  const gh = Math.ceil(state.height / NAV_CELL_STEP);
+  const total = gw * gh;
+
+  const startGx = Math.max(0, Math.min(gw - 1, Math.floor(startPt.x / NAV_CELL_STEP)));
+  const startGy = Math.max(0, Math.min(gh - 1, Math.floor(startPt.y / NAV_CELL_STEP)));
+  const goalGx = Math.max(0, Math.min(gw - 1, Math.floor(goalPt.x / NAV_CELL_STEP)));
+  const goalGy = Math.max(0, Math.min(gh - 1, Math.floor(goalPt.y / NAV_CELL_STEP)));
+
+  const startNode = startGy * gw + startGx;
+  const goalNode = goalGy * gw + goalGx;
+
+  const anchorCache = new Map<number, Point | null>();
+  anchorCache.set(startNode, startPt);
+  anchorCache.set(goalNode, goalPt);
+
+  const getAnchor = (nIdx: number): Point | null => {
+    const cached = anchorCache.get(nIdx);
+    if (cached !== undefined) return cached;
+    const gx = nIdx % gw;
+    const gy = (nIdx - gx) / gw;
+    const found = findCoarseBlockAnchor(state, playerId, gx, gy, waterOnly);
+    anchorCache.set(nIdx, found);
+    return found;
+  };
+
+  const gScore = new Float32Array(total);
+  gScore.fill(Infinity);
+  const cameFrom = new Int32Array(total);
+  cameFrom.fill(-1);
+  const closed = new Uint8Array(total);
+
+  const heap: HeapNode[] = [];
+  const heapPush = (node: HeapNode): void => {
+    heap.push(node);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heap[parent].f <= heap[i].f) break;
+      const tmp = heap[parent];
+      heap[parent] = heap[i];
+      heap[i] = tmp;
+      i = parent;
+    }
+  };
+  const heapPop = (): HeapNode => {
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length > 0) {
+      heap[0] = last;
+      let i = 0;
+      const len = heap.length;
+      while (true) {
+        let best = i;
+        const left = i * 2 + 1;
+        const right = left + 1;
+        if (left < len && heap[left].f < heap[best].f) best = left;
+        if (right < len && heap[right].f < heap[best].f) best = right;
+        if (best === i) break;
+        const tmp = heap[i];
+        heap[i] = heap[best];
+        heap[best] = tmp;
+        i = best;
+      }
+    }
+    return top;
+  };
+
+  gScore[startNode] = 0;
+  heapPush({
+    idx: startNode,
+    f: Math.hypot(goalPt.x - startPt.x, goalPt.y - startPt.y),
+  });
+
+  const dirs: ReadonlyArray<readonly [number, number]> = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1],
+  ];
+
+  let foundGoal = false;
+  while (heap.length > 0) {
+    const curr = heapPop();
+    const u = curr.idx;
+    if (closed[u]) continue;
+    closed[u] = 1;
+
+    if (u === goalNode) {
+      foundGoal = true;
+      break;
+    }
+
+    const ux = u % gw;
+    const uy = (u - ux) / gw;
+    const uAnchor = getAnchor(u);
+    if (!uAnchor) continue;
+
+    for (const [dx, dy] of dirs) {
+      const vx = ux + dx;
+      const vy = uy + dy;
+      if (vx < 0 || vx >= gw || vy < 0 || vy >= gh) continue;
+      const v = vy * gw + vx;
+      if (closed[v]) continue;
+
+      if (dx !== 0 && dy !== 0) {
+        const adj1 = uy * gw + vx;
+        const adj2 = vy * gw + ux;
+        if (!getAnchor(adj1) || !getAnchor(adj2)) {
+          continue;
+        }
+      }
+
+      const vAnchor = getAnchor(v);
+      if (!vAnchor) continue;
+      if (!hasDirectPassableLine(state, playerId, uAnchor, vAnchor, waterOnly)) {
+        continue;
+      }
+
+      const vIx = Math.floor(vAnchor.x);
+      const vIy = Math.floor(vAnchor.y);
+      const vCellIdx = vIy * state.width + vIx;
+      let weight = state.terrain[vCellIdx] === TerrainType.MOUNTAINS
+        ? unitType === 'TANK'
+          ? 2.2
+          : 1.5
+        : 1.0;
+      const vOwner = state.owners[vCellIdx];
+      if (!waterOnly && vOwner >= 0 && vOwner !== playerId) {
+        weight *= 1.35;
+      }
+
+      const stepCost = Math.hypot(vAnchor.x - uAnchor.x, vAnchor.y - uAnchor.y) * weight;
+      const tentativeG = gScore[u] + stepCost;
+      if (tentativeG < gScore[v]) {
+        cameFrom[v] = u;
+        gScore[v] = tentativeG;
+        const h = Math.hypot(goalPt.x - vAnchor.x, goalPt.y - vAnchor.y);
+        heapPush({ idx: v, f: tentativeG + h });
+      }
+    }
+  }
+
+  if (!foundGoal) {
+    return null;
+  }
+
+  const rawPts: Point[] = [];
+  let trace = goalNode;
+  while (trace !== -1) {
+    const pt = getAnchor(trace);
+    if (pt) rawPts.push(pt);
+    if (trace === startNode) break;
+    trace = cameFrom[trace];
+  }
+  rawPts.reverse();
+  if (rawPts.length === 0) {
+    return null;
+  }
+  rawPts[0] = startPt;
+  rawPts[rawPts.length - 1] = goalPt;
+
+  // Greedy string-pulling smoothing along strict land-passable chords
+  const smoothed: Point[] = [];
+  let i = 0;
+  while (i < rawPts.length - 1) {
+    let nextIdx = i + 1;
+    for (let j = rawPts.length - 1; j > i + 1; j--) {
+      if (hasDirectPassableLine(state, playerId, rawPts[i], rawPts[j], waterOnly)) {
+        nextIdx = j;
+        break;
+      }
+    }
+    smoothed.push(rawPts[nextIdx]);
+    i = nextIdx;
+  }
+
+  return smoothed.length > 0 ? smoothed : [goalPt];
+}
+
 export function issueUnitMoveOrder(
   state: GameState,
   playerId: number,
@@ -533,27 +852,176 @@ export function issueUnitMoveOrder(
   const ix = Math.floor(clampedX);
   const iy = Math.floor(clampedY);
   if (state.terrain[iy * state.width + ix] === TerrainType.WATER) {
+    pushHumanNotice(
+      state,
+      playerId,
+      'Na vodní plochu nelze poslat pozemní jednotku — přes vodu je potřeba přístav/loď.',
+    );
+    return 0;
+  }
+
+  const targetOwner = state.owners[iy * state.width + ix];
+  if (
+    targetOwner >= 0 &&
+    targetOwner !== playerId &&
+    getUnitRelation(state, playerId, targetOwner) === 'NEUTRAL'
+  ) {
+    pushHumanNotice(
+      state,
+      playerId,
+      'Cíl leží v neutrálním státě (nejdřív vyhlaste válku).',
+    );
     return 0;
   }
 
   const idSet = new Set(unitIds);
   let updated = 0;
+  let firstFailedUnit: Unit | null = null;
   for (const unit of state.units) {
-    if (unit.ownerId === playerId && unit.count > 0 && idSet.has(unit.id)) {
-      unit.targetX = clampedX;
-      unit.targetY = clampedY;
-      unit.manualOrder = true;
-      unit.attachedOrderId = null;
-      unit.attachedOrderKind = null;
-      unit.mergeTargetUnitId = null;
-      updated++;
+    if (unit.ownerId !== playerId || unit.count <= 0 || !idSet.has(unit.id)) continue;
+    const path = findLandPath(
+      state,
+      playerId,
+      unit.type,
+      unit.x,
+      unit.y,
+      clampedX,
+      clampedY,
+      false,
+    );
+    if (!path || path.length === 0) {
+      if (!firstFailedUnit) firstFailedUnit = unit;
+      continue;
     }
+
+    unit.waypoints = path;
+    unit.targetX = clampedX;
+    unit.targetY = clampedY;
+    unit.manualOrder = true;
+    unit.attachedOrderId = null;
+    unit.attachedOrderKind = null;
+    unit.mergeTargetUnitId = null;
+    unit.fireMissionX = null;
+    unit.fireMissionY = null;
+    unit.fireMissionTicksRemaining = 0;
+    updated++;
+  }
+
+  if (updated === 0 && firstFailedUnit) {
+    const waterConnected =
+      findLandPath(
+        state,
+        playerId,
+        firstFailedUnit.type,
+        firstFailedUnit.x,
+        firstFailedUnit.y,
+        clampedX,
+        clampedY,
+        true,
+      ) !== null;
+    pushHumanNotice(
+      state,
+      playerId,
+      waterConnected
+        ? 'Soušová cesta je zablokována neutrálním státem.'
+        : 'Přes vodu nelze projít pěšky — k přesunu na ostrov je potřeba přístav/loď.',
+    );
+    return 0;
   }
 
   if (updated > 0) {
     state.stateVersion++;
   }
   return updated;
+}
+
+export function issueArtilleryFireMission(
+  state: GameState,
+  playerId: number,
+  unitIds: ReadonlyArray<number>,
+  targetX: number,
+  targetY: number,
+): number {
+  if (state.phase !== 'PLAYING') {
+    return 0;
+  }
+  const clampedX = Math.max(0.5, Math.min(state.width - 0.5, targetX));
+  const clampedY = Math.max(0.5, Math.min(state.height - 0.5, targetY));
+  const ix = Math.floor(clampedX);
+  const iy = Math.floor(clampedY);
+  const cellOwner = state.owners[iy * state.width + ix];
+  if (
+    cellOwner >= 0 &&
+    cellOwner !== playerId &&
+    getUnitRelation(state, playerId, cellOwner) !== 'WAR'
+  ) {
+    pushHumanNotice(
+      state,
+      playerId,
+      'Nelze ostřelovat neutrální nebo spojenecké území (nejdřív vyhlaste válku).',
+    );
+    return 0;
+  }
+
+  const idSet = new Set(unitIds);
+  const maxRange = UNIT_SPECS.ARTILLERY.attackRange;
+  let updated = 0;
+
+  for (const unit of state.units) {
+    if (
+      unit.ownerId !== playerId ||
+      unit.type !== 'ARTILLERY' ||
+      unit.count <= 0 ||
+      !idSet.has(unit.id)
+    ) {
+      continue;
+    }
+    if (Math.hypot(clampedX - unit.x, clampedY - unit.y) > maxRange) {
+      continue;
+    }
+
+    unit.fireMissionX = clampedX;
+    unit.fireMissionY = clampedY;
+    unit.fireMissionTicksRemaining = ARTILLERY_FIRE_MISSION_TICKS;
+    unit.targetX = null;
+    unit.targetY = null;
+    unit.waypoints = [];
+    unit.manualOrder = false;
+    unit.attachedOrderId = null;
+    unit.attachedOrderKind = null;
+    unit.mergeTargetUnitId = null;
+    updated++;
+  }
+
+  if (updated === 0) {
+    pushHumanNotice(state, playerId, 'Cíl je mimo dostřel vybraného dělostřelectva.');
+    return 0;
+  }
+
+  state.stateVersion++;
+  return updated;
+}
+
+export function cancelArtilleryFireMission(
+  state: GameState,
+  playerId: number,
+  unitIds: ReadonlyArray<number>,
+): number {
+  const idSet = new Set(unitIds);
+  let cleared = 0;
+  for (const unit of state.units) {
+    if (unit.ownerId !== playerId || !idSet.has(unit.id)) continue;
+    if (unit.fireMissionTicksRemaining > 0 || unit.fireMissionX !== null) {
+      unit.fireMissionX = null;
+      unit.fireMissionY = null;
+      unit.fireMissionTicksRemaining = 0;
+      cleared++;
+    }
+  }
+  if (cleared > 0) {
+    state.stateVersion++;
+  }
+  return cleared;
 }
 
 export function setUnitsStance(
@@ -572,6 +1040,7 @@ export function setUnitsStance(
         unit.attachedOrderKind = null;
         unit.targetX = null;
         unit.targetY = null;
+        unit.waypoints = [];
         unit.manualOrder = false;
         unit.mergeTargetUnitId = null;
       }
@@ -827,36 +1296,12 @@ function getAttachedOrderFrontPoint(state: GameState, unit: Unit): Point | null 
 function isUnitNearRepairBase(state: GameState, unit: Unit): boolean {
   for (const b of state.buildings) {
     if (b.ownerId !== unit.ownerId || b.stackCount <= 0) continue;
-    if (b.type !== 'CITY' && b.type !== 'BARRACKS' && b.type !== 'FACTORY') continue;
+    if (b.type !== 'CITY' && b.type !== 'BARRACKS' && b.type !== 'ARMORY') continue;
     if (Math.hypot(b.x + 0.5 - unit.x, b.y + 0.5 - unit.y) <= REPAIR_BASE_RADIUS) {
       return true;
     }
   }
   return false;
-}
-
-function isPassableUnitCell(
-  state: GameState,
-  playerId: number,
-  ix: number,
-  iy: number,
-): boolean {
-  if (ix < 0 || ix >= state.width || iy < 0 || iy >= state.height) {
-    return false;
-  }
-  const idx = iy * state.width + ix;
-  if (state.terrain[idx] === TerrainType.WATER) {
-    return false;
-  }
-  const cellOwner = state.owners[idx];
-  if (
-    cellOwner >= 0 &&
-    cellOwner !== playerId &&
-    getUnitRelation(state, playerId, cellOwner) === 'NEUTRAL'
-  ) {
-    return false;
-  }
-  return true;
 }
 
 function findEnemyUnitInOperationRadius(state: GameState, unit: Unit): Unit | null {
@@ -873,6 +1318,44 @@ function findEnemyUnitInOperationRadius(state: GameState, unit: Unit): Unit | nu
     best = candidate;
   }
   return best;
+}
+
+function assignUnitFollowTarget(
+  state: GameState,
+  unit: Unit,
+  goalX: number,
+  goalY: number,
+): boolean {
+  const sameGoal =
+    unit.targetX !== null &&
+    unit.targetY !== null &&
+    Math.hypot(unit.targetX - goalX, unit.targetY - goalY) <= 1.5;
+
+  if (
+    hasDirectPassableLine(
+      state,
+      unit.ownerId,
+      { x: unit.x, y: unit.y },
+      { x: goalX, y: goalY },
+      false,
+    )
+  ) {
+    unit.targetX = goalX;
+    unit.targetY = goalY;
+    unit.waypoints = [{ x: goalX, y: goalY }];
+    return true;
+  }
+
+  if (!sameGoal || unit.waypoints.length === 0 || (state.tick + unit.id) % 15 === 0) {
+    const path = findLandPath(state, unit.ownerId, unit.type, unit.x, unit.y, goalX, goalY, false);
+    if (!path || path.length === 0) {
+      return false;
+    }
+    unit.waypoints = path;
+  }
+  unit.targetX = goalX;
+  unit.targetY = goalY;
+  return true;
 }
 
 export function stepUnitsMovementAndSupply(state: GameState): void {
@@ -922,15 +1405,19 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       unit.morale = Math.min(100, unit.morale + 6.0 * TICK_DT * Math.max(0.25, ownerSupply));
     }
 
-    // RANGE auto-attach ONLY when friendly offensive order or WAR enemy is inside operationRadius
-    if (unit.stance === 'RANGE' && !unit.manualOrder && !unit.isEncircled) {
+    if (unit.fireMissionTicksRemaining > 0) {
+      // Active artillery fire mission holds battery in place until barrage completes or cancels
+      unit.targetX = null;
+      unit.targetY = null;
+      unit.waypoints = [];
+    } else if (unit.stance === 'RANGE' && !unit.manualOrder && !unit.isEncircled) {
+      // RANGE auto-attach ONLY when friendly offensive order or WAR enemy is inside operationRadius
       let frontPt = getAttachedOrderFrontPoint(state, unit);
       if (
         unit.attachedOrderId !== null &&
         frontPt !== null &&
         Math.hypot(frontPt.x - unit.x, frontPt.y - unit.y) > unit.operationRadius * 1.35
       ) {
-        // Order moved well past operational radius — detach cleanly and hold ground
         frontPt = null;
       }
 
@@ -939,6 +1426,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
         unit.attachedOrderKind = null;
         unit.targetX = null;
         unit.targetY = null;
+        unit.waypoints = [];
       } else if (unit.attachedOrderId === null) {
         const found = findOrderFrontForAttachment(state, unit);
         if (found) {
@@ -955,26 +1443,34 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           const dist = Math.hypot(dx, dy);
           const standoff = spec.attackRange * 0.68;
           if (dist > standoff + 1.5 && dist > 1e-4) {
-            unit.targetX = frontPt.x - (dx / dist) * standoff;
-            unit.targetY = frontPt.y - (dy / dist) * standoff;
+            const sxGoal = frontPt.x - (dx / dist) * standoff;
+            const syGoal = frontPt.y - (dy / dist) * standoff;
+            if (!assignUnitFollowTarget(state, unit, sxGoal, syGoal)) {
+              unit.targetX = null;
+              unit.targetY = null;
+              unit.waypoints = [];
+              unit.attachedOrderId = null;
+              unit.attachedOrderKind = null;
+            }
           } else {
             unit.targetX = null;
             unit.targetY = null;
+            unit.waypoints = [];
           }
-        } else {
-          unit.targetX = frontPt.x;
-          unit.targetY = frontPt.y;
+        } else if (!assignUnitFollowTarget(state, unit, frontPt.x, frontPt.y)) {
+          unit.targetX = null;
+          unit.targetY = null;
+          unit.waypoints = [];
+          unit.attachedOrderId = null;
+          unit.attachedOrderKind = null;
         }
       } else if (unit.mergeTargetUnitId === null) {
         const enemyInRange =
           unit.type !== 'ARTILLERY' ? findEnemyUnitInOperationRadius(state, unit) : null;
-        if (enemyInRange) {
-          unit.targetX = enemyInRange.x;
-          unit.targetY = enemyInRange.y;
-        } else {
-          // Stay firmly stationary when no own attack arrow or enemy is within operationRadius
+        if (!enemyInRange || !assignUnitFollowTarget(state, unit, enemyInRange.x, enemyInRange.y)) {
           unit.targetX = null;
           unit.targetY = null;
+          unit.waypoints = [];
         }
       }
     } else if (unit.stance === 'LOCK') {
@@ -983,6 +1479,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       if (!unit.manualOrder && unit.mergeTargetUnitId === null) {
         unit.targetX = null;
         unit.targetY = null;
+        unit.waypoints = [];
       }
     }
 
@@ -996,17 +1493,30 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       }
     }
 
-    // Movement integration with coastline/neutral obstacle steering
+    // Waypoint-guided movement integration along A* smoothed land corridor
     if (unit.targetX !== null && unit.targetY !== null) {
-      const dx = unit.targetX - unit.x;
-      const dy = unit.targetY - unit.y;
+      while (
+        unit.waypoints.length > 0 &&
+        Math.hypot(unit.waypoints[0].x - unit.x, unit.waypoints[0].y - unit.y) <= 1.25
+      ) {
+        unit.waypoints.shift();
+      }
+
+      const activePt: Point =
+        unit.waypoints.length > 0
+          ? unit.waypoints[0]
+          : { x: unit.targetX, y: unit.targetY };
+      const finalDist = Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y);
+      const dx = activePt.x - unit.x;
+      const dy = activePt.y - unit.y;
       const dist = Math.hypot(dx, dy);
 
-      if (dist <= 1.15) {
+      if (finalDist <= 1.15 && unit.waypoints.length === 0) {
         unit.targetX = null;
         unit.targetY = null;
+        unit.waypoints = [];
         unit.manualOrder = false;
-      } else {
+      } else if (dist > 1e-4) {
         const curTerrain = terrain[curIy * width + curIx];
         const baseSpeed =
           curTerrain === TerrainType.MOUNTAINS ? spec.speedMountains : spec.speedPlains;
@@ -1014,45 +1524,51 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
         const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
         let stepDist = Math.min(dist, baseSpeed * supplyMul * moraleMul * TICK_DT);
 
-        const baseUx = dx / dist;
-        const baseUy = dy / dist;
-        let steerX = baseUx;
-        let steerY = baseUy;
-        let canStep = true;
+        let ux = dx / dist;
+        let uy = dy / dist;
+        const probeDist = Math.max(stepDist, 0.85);
+        let probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + ux * probeDist)));
+        let probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + uy * probeDist)));
+        let canStep = isPassableUnitCell(state, unit.ownerId, probeX, probeY, false);
 
-        const probeDist = Math.max(stepDist, 0.9);
-        const directProbeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + baseUx * probeDist)));
-        const directProbeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + baseUy * probeDist)));
-        if (!isPassableUnitCell(state, unit.ownerId, directProbeX, directProbeY)) {
-          canStep = false;
-          const steerAngles = [0.42, -0.42, 0.92, -0.92, 1.34, -1.34];
-          for (const rad of steerAngles) {
-            const c = Math.cos(rad);
-            const s = Math.sin(rad);
-            const candUx = baseUx * c - baseUy * s;
-            const candUy = baseUx * s + baseUy * c;
-            const p1x = Math.max(0, Math.min(width - 1, Math.floor(unit.x + candUx * probeDist)));
-            const p1y = Math.max(0, Math.min(height - 1, Math.floor(unit.y + candUy * probeDist)));
-            const farDist = Math.max(2.2, probeDist * 2.2);
-            const p2x = Math.max(0, Math.min(width - 1, Math.floor(unit.x + candUx * farDist)));
-            const p2y = Math.max(0, Math.min(height - 1, Math.floor(unit.y + candUy * farDist)));
-            if (
-              isPassableUnitCell(state, unit.ownerId, p1x, p1y) &&
-              isPassableUnitCell(state, unit.ownerId, p2x, p2y)
-            ) {
-              steerX = candUx;
-              steerY = candUy;
-              canStep = true;
-              break;
+        if (!canStep) {
+          // Recompute coarse land path once if map border/relation changed dynamically mid-march
+          const replanned = findLandPath(
+            state,
+            unit.ownerId,
+            unit.type,
+            unit.x,
+            unit.y,
+            unit.targetX,
+            unit.targetY,
+            false,
+          );
+          if (replanned && replanned.length > 0) {
+            unit.waypoints = replanned;
+            const nextPt = replanned[0];
+            const ndx = nextPt.x - unit.x;
+            const ndy = nextPt.y - unit.y;
+            const ndist = Math.hypot(ndx, ndy);
+            if (ndist > 1e-4) {
+              ux = ndx / ndist;
+              uy = ndy / ndist;
+              stepDist = Math.min(ndist, stepDist);
+              probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + ux * probeDist)));
+              probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + uy * probeDist)));
+              canStep = isPassableUnitCell(state, unit.ownerId, probeX, probeY, false);
             }
+          } else {
+            unit.targetX = null;
+            unit.targetY = null;
+            unit.waypoints = [];
+            unit.manualOrder = false;
+            stepDist = 0;
           }
         }
 
         if (!canStep) {
           stepDist = 0;
         } else {
-          const probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + steerX * probeDist)));
-          const probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + steerY * probeDist)));
           const probeIdx = probeY * width + probeX;
           const probeOwner = owners[probeIdx];
 
@@ -1069,7 +1585,6 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
             const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
 
             if (unit.isEncircled) {
-              // Trapped in pocket: cannot glide freely through enemy tiles without fighting out
               stepDist *= 0.08 * defenseMul;
               unit.breakoutAccum += stepDist;
               if (unit.breakoutAccum >= 1.2) {
@@ -1083,18 +1598,17 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
             unit.isEncircled &&
             (probeOwner === unit.ownerId || probeOwner === WILDERNESS_OWNER)
           ) {
-            // Stepping directly back onto adjacent friendly/open land breaks out cleanly
             stepDist *= 0.48;
           }
         }
 
         if (stepDist > 0) {
-          const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + steerX * stepDist));
-          const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + steerY * stepDist));
+          const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + ux * stepDist));
+          const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + uy * stepDist));
           const nIx = Math.floor(nx);
           const nIy = Math.floor(ny);
           const nIdx = nIy * width + nIx;
-          if (isPassableUnitCell(state, unit.ownerId, nIx, nIy)) {
+          if (isPassableUnitCell(state, unit.ownerId, nIx, nIy, false)) {
             unit.x = nx;
             unit.y = ny;
 
@@ -1218,6 +1732,10 @@ export function toPublicUnitInfo(unit: Unit, viewerPlayerId: number): PublicUnit
     operationRadius: isOwn ? unit.operationRadius : 0,
     targetX: isOwn ? unit.targetX : null,
     targetY: isOwn ? unit.targetY : null,
+    waypoints: isOwn ? unit.waypoints.map((p) => ({ ...p })) : [],
+    fireMissionX: isOwn ? unit.fireMissionX : null,
+    fireMissionY: isOwn ? unit.fireMissionY : null,
+    fireMissionTicksRemaining: isOwn ? unit.fireMissionTicksRemaining : 0,
     attachedOrderId: isOwn ? unit.attachedOrderId : null,
     isEncircled: unit.isEncircled,
     supplyLevel: isOwn ? unit.supplyLevel : 1,

@@ -91,6 +91,9 @@ export class HudController {
   private restartBtn!: HTMLButtonElement;
 
   private startBanner!: HTMLElement;
+  private noticeToastEl!: HTMLElement;
+  private lastNoticeId = -1;
+  private noticeHideAtMs = 0;
   private bottomRow!: HTMLElement;
   private bottomStack!: HTMLElement;
   private sliderEl!: HTMLInputElement;
@@ -166,6 +169,8 @@ export class HudController {
       onSetUnitsStance: callbacks.onSetUnitsStance,
       onMergeUnits: callbacks.onMergeUnits,
       onStartParadrop: callbacks.onStartParadrop,
+      onStartArtilleryFire: callbacks.onStartArtilleryFire,
+      onCancelArtilleryFire: callbacks.onCancelArtilleryFire,
       onClearUnitSelection: callbacks.onClearUnitSelection,
     });
 
@@ -262,6 +267,7 @@ export class HudController {
         <div class="hud-panel hud-prompt-banner" data-el="start-banner">
           Klikněte levým tlačítkem na libovolnou volnou pevninu Evropy pro založení hlavního města.
         </div>
+        <div class="hud-notice-toast hidden" data-el="notice-toast"></div>
       </div>
 
       <div class="hud-bottom-row">
@@ -349,8 +355,8 @@ export class HudController {
               <span>Radiální stavební menu platné pro daný terén</span>
             </div>
             <div class="hud-legend-row">
-              <span class="hud-legend-key">L / G / P / V</span>
-              <span>LOCK/RANGE · Sloučit · Výsadek · Rámeček jednotek</span>
+              <span class="hud-legend-key">L / G / P / F / V</span>
+              <span>LOCK/RANGE · Sloučit · Výsadek · Palba · Výběr</span>
             </div>
           </div>
         </div>
@@ -403,6 +409,7 @@ export class HudController {
     this.pauseBtn = this.query<HTMLButtonElement>('[data-action="pause"]');
     this.restartBtn = this.query<HTMLButtonElement>('[data-action="restart"]');
     this.startBanner = this.query('[data-el="start-banner"]');
+    this.noticeToastEl = this.query('[data-el="notice-toast"]');
     this.bottomStack = this.query('[data-el="bottom-stack"]');
     this.bottomRow = this.query('[data-el="tactical-bar"]');
     this.sliderEl = this.query<HTMLInputElement>('[data-el="mp-slider"]');
@@ -554,6 +561,7 @@ export class HudController {
     selectedTarget: SelectedTarget | null = null,
     selectedUnitIds: ReadonlySet<number> = new Set(),
     paradropUnitId: number | null = null,
+    artilleryFireMode: boolean = false,
   ): void {
     const isPlaying = state.phase === 'PLAYING';
 
@@ -578,7 +586,21 @@ export class HudController {
     this.buildMenu.update(state, selectedBuildType, buildBatchSize);
     this.terrainBuildMenu.update(state, buildBatchSize);
     this.buildingMenu.update(state);
-    this.unitPanel.update(state, selectedUnitIds, paradropUnitId);
+    this.unitPanel.update(state, selectedUnitIds, paradropUnitId, artilleryFireMode);
+
+    if (state.lastNotice && state.lastNotice.id !== this.lastNoticeId) {
+      this.lastNoticeId = state.lastNotice.id;
+      this.noticeToastEl.textContent = state.lastNotice.messageCs;
+      this.noticeToastEl.classList.remove('hidden');
+      this.noticeHideAtMs = (typeof performance !== 'undefined' ? performance.now() : 0) + 4200;
+    } else if (
+      this.noticeHideAtMs > 0 &&
+      typeof performance !== 'undefined' &&
+      performance.now() > this.noticeHideAtMs
+    ) {
+      this.noticeToastEl.classList.add('hidden');
+      this.noticeHideAtMs = 0;
+    }
 
     if (!isPlaying) {
       this.defeatDismissed = false;

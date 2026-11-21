@@ -32,7 +32,7 @@ export enum TerrainType {
   MOUNTAINS = 2,
 }
 
-export type ResourceType = 'CONSTRUCTION_MATERIAL' | 'BASIC_ENERGY';
+export type ResourceType = 'CONSTRUCTION_MATERIAL' | 'BASIC_ENERGY' | 'INDUSTRIAL';
 
 export type DefenseBuildingType = 'TRENCH' | 'BUNKER' | 'AA_BATTERY';
 
@@ -41,6 +41,7 @@ export type BuildingType =
   | 'MINE'
   | 'POWER_PLANT'
   | 'FACTORY'
+  | 'ARMORY'
   | 'LAB'
   | 'BARRACKS'
   | 'PORT'
@@ -58,6 +59,7 @@ export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'MINE',
   'POWER_PLANT',
   'FACTORY',
+  'ARMORY',
   'LAB',
   'BARRACKS',
   'PORT',
@@ -71,6 +73,7 @@ export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'MINE',
   'POWER_PLANT',
   'FACTORY',
+  'ARMORY',
   'LAB',
   'BARRACKS',
   'PORT',
@@ -119,7 +122,7 @@ export interface UnitSpec {
   readonly nameCs: string;
   readonly shortCode: string;
   readonly descriptionCs: string;
-  readonly producerBuilding: 'BARRACKS' | 'FACTORY' | 'AIRFIELD';
+  readonly producerBuilding: 'BARRACKS' | 'ARMORY' | 'AIRFIELD';
   readonly cost: UnitCost;
   readonly productionTicks: number;
   readonly speedPlains: number;
@@ -130,6 +133,21 @@ export interface UnitSpec {
   readonly attackRange: number;
   readonly operationRadius: number;
   readonly visionRadius: number;
+}
+
+export interface ArtilleryExplosionFx {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly radius: number;
+  ttlTicks: number;
+  readonly maxTtlTicks: number;
+}
+
+export interface UiNotice {
+  readonly id: number;
+  readonly messageCs: string;
+  readonly tick: number;
 }
 
 export interface UnitProductionJob {
@@ -158,6 +176,10 @@ export interface Unit {
   readonly operationRadius: number;
   targetX: number | null;
   targetY: number | null;
+  waypoints: Point[];
+  fireMissionX: number | null;
+  fireMissionY: number | null;
+  fireMissionTicksRemaining: number;
   attachedOrderId: number | null;
   attachedOrderKind: 'ATTACK' | 'FRONT_PUSH' | null;
   manualOrder: boolean;
@@ -186,6 +208,10 @@ export interface PublicUnitInfo {
   readonly operationRadius: number;
   readonly targetX: number | null;
   readonly targetY: number | null;
+  readonly waypoints: ReadonlyArray<Point>;
+  readonly fireMissionX: number | null;
+  readonly fireMissionY: number | null;
+  readonly fireMissionTicksRemaining: number;
   readonly attachedOrderId: number | null;
   readonly isEncircled: boolean;
   readonly supplyLevel: number;
@@ -424,6 +450,10 @@ export interface GameState {
   nextBuildingId: number;
   units: Unit[];
   nextUnitId: number;
+  artilleryExplosions: ArtilleryExplosionFx[];
+  nextFxId: number;
+  lastNotice: UiNotice | null;
+  nextNoticeId: number;
   lastTerritorySyncVersion: number;
   attackOrders: AttackOrder[];
   frontPushOrders: FrontPushOrder[];
@@ -449,6 +479,8 @@ export interface ClientRenderState {
   readonly tradeAgreements: ReadonlyArray<string>;
   readonly buildings: ReadonlyArray<PublicBuildingInfo>;
   readonly units: ReadonlyArray<PublicUnitInfo>;
+  readonly artilleryExplosions: ReadonlyArray<Readonly<ArtilleryExplosionFx>>;
+  readonly lastNotice: UiNotice | null;
   readonly attackOrders: ReadonlyArray<Readonly<AttackOrder>>;
   readonly frontPushOrders: ReadonlyArray<Readonly<FrontPushOrder>>;
   readonly publicResourceZones: ReadonlyArray<ResourceZonePublic>;
@@ -590,4 +622,16 @@ export type Action =
       readonly unitId: number;
       readonly targetX: number;
       readonly targetY: number;
+    }
+  | {
+      readonly type: 'ARTILLERY_FIRE_MISSION';
+      readonly playerId: number;
+      readonly unitIds: ReadonlyArray<number>;
+      readonly targetX: number;
+      readonly targetY: number;
+    }
+  | {
+      readonly type: 'CANCEL_FIRE_MISSION';
+      readonly playerId: number;
+      readonly unitIds: ReadonlyArray<number>;
     };

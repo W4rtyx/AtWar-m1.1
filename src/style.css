@@ -1174,10 +1174,10 @@ body {
 
 .hud-radial-ring {
   position: absolute;
-  left: -188px;
-  top: -152px;
-  width: 376px;
-  height: 304px;
+  left: -198px;
+  top: -158px;
+  width: 396px;
+  height: 316px;
   border-radius: 50%;
   border: 1px dashed rgba(126, 166, 194, 0.34);
   background: radial-gradient(ellipse, rgba(16, 22, 28, 0.44) 44%, rgba(16, 22, 28, 0.08) 100%);
@@ -1500,6 +1500,31 @@ body {
 .hud-btn-drop {
   border-color: #4f8ca8;
   color: #bde6f8;
+}
+
+.hud-btn-artillery {
+  border-color: #a86c3d;
+  color: #f8d4a6;
+}
+
+.hud-btn-artillery.active {
+  background: #523015;
+  border-color: #e69d52;
+  color: #fff0d6;
+}
+
+.hud-notice-toast {
+  align-self: center;
+  margin-top: 6px;
+  padding: 6px 14px;
+  border-radius: 5px;
+  background: rgba(58, 28, 22, 0.94);
+  border: 1px solid #c96854;
+  color: #ffdfd8;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
 }
 
 .hud-unit-order-hint {

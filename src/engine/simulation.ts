@@ -39,6 +39,7 @@ import {
 import { generateEuropeMap } from './mapGenerator';
 import {
   Action,
+  ArtilleryExplosionFx,
   BETRAYAL_DEBUFF_TICKS,
   BETRAYAL_MONEY_PENALTY_RATIO,
   Building,
@@ -57,10 +58,14 @@ import {
   getRelationKey,
 } from './types';
 import {
+  BORDER_VISION_RADIUS,
+  UNIT_SPECS,
+  cancelArtilleryFireMission,
   executeParadrop,
   findHumanUnitsInPolygon,
   findHumanUnitsInRect,
   isUnitVisibleToPlayer,
+  issueArtilleryFireMission,
   issueUnitMoveOrder,
   mergeUnitStacks,
   queueUnitProduction,
@@ -124,6 +129,10 @@ function createBaseState(seed: number): GameState {
     nextBuildingId: 1,
     units: [],
     nextUnitId: 1,
+    artilleryExplosions: [],
+    nextFxId: 1,
+    lastNotice: null,
+    nextNoticeId: 1,
     lastTerritorySyncVersion: -1,
     attackOrders: [],
     frontPushOrders: [],
@@ -1088,7 +1097,11 @@ function handleSetBuildingTypeOccupancy(
 ): void {
   const player = state.players.get(playerId);
   if (!player || !player.alive) return;
-  player.buildingOccupancyByType[buildingType] = Math.max(0, Math.min(200, Math.round(occupancyPct)));
+  const maxPct = buildingType === 'CITY' ? 100 : 200;
+  player.buildingOccupancyByType[buildingType] = Math.max(
+    0,
+    Math.min(maxPct, Math.round(occupancyPct)),
+  );
   updateAllPlayersEconomy(state, false);
   state.stateVersion++;
 }
@@ -1105,8 +1118,9 @@ function handleSetBuildingOccupancy(
     (b) => b.id === buildingId && b.ownerId === playerId,
   );
   if (!building) return;
+  const maxPct = building.type === 'CITY' ? 100 : 200;
   building.occupancyOverride =
-    occupancyPct === null ? null : Math.max(0, Math.min(200, Math.round(occupancyPct)));
+    occupancyPct === null ? null : Math.max(0, Math.min(maxPct, Math.round(occupancyPct)));
   updateAllPlayersEconomy(state, false);
   state.stateVersion++;
 }
@@ -1290,6 +1304,10 @@ export function dispatchAction(state: GameState, action: Action): void {
       state.nextBuildingId = 1;
       state.units = [];
       state.nextUnitId = 1;
+      state.artilleryExplosions = [];
+      state.nextFxId = 1;
+      state.lastNotice = null;
+      state.nextNoticeId = 1;
       state.lastTerritorySyncVersion = -1;
       state.attackOrders = [];
       state.frontPushOrders = [];
@@ -1351,6 +1369,18 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.targetX,
         action.targetY,
       );
+      break;
+    case 'ARTILLERY_FIRE_MISSION':
+      issueArtilleryFireMission(
+        state,
+        action.playerId,
+        action.unitIds,
+        action.targetX,
+        action.targetY,
+      );
+      break;
+    case 'CANCEL_FIRE_MISSION':
+      cancelArtilleryFireMission(state, action.playerId, action.unitIds);
       break;
   }
 }
@@ -1498,6 +1528,54 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     }
   }
 
+  const visibleExplosions: ArtilleryExplosionFx[] = [];
+  for (const fx of state.artilleryExplosions) {
+    let visible = false;
+    for (const u of state.units) {
+      if (u.count <= 0 || u.hp <= 0) continue;
+      if (
+        u.ownerId !== state.humanPlayerId &&
+        getRelation(state, state.humanPlayerId, u.ownerId) !== 'ALLIED'
+      ) {
+        continue;
+      }
+      const visR = Math.max(UNIT_SPECS[u.type].visionRadius, UNIT_SPECS[u.type].attackRange);
+      if (Math.hypot(fx.x - u.x, fx.y - u.y) <= visR + fx.radius) {
+        visible = true;
+        break;
+      }
+    }
+    if (!visible) {
+      const r = Math.ceil(BORDER_VISION_RADIUS + fx.radius);
+      const rSq = r * r;
+      const fxX = Math.floor(fx.x);
+      const fxY = Math.floor(fx.y);
+      const minX = Math.max(0, fxX - r);
+      const maxX = Math.min(state.width - 1, fxX + r);
+      const minY = Math.max(0, fxY - r);
+      const maxY = Math.min(state.height - 1, fxY + r);
+      for (let y = minY; y <= maxY && !visible; y++) {
+        const dy = y + 0.5 - fx.y;
+        const row = y * state.width;
+        for (let x = minX; x <= maxX; x++) {
+          const dx = x + 0.5 - fx.x;
+          if (dx * dx + dy * dy > rSq) continue;
+          const cellOwner = state.owners[row + x];
+          if (
+            cellOwner === state.humanPlayerId ||
+            (cellOwner >= 0 && getRelation(state, state.humanPlayerId, cellOwner) === 'ALLIED')
+          ) {
+            visible = true;
+            break;
+          }
+        }
+      }
+    }
+    if (visible) {
+      visibleExplosions.push({ ...fx });
+    }
+  }
+
   return {
     tick: state.tick,
     phase: state.phase,
@@ -1513,6 +1591,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     tradeAgreements: Array.from(state.tradeAgreements),
     buildings,
     units,
+    artilleryExplosions: visibleExplosions,
+    lastNotice: state.lastNotice,
     attackOrders: state.attackOrders.map((o) => ({
       ...o,
       origin: { ...o.origin },

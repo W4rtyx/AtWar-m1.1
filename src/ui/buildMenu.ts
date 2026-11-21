@@ -182,7 +182,7 @@ export class BuildMenuController {
 
     ALL_BUILDING_TYPES.forEach((bType, idx) => {
       const spec = BUILDING_SPECS[bType];
-      const hotkeyLabel = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '-';
+      const hotkeyLabel = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : idx === 10 ? '-' : '=';
       const isDef = isDefenseBuildingType(bType);
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -434,8 +434,8 @@ export class TerrainBuildMenuController {
 
     this.openWorldX = ix;
     this.openWorldY = iy;
-    const padX = 248;
-    const padY = 204;
+    const padX = 258;
+    const padY = 210;
     this.centerScreenX = Math.max(padX, Math.min(window.innerWidth - padX, screenX));
     this.centerScreenY = Math.max(padY + 28, Math.min(window.innerHeight - padY, screenY));
     this.lastStructureKey = '';
@@ -490,7 +490,11 @@ export class TerrainBuildMenuController {
     for (const z of state.publicResourceZones) {
       if (Math.hypot(ix - z.centerX, iy - z.centerY) <= z.radius) {
         zoneText =
-          z.type === 'CONSTRUCTION_MATERIAL' ? 'Zóna: Stav. materiál' : 'Zóna: Energie';
+          z.type === 'CONSTRUCTION_MATERIAL'
+            ? 'Zóna: Stav. materiál'
+            : z.type === 'INDUSTRIAL'
+              ? 'Zóna: Průmysl'
+              : 'Zóna: Energie';
         break;
       }
     }
@@ -522,8 +526,8 @@ export class TerrainBuildMenuController {
       return;
     }
 
-    const radiusX = 188;
-    const radiusY = 152;
+    const radiusX = 198;
+    const radiusY = 158;
     const total = validTypes.length;
 
     validTypes.forEach((bType, idx) => {
@@ -584,7 +588,7 @@ interface StackActionButtonRef {
 
 /**
  * Right-click building context menu for stacking additional structures (1x/5x/10x/MAX),
- * recruiting units at Barracks/Factory/Airfield, and demolishing with 50% refund.
+ * recruiting units at Barracks/Armory/Airfield, and demolishing with 50% refund.
  */
 export class BuildingContextMenuController {
   private readonly popoverEl: HTMLElement;

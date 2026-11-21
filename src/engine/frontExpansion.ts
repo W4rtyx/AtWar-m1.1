@@ -26,7 +26,7 @@ export const MAX_ORDER_TICKS = 110;
 export const MAX_STAGNANT_TICKS = 12;
 
 const WILDERNESS_BASE_COST = 0.62;
-const ENEMY_BORDER_BASE_COST = 3.9;
+const ENEMY_BORDER_BASE_COST = 5.6;
 
 const annexVisited = new Uint8Array(MAP_WIDTH * MAP_HEIGHT);
 const annexQueue = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
@@ -496,7 +496,7 @@ function computeCellCaptureCost(
     : 0;
   const defenderStrength = 0.72 + 0.85 * Math.min(1, defenderRatio / 0.55);
   const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
-  const cohesionFactor = 0.75 + defenderNeighbors * 0.14;
+  const cohesionFactor = 0.85 + defenderNeighbors * 0.18;
 
   const defense = evaluateCellDefense(state.buildings, prevOwner, nx, ny);
   const support = evaluateFrontUnitSupport(state, attackerId, prevOwner, nx, ny, cellTerrain);
@@ -531,9 +531,9 @@ function computeCellCaptureCost(
   }
 
   const advanceSpeedMultiplier = Math.max(
-    0.18,
+    0.15,
     Math.min(
-      2.0,
+      1.45,
       effectiveFortSpeedMul *
         support.attackerSpeedMultiplier *
         support.defenderResistanceSpeedMultiplier,
@@ -568,13 +568,15 @@ function applyExpansionCandidates(
 
   const attacker = state.players.get(order.playerId);
   const attackerCombatMul = getCombatBlackoutMultiplier(attacker);
-  const budgetRate = order.finishOff ? 0.24 : 0.16;
+  const budgetRate = order.finishOff ? 0.24 : 0.12;
+  const maxForeignPerTick = order.finishOff ? 22 : 10;
   const tickBudget =
     Math.min(
       order.manpowerRemaining,
       Math.max(4.5, order.manpowerCommitted * budgetRate),
     ) * attackerCombatMul;
   let budgetSpent = 0;
+  let foreignClaimedThisTick = 0;
   let anyClaimed = false;
   let anyForeignCaptured = false;
 
@@ -584,6 +586,9 @@ function applyExpansionCandidates(
     }
 
     const prevOwner = state.owners[cand.idx];
+    if (prevOwner >= 0 && foreignClaimedThisTick >= maxForeignPerTick) {
+      continue;
+    }
     if (!canOrderCaptureCell(state, order.playerId, allowedEnemyIds, prevOwner)) {
       continue;
     }
@@ -649,6 +654,7 @@ function applyExpansionCandidates(
     anyClaimed = true;
 
     if (isForeign) {
+      foreignClaimedThisTick++;
       anyForeignCaptured = true;
       const defender: PlayerState | undefined = state.players.get(prevOwner);
       if (defender) {

@@ -10,13 +10,17 @@ import {
   TerrainType,
   Unit,
   UnitType,
+  WILDERNESS_OWNER,
 } from './types';
 import {
   UNIT_LOOT_RATIO,
   UNIT_SPECS,
   getAttackOrderFrontPoint,
+  getFrontPushCenterPoint,
   getUnitRelation,
 } from './units';
+
+export const ARTILLERY_BLAST_RADIUS = 7.5;
 
 export interface FrontUnitSupportModifiers {
   readonly attackerCostMultiplier: number;
@@ -96,11 +100,11 @@ export function evaluateFrontUnitSupport(
   }
 
   return {
-    attackerCostMultiplier: Math.max(0.42, 1 - Math.min(0.58, costReduction)),
-    attackerSpeedMultiplier: Math.min(1.9, 1 + Math.min(0.9, speedBoost)),
-    fortificationSuppression: Math.min(0.65, fortSuppression),
-    defenderResistanceCostMultiplier: Math.min(2.3, 1 + defenderResist),
-    defenderResistanceSpeedMultiplier: Math.max(0.32, 1 / (1 + defenderResist * 0.75)),
+    attackerCostMultiplier: Math.max(0.5, 1 - Math.min(0.5, costReduction)),
+    attackerSpeedMultiplier: Math.min(1.42, 1 + Math.min(0.42, speedBoost * 0.55)),
+    fortificationSuppression: Math.min(0.52, fortSuppression),
+    defenderResistanceCostMultiplier: Math.min(2.4, 1 + defenderResist),
+    defenderResistanceSpeedMultiplier: Math.max(0.3, 1 / (1 + defenderResist * 0.75)),
   };
 }
 
@@ -128,6 +132,8 @@ function getArtilleryBuildingPriority(type: BuildingType): number {
       return 5;
     case 'AA_BATTERY':
       return 4;
+    case 'ARMORY':
+      return 3;
     case 'AIRFIELD':
       return 3;
     case 'FACTORY':
@@ -136,6 +142,136 @@ function getArtilleryBuildingPriority(type: BuildingType): number {
       return 1;
     default:
       return 0;
+  }
+}
+
+function executeArtilleryFireMissionSalvo(
+  state: GameState,
+  attacker: Unit,
+  attOwner: PlayerState | undefined,
+  fx: number,
+  fy: number,
+  remainingAfterDec: number,
+  incomingDamage: Map<number, number>,
+  lastAttacker: Map<number, number>,
+  deadBuildingIds: Set<number>,
+): void {
+  const attSpec = UNIT_SPECS.ARTILLERY;
+  attacker.combatCooldownTicks = 6;
+  attacker.lastCombatTargetX = fx;
+  attacker.lastCombatTargetY = fy;
+
+  if (remainingAfterDec % 10 !== 9) {
+    return;
+  }
+
+  state.artilleryExplosions.push({
+    id: state.nextFxId++,
+    x: fx,
+    y: fy,
+    radius: ARTILLERY_BLAST_RADIUS,
+    ttlTicks: 10,
+    maxTtlTicks: 10,
+  });
+
+  const supplyMul = 0.45 + 0.55 * attacker.supplyLevel;
+  const moraleMul = 0.5 + 0.5 * (attacker.morale / 100);
+  const blackoutMul = getCombatBlackoutMultiplier(attOwner);
+  const hpEfficiency = 0.45 + 0.55 * Math.min(1, attacker.hp / Math.max(1, attacker.maxHp));
+  const countScale = Math.pow(attacker.count, 0.88);
+  const salvoPower =
+    attSpec.attack * countScale * hpEfficiency * supplyMul * moraleMul * blackoutMul;
+
+  // 1. Area splash damage & morale shock to WAR enemy units inside blast circle
+  for (const candidate of state.units) {
+    if (candidate.count <= 0 || candidate.hp <= 0) continue;
+    if (candidate.ownerId === attacker.ownerId) continue;
+    if (getUnitRelation(state, attacker.ownerId, candidate.ownerId) !== 'WAR') continue;
+    const dist = Math.hypot(candidate.x - fx, candidate.y - fy);
+    if (dist > ARTILLERY_BLAST_RADIUS) continue;
+
+    const falloff = Math.max(0.35, 1 - 0.6 * (dist / ARTILLERY_BLAST_RADIUS));
+    const splashDmg = Math.max(2.5, salvoPower * 0.65 * falloff);
+    incomingDamage.set(candidate.id, (incomingDamage.get(candidate.id) ?? 0) + splashDmg);
+    lastAttacker.set(candidate.id, attacker.ownerId);
+    candidate.morale = Math.max(0, candidate.morale - 7 * falloff);
+  }
+
+  // 2. Direct structural damage to enemy fortifications & structures inside impact zone
+  const canChipSingle = attacker.count >= 2 || Math.floor(remainingAfterDec / 10) % 2 === 0;
+  for (const b of state.buildings) {
+    if (b.isCapital || deadBuildingIds.has(b.id)) continue;
+    if (b.stackCount <= 0 && b.underConstructionCount <= 0) continue;
+    if (b.ownerId === attacker.ownerId) continue;
+    if (getUnitRelation(state, attacker.ownerId, b.ownerId) !== 'WAR') continue;
+    if (Math.hypot(b.x + 0.5 - fx, b.y + 0.5 - fy) > ARTILLERY_BLAST_RADIUS) continue;
+
+    if (canChipSingle) {
+      if (b.stackCount > 0) {
+        b.stackCount--;
+      } else if (b.underConstructionCount > 0) {
+        b.underConstructionCount--;
+      }
+      if (b.stackCount <= 0 && b.underConstructionCount <= 0) {
+        deadBuildingIds.add(b.id);
+      }
+      state.stateVersion++;
+    }
+  }
+
+  // 3. Disrupt enemy offensive frontline orders near impact zone
+  for (const order of state.attackOrders) {
+    if (order.playerId === attacker.ownerId) continue;
+    if (getUnitRelation(state, attacker.ownerId, order.playerId) !== 'WAR') continue;
+    const head = getAttackOrderFrontPoint(order);
+    if (Math.hypot(head.x - fx, head.y - fy) <= ARTILLERY_BLAST_RADIUS + 5) {
+      order.manpowerRemaining = Math.max(0, order.manpowerRemaining - salvoPower * 0.45);
+    }
+  }
+  for (const order of state.frontPushOrders) {
+    if (order.playerId === attacker.ownerId) continue;
+    if (getUnitRelation(state, attacker.ownerId, order.playerId) !== 'WAR') continue;
+    const center = getFrontPushCenterPoint(state, order);
+    if (Math.hypot(center.x - fx, center.y - fy) <= ARTILLERY_BLAST_RADIUS + 6) {
+      order.manpowerRemaining = Math.max(0, order.manpowerRemaining - salvoPower * 0.4);
+    }
+  }
+
+  // 4. Garrison & population casualties inside WAR enemy tiles covered by blast radius
+  const impactedOwners = new Set<number>();
+  const rCeil = Math.ceil(ARTILLERY_BLAST_RADIUS);
+  const rSq = ARTILLERY_BLAST_RADIUS * ARTILLERY_BLAST_RADIUS;
+  const minX = Math.max(0, Math.floor(fx) - rCeil);
+  const maxX = Math.min(state.width - 1, Math.floor(fx) + rCeil);
+  const minY = Math.max(0, Math.floor(fy) - rCeil);
+  const maxY = Math.min(state.height - 1, Math.floor(fy) + rCeil);
+  for (let y = minY; y <= maxY; y++) {
+    const dy = y + 0.5 - fy;
+    const row = y * state.width;
+    for (let x = minX; x <= maxX; x++) {
+      const dx = x + 0.5 - fx;
+      if (dx * dx + dy * dy > rSq) continue;
+      const cellOwner = state.owners[row + x];
+      if (
+        cellOwner >= 0 &&
+        cellOwner !== attacker.ownerId &&
+        cellOwner !== WILDERNESS_OWNER &&
+        getUnitRelation(state, attacker.ownerId, cellOwner) === 'WAR'
+      ) {
+        impactedOwners.add(cellOwner);
+      }
+    }
+  }
+
+  for (const enemyId of impactedOwners) {
+    const occupier = state.players.get(enemyId);
+    if (!occupier || !occupier.alive || occupier.isEliminated) continue;
+    const mpLoss = Math.min(28, salvoPower * 0.34);
+    const floor = occupier.allocatedManpower;
+    if (occupier.manpower > floor) {
+      occupier.manpower = Math.max(floor, occupier.manpower - mpLoss);
+      syncPlayerActiveManpower(occupier);
+    }
   }
 }
 
@@ -256,7 +392,18 @@ function shellEnemyDefenseOrFrontline(
 
 /** Resolves unit-vs-unit tactical fire, artillery bombardment, encircled pocket attrition, count scaling, and defeat loot. */
 export function stepUnitsCombat(state: GameState): void {
-  if (state.phase !== 'PLAYING' || state.units.length === 0) {
+  if (state.phase !== 'PLAYING') {
+    return;
+  }
+
+  if (state.artilleryExplosions.length > 0) {
+    for (const fx of state.artilleryExplosions) {
+      fx.ttlTicks--;
+    }
+    state.artilleryExplosions = state.artilleryExplosions.filter((fx) => fx.ttlTicks > 0);
+  }
+
+  if (state.units.length === 0) {
     return;
   }
 
@@ -271,11 +418,44 @@ export function stepUnitsCombat(state: GameState): void {
     }
   }
 
-  // 1. Unit-vs-unit tactical engagements
+  // 1. Unit-vs-unit tactical engagements & manual artillery fire missions
   for (const attacker of state.units) {
     if (attacker.count <= 0 || attacker.hp <= 0) continue;
     const attSpec = UNIT_SPECS[attacker.type];
     const attOwner = state.players.get(attacker.ownerId);
+
+    if (
+      attacker.type === 'ARTILLERY' &&
+      attacker.fireMissionTicksRemaining > 0 &&
+      attacker.fireMissionX !== null &&
+      attacker.fireMissionY !== null
+    ) {
+      const fx = attacker.fireMissionX;
+      const fy = attacker.fireMissionY;
+      if (Math.hypot(fx - attacker.x, fy - attacker.y) <= attSpec.attackRange) {
+        attacker.fireMissionTicksRemaining--;
+        executeArtilleryFireMissionSalvo(
+          state,
+          attacker,
+          attOwner,
+          fx,
+          fy,
+          attacker.fireMissionTicksRemaining,
+          incomingDamage,
+          lastAttacker,
+          deadBuildingIds,
+        );
+        if (attacker.fireMissionTicksRemaining <= 0) {
+          attacker.fireMissionX = null;
+          attacker.fireMissionY = null;
+          attacker.fireMissionTicksRemaining = 0;
+        }
+        continue;
+      }
+      attacker.fireMissionX = null;
+      attacker.fireMissionY = null;
+      attacker.fireMissionTicksRemaining = 0;
+    }
 
     let bestTarget: Unit | null = null;
     let bestDist = attSpec.attackRange;

@@ -1,10 +1,10 @@
 import { BUILDING_SPECS } from '../engine/buildings';
 import { computeOccupancyCurve } from '../engine/economy';
 import {
-  ALL_BUILDING_TYPES,
   BuildBatchSize,
   BuildingType,
   ClientRenderState,
+  MANPOWER_BUILDING_TYPES,
   PublicBuildingInfo,
   PublicPlayerInfo,
 } from '../engine/types';
@@ -56,6 +56,7 @@ export class ManpowerPanelController {
   private readonly inspectorTitleEl: HTMLElement;
   private readonly inspectorCoordsEl: HTMLElement;
   private readonly inspectorStackEl: HTMLElement;
+  private readonly inspectorSiteBoxEl: HTMLElement;
   private readonly inspectorSiteEffEl: HTMLElement;
   private readonly inspectorOutputEl: HTMLElement;
   private readonly inspectorMpEl: HTMLElement;
@@ -118,8 +119,8 @@ export class ManpowerPanelController {
               <span>Stack</span>
               <strong data-mp="insp-stack">×1</strong>
             </div>
-            <div class="hud-insp-metric">
-              <span>Efektivita lokality</span>
+            <div class="hud-insp-metric" data-mp="insp-site-box">
+              <span>Výnosnost lokality</span>
               <strong data-mp="insp-site-eff">100 %</strong>
             </div>
             <div class="hud-insp-metric">
@@ -176,6 +177,7 @@ export class ManpowerPanelController {
     this.inspectorTitleEl = this.query('[data-mp="insp-title"]');
     this.inspectorCoordsEl = this.query('[data-mp="insp-coords"]');
     this.inspectorStackEl = this.query('[data-mp="insp-stack"]');
+    this.inspectorSiteBoxEl = this.query('[data-mp="insp-site-box"]');
     this.inspectorSiteEffEl = this.query('[data-mp="insp-site-eff"]');
     this.inspectorOutputEl = this.query('[data-mp="insp-output"]');
     this.inspectorMpEl = this.query('[data-mp="insp-mp"]');
@@ -190,7 +192,7 @@ export class ManpowerPanelController {
     this.inspectorResetBtn = this.query<HTMLButtonElement>('[data-mp="insp-reset"]');
 
     const rowsContainer = this.query('[data-mp="rows"]');
-    for (const bType of ALL_BUILDING_TYPES) {
+    for (const bType of MANPOWER_BUILDING_TYPES) {
       const spec = BUILDING_SPECS[bType];
       const row = document.createElement('div');
       row.className = 'hud-mp-row';
@@ -417,6 +419,7 @@ export class ManpowerPanelController {
       this.inspectorConstrTextEl.textContent = `Výstavba: ${pctDone} % (${selectedBuilding.underConstructionCount} ve frontě)`;
     }
 
+    this.inspectorSiteBoxEl.classList.toggle('hidden', spec.resourceZoneType === null);
     if (selectedBuilding.revealedEfficiencyPct === null) {
       this.inspectorSiteEffEl.textContent = 'Po dostavbě';
       this.inspectorSiteEffEl.classList.remove('low-site', 'high-site');
@@ -432,7 +435,10 @@ export class ManpowerPanelController {
       );
     }
 
-    this.inspectorOutputEl.textContent = `${selectedBuilding.effectiveOutputPct} %`;
+    this.inspectorOutputEl.textContent =
+      selectedBuilding.type === 'CITY'
+        ? `${Math.min(100, selectedBuilding.effectiveOutputPct)} % (max)`
+        : `${selectedBuilding.effectiveOutputPct} %`;
     this.inspectorMpEl.textContent = `${Math.round(selectedBuilding.allocatedManpower)} MP`;
     this.inspectorEnergyEl.textContent =
       selectedBuilding.currentEnergyProd > 0
@@ -443,7 +449,9 @@ export class ManpowerPanelController {
     const removable = selectedBuilding.isCapital ? Math.max(0, totalUnits - 1) : totalUnits;
     this.inspectorDemolishBtn.disabled = removable <= 0;
 
-    const usesOccupancy = spec.baseManpowerRequired > 0 || spec.baseEnergyConsumption > 0;
+    const usesOccupancy =
+      selectedBuilding.type !== 'CITY' &&
+      (spec.baseManpowerRequired > 0 || spec.baseEnergyConsumption > 0);
     this.inspectorSliderRowEl.classList.toggle('hidden', !usesOccupancy);
     if (usesOccupancy) {
       const typeDefault = occByType ? occByType[selectedBuilding.type] : 100;

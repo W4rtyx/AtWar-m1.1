@@ -18,6 +18,8 @@ import { Camera } from './camera';
 import {
   MoveOrderPing,
   UnitSelectionRect,
+  drawArtilleryExplosions,
+  drawArtilleryFireMissionOverlay,
   drawMoveOrderPings,
   drawParadropOverlay,
   drawUnitSelectionRect,
@@ -85,6 +87,7 @@ export interface RenderOverlayState {
   readonly selectedUnitIds: ReadonlySet<number>;
   readonly unitSelectRect: UnitSelectionRect | null;
   readonly paradropUnitId: number | null;
+  readonly artilleryFireMode: boolean;
   readonly moveOrderPings: ReadonlyArray<MoveOrderPing>;
 }
 
@@ -521,6 +524,25 @@ export class CanvasRenderer {
     const nowMs = typeof performance !== 'undefined' ? performance.now() : 0;
     drawMoveOrderPings(ctx, camera, overlays.moveOrderPings, nowMs);
     drawUnits(ctx, camera, state, overlays.selectedUnitIds, nowMs);
+    drawArtilleryExplosions(ctx, camera, state.artilleryExplosions);
+
+    if (overlays.artilleryFireMode) {
+      const selectedArtillery = state.units.filter(
+        (u) =>
+          u.ownerId === state.humanPlayerId &&
+          u.type === 'ARTILLERY' &&
+          overlays.selectedUnitIds.has(u.id),
+      );
+      if (selectedArtillery.length > 0) {
+        drawArtilleryFireMissionOverlay(
+          ctx,
+          camera,
+          state,
+          selectedArtillery,
+          overlays.hoverCell,
+        );
+      }
+    }
 
     if (overlays.paradropUnitId !== null) {
       const dropUnit = state.units.find((u) => u.id === overlays.paradropUnitId);
@@ -566,30 +588,36 @@ export class CanvasRenderer {
     for (const zone of zones) {
       const screen = camera.worldToScreen(zone.centerX + 0.5, zone.centerY + 0.5);
       const radiusPx = zone.radius * camera.zoom;
-      const isMaterial = zone.type === 'CONSTRUCTION_MATERIAL';
       const isHighlighted = highlightType !== null && zone.type === highlightType;
+
+      const fillRgb =
+        zone.type === 'CONSTRUCTION_MATERIAL'
+          ? '202, 148, 70'
+          : zone.type === 'INDUSTRIAL'
+            ? '216, 118, 68'
+            : '86, 160, 178';
+      const strokeRgb =
+        zone.type === 'CONSTRUCTION_MATERIAL'
+          ? isHighlighted
+            ? '230, 176, 90'
+            : '202, 148, 70'
+          : zone.type === 'INDUSTRIAL'
+            ? isHighlighted
+              ? '238, 146, 92'
+              : '214, 120, 74'
+            : isHighlighted
+              ? '118, 200, 220'
+              : '94, 173, 191';
 
       ctx.save();
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radiusPx, 0, Math.PI * 2);
-      ctx.fillStyle = isMaterial
-        ? isHighlighted
-          ? 'rgba(202, 148, 70, 0.22)'
-          : 'rgba(202, 148, 70, 0.08)'
-        : isHighlighted
-          ? 'rgba(86, 160, 178, 0.22)'
-          : 'rgba(86, 160, 178, 0.08)';
+      ctx.fillStyle = `rgba(${fillRgb}, ${isHighlighted ? 0.22 : 0.08})`;
       ctx.fill();
 
       ctx.setLineDash([5, 4]);
       ctx.lineWidth = isHighlighted ? 2.0 : 1.25;
-      ctx.strokeStyle = isMaterial
-        ? isHighlighted
-          ? 'rgba(230, 176, 90, 0.95)'
-          : 'rgba(202, 148, 70, 0.72)'
-        : isHighlighted
-          ? 'rgba(118, 200, 220, 0.95)'
-          : 'rgba(94, 173, 191, 0.72)';
+      ctx.strokeStyle = `rgba(${strokeRgb}, ${isHighlighted ? 0.95 : 0.72})`;
       ctx.stroke();
 
       if (camera.zoom >= 1.1 || isHighlighted) {
@@ -597,11 +625,21 @@ export class CanvasRenderer {
         ctx.font = '600 10px "Segoe UI", system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const label = isMaterial ? 'STAV. MAT.' : 'ENERGIE';
+        const label =
+          zone.type === 'CONSTRUCTION_MATERIAL'
+            ? 'STAV. MAT.'
+            : zone.type === 'INDUSTRIAL'
+              ? 'PRŮMYSL'
+              : 'ENERGIE';
         ctx.fillStyle = 'rgba(18, 22, 28, 0.76)';
         const textW = ctx.measureText(label).width + 8;
         ctx.fillRect(screen.x - textW / 2, screen.y - 7, textW, 14);
-        ctx.fillStyle = isMaterial ? '#e2b26a' : '#80c6d6';
+        ctx.fillStyle =
+          zone.type === 'CONSTRUCTION_MATERIAL'
+            ? '#e2b26a'
+            : zone.type === 'INDUSTRIAL'
+              ? '#eb9f73'
+              : '#80c6d6';
         ctx.fillText(label, screen.x, screen.y + 0.5);
       }
       ctx.restore();
@@ -832,6 +870,125 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
+  private getBuildingCategoryColors(
+    type: BuildingType,
+  ): { readonly fill: string; readonly border: string } {
+    switch (type) {
+      case 'CITY':
+        return { fill: '#1b3045', border: '#eaf4ff' };
+      case 'LAB':
+        return { fill: '#192442', border: '#7eb7fa' };
+      case 'MINE':
+        return { fill: '#2b2112', border: '#f0ad4e' };
+      case 'POWER_PLANT':
+        return { fill: '#142b33', border: '#5cd2f5' };
+      case 'FACTORY':
+        return { fill: '#311d13', border: '#eb8d4d' };
+      case 'BARRACKS':
+        return { fill: '#162a3d', border: '#6ab4ec' };
+      case 'ARMORY':
+        return { fill: '#3a181e', border: '#e36d65' };
+      case 'PORT':
+        return { fill: '#122f3e', border: '#5cc4df' };
+      case 'AIRFIELD':
+        return { fill: '#1c2b3a', border: '#a8cce6' };
+      case 'TRENCH':
+        return { fill: '#242d1c', border: '#a9be72' };
+      case 'BUNKER':
+        return { fill: '#2b2f35', border: '#c8d2da' };
+      case 'AA_BATTERY':
+        return { fill: '#1b2e33', border: '#7ad2c4' };
+    }
+  }
+
+  private traceBuildingBadgeShape(
+    ctx: CanvasRenderingContext2D,
+    type: BuildingType,
+    cx: number,
+    cy: number,
+    r: number,
+  ): void {
+    ctx.beginPath();
+    switch (type) {
+      case 'CITY':
+      case 'LAB': {
+        // Crisp architectural square badge
+        const hs = r * 0.92;
+        const rad = Math.max(2, r * 0.25);
+        ctx.moveTo(cx - hs + rad, cy - hs);
+        ctx.lineTo(cx + hs - rad, cy - hs);
+        ctx.quadraticCurveTo(cx + hs, cy - hs, cx + hs, cy - hs + rad);
+        ctx.lineTo(cx + hs, cy + hs - rad);
+        ctx.quadraticCurveTo(cx + hs, cy + hs, cx + hs - rad, cy + hs);
+        ctx.lineTo(cx - hs + rad, cy + hs);
+        ctx.quadraticCurveTo(cx - hs, cy + hs, cx - hs, cy + hs - rad);
+        ctx.lineTo(cx - hs, cy - hs + rad);
+        ctx.quadraticCurveTo(cx - hs, cy - hs, cx - hs + rad, cy - hs);
+        ctx.closePath();
+        break;
+      }
+      case 'MINE':
+      case 'POWER_PLANT':
+      case 'FACTORY': {
+        // 6-sided industrial hexagon
+        for (let i = 0; i < 6; i++) {
+          const ang = -Math.PI / 2 + (i * Math.PI) / 3;
+          const px = cx + Math.cos(ang) * (r * 1.04);
+          const py = cy + Math.sin(ang) * (r * 1.04);
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        break;
+      }
+      case 'BARRACKS':
+      case 'ARMORY':
+      case 'PORT':
+      case 'AIRFIELD': {
+        // Heraldic military shield
+        ctx.moveTo(cx - r * 0.94, cy - r * 0.88);
+        ctx.lineTo(cx + r * 0.94, cy - r * 0.88);
+        ctx.lineTo(cx + r * 0.94, cy + r * 0.14);
+        ctx.quadraticCurveTo(cx + r * 0.82, cy + r * 0.84, cx, cy + r * 1.08);
+        ctx.quadraticCurveTo(cx - r * 0.82, cy + r * 0.84, cx - r * 0.94, cy + r * 0.14);
+        ctx.closePath();
+        break;
+      }
+      case 'TRENCH': {
+        // Wide octagonal defensive redoubt
+        const rx = r * 1.08;
+        const ry = r * 0.86;
+        ctx.moveTo(cx - rx * 0.55, cy - ry);
+        ctx.lineTo(cx + rx * 0.55, cy - ry);
+        ctx.lineTo(cx + rx, cy - ry * 0.35);
+        ctx.lineTo(cx + rx, cy + ry * 0.45);
+        ctx.lineTo(cx + rx * 0.55, cy + ry);
+        ctx.lineTo(cx - rx * 0.55, cy + ry);
+        ctx.lineTo(cx - rx, cy + ry * 0.45);
+        ctx.lineTo(cx - rx, cy - ry * 0.35);
+        ctx.closePath();
+        break;
+      }
+      case 'BUNKER': {
+        // Heavy armored diamond bastion
+        ctx.moveTo(cx, cy - r * 1.12);
+        ctx.lineTo(cx + r * 1.08, cy);
+        ctx.lineTo(cx, cy + r * 1.12);
+        ctx.lineTo(cx - r * 1.08, cy);
+        ctx.closePath();
+        break;
+      }
+      case 'AA_BATTERY': {
+        // Upward air-defense triangle
+        ctx.moveTo(cx, cy - r * 1.12);
+        ctx.lineTo(cx + r * 1.08, cy + r * 0.88);
+        ctx.lineTo(cx - r * 1.08, cy + r * 0.88);
+        ctx.closePath();
+        break;
+      }
+    }
+  }
+
   private drawBuildings(
     ctx: CanvasRenderingContext2D,
     camera: Camera,
@@ -843,6 +1000,7 @@ export class CanvasRenderer {
       const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
       const isSelected = selectedBuildingId === b.id;
       const isBuildingInitial = b.stackCount === 0 && b.underConstructionCount > 0;
+      const colors = this.getBuildingCategoryColors(b.type);
 
       ctx.save();
 
@@ -882,30 +1040,28 @@ export class CanvasRenderer {
       }
 
       if (isSelected) {
-        ctx.beginPath();
-        ctx.arc(sc.x, sc.y, r + 3.5, 0, Math.PI * 2);
+        this.traceBuildingBadgeShape(ctx, b.type, sc.x, sc.y, r + 3.2);
         ctx.strokeStyle = '#f0dca0';
-        ctx.lineWidth = 1.6;
+        ctx.lineWidth = 1.7;
         ctx.stroke();
       }
 
       ctx.globalAlpha = isBuildingInitial ? 0.68 : 1;
-      ctx.beginPath();
-      ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(19, 24, 31, 0.92)';
+      this.traceBuildingBadgeShape(ctx, b.type, sc.x, sc.y, r);
+      ctx.fillStyle = colors.fill;
       ctx.fill();
-      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.7 : 1.2;
+      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.8 : 1.35;
       ctx.strokeStyle =
         isSelected
           ? '#f0dca0'
           : isBuildingInitial
             ? '#70a8bf'
             : b.effectiveOccupancyPct > 105
-              ? '#d99a4a'
-              : '#8ba4b8';
+              ? '#e6a550'
+              : colors.border;
       ctx.stroke();
 
-      this.drawBuildingGlyph(ctx, b.type, sc.x, sc.y, r * 0.66);
+      this.drawBuildingGlyph(ctx, b.type, sc.x, sc.y, r * 0.64);
       ctx.globalAlpha = 1;
 
       if (b.underConstructionCount > 0) {
@@ -915,7 +1071,7 @@ export class CanvasRenderer {
         ctx.arc(
           sc.x,
           sc.y,
-          r + 1.8,
+          r + 2.0,
           -Math.PI / 2,
           -Math.PI / 2 + Math.max(0.05, Math.min(1, progress)) * Math.PI * 2,
         );
@@ -935,8 +1091,8 @@ export class CanvasRenderer {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         const bw = ctx.measureText(stackBadge).width + 6;
-        const bx = sc.x + r * 0.68;
-        const by = sc.y - r * 0.72;
+        const bx = sc.x + r * 0.72;
+        const by = sc.y - r * 0.76;
         ctx.fillStyle = b.underConstructionCount > 0 ? '#1d3947' : '#252d36';
         ctx.strokeStyle = b.underConstructionCount > 0 ? '#6fc4da' : '#9eb2c4';
         ctx.lineWidth = 0.9;
@@ -947,7 +1103,7 @@ export class CanvasRenderer {
       }
 
       const spec = BUILDING_SPECS[b.type];
-      if (!b.isCapital && (camera.zoom >= 1.35 || isSelected)) {
+      if (!b.isCapital && (camera.zoom >= 1.75 || isSelected)) {
         const label =
           spec.resourceZoneType !== null && b.revealedEfficiencyPct !== null
             ? `${spec.shortCode} ${b.revealedEfficiencyPct}%`
@@ -958,8 +1114,8 @@ export class CanvasRenderer {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         const w = ctx.measureText(label).width + 6;
-        const labelY = sc.y + r + 2;
-        ctx.fillStyle = 'rgba(16, 20, 26, 0.84)';
+        const labelY = sc.y + r + 2.5;
+        ctx.fillStyle = 'rgba(16, 20, 26, 0.86)';
         ctx.fillRect(sc.x - w / 2, labelY, w, 13);
         ctx.fillStyle =
           b.revealedEfficiencyPct !== null && b.revealedEfficiencyPct < 50
@@ -1013,7 +1169,7 @@ export class CanvasRenderer {
         ctx.fill();
         break;
       case 'FACTORY':
-        ctx.fillStyle = '#cfa07a';
+        ctx.fillStyle = '#efa16b';
         ctx.beginPath();
         ctx.moveTo(cx - s * 0.75, cy + s * 0.62);
         ctx.lineTo(cx - s * 0.75, cy - s * 0.25);
@@ -1024,6 +1180,20 @@ export class CanvasRenderer {
         ctx.lineTo(cx + s * 0.75, cy - s * 0.55);
         ctx.lineTo(cx + s * 0.75, cy + s * 0.62);
         ctx.closePath();
+        ctx.fill();
+        break;
+      case 'ARMORY':
+        // Crossed cannons / ordnance crest inside crimson shield
+        ctx.strokeStyle = '#f28c85';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.58, cy + s * 0.52);
+        ctx.lineTo(cx + s * 0.58, cy - s * 0.52);
+        ctx.moveTo(cx - s * 0.58, cy - s * 0.52);
+        ctx.lineTo(cx + s * 0.58, cy + s * 0.52);
+        ctx.stroke();
+        ctx.fillStyle = '#f7c5be';
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.max(1.6, s * 0.28), 0, Math.PI * 2);
         ctx.fill();
         break;
       case 'LAB':
@@ -1156,8 +1326,7 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
     }
 
-    ctx.beginPath();
-    ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+    this.traceBuildingBadgeShape(ctx, preview.buildingType, sc.x, sc.y, r);
     ctx.fillStyle = preview.valid
       ? 'rgba(42, 108, 66, 0.72)'
       : 'rgba(128, 44, 40, 0.72)';

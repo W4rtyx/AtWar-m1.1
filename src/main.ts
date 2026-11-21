@@ -58,6 +58,7 @@ function bootstrap(): void {
   let selectedUnitIds: number[] = [];
   let unitSelectRect: UnitSelectionRect | null = null;
   let paradropUnitId: number | null = null;
+  let artilleryFireMode = false;
   let selectedFrontierCells: number[] = [];
   let initialSelectedCount = 0;
   let frontLassoPoints: Point[] = [];
@@ -124,6 +125,7 @@ function bootstrap(): void {
       selectedTarget,
       new Set(selectedUnitIds),
       paradropUnitId,
+      artilleryFireMode,
     );
   }
 
@@ -141,6 +143,7 @@ function bootstrap(): void {
       selectedTarget = null;
       selectedUnitIds = [];
       paradropUnitId = null;
+      artilleryFireMode = false;
       moveOrderPings = [];
       clearFrontSelection();
       clearInteractionPreviews();
@@ -394,12 +397,30 @@ function bootstrap(): void {
     },
     onStartParadrop: (unitId) => {
       paradropUnitId = paradropUnitId === unitId ? null : unitId;
+      artilleryFireMode = false;
       selectedBuildType = null;
+      syncHud();
+    },
+    onStartArtilleryFire: () => {
+      artilleryFireMode = !artilleryFireMode;
+      paradropUnitId = null;
+      selectedBuildType = null;
+      syncHud();
+    },
+    onCancelArtilleryFire: (unitIds) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'CANCEL_FIRE_MISSION',
+        playerId: state.humanPlayerId,
+        unitIds,
+      });
+      artilleryFireMode = false;
       syncHud();
     },
     onClearUnitSelection: () => {
       selectedUnitIds = [];
       paradropUnitId = null;
+      artilleryFireMode = false;
       syncHud();
     },
   });
@@ -614,6 +635,19 @@ function bootstrap(): void {
       return;
     }
 
+    if (artilleryFireMode) {
+      engine.dispatch({
+        type: 'ARTILLERY_FIRE_MISSION',
+        playerId: state.humanPlayerId,
+        unitIds: selectedUnitIds,
+        targetX: worldPt.x,
+        targetY: worldPt.y,
+      });
+      artilleryFireMode = false;
+      syncHud();
+      return;
+    }
+
     if (selectedBuildType !== null) {
       const ix = Math.floor(worldPt.x);
       const iy = Math.floor(worldPt.y);
@@ -819,6 +853,12 @@ function bootstrap(): void {
       if (e.button === 2 && !rmbDragged && state.phase === 'PLAYING') {
         if (paradropUnitId !== null) {
           paradropUnitId = null;
+          syncHud();
+          return;
+        }
+        if (artilleryFireMode) {
+          artilleryFireMode = false;
+          syncHud();
           return;
         }
         if (selectedBuildType !== null) {
@@ -1030,6 +1070,7 @@ function bootstrap(): void {
 
     if (e.code === 'Escape') {
       paradropUnitId = null;
+      artilleryFireMode = false;
       selectedBuildType = null;
       selectedBuildingId = null;
       selectedUnitIds = [];
@@ -1108,7 +1149,24 @@ function bootstrap(): void {
       );
       if (dropUnit) {
         paradropUnitId = paradropUnitId === dropUnit.id ? null : dropUnit.id;
+        artilleryFireMode = false;
         selectedBuildType = null;
+        syncHud();
+      }
+      return;
+    }
+
+    if (e.code === 'KeyF' && selectedUnitIds.length > 0) {
+      const state = engine.getRenderState();
+      const selSet = new Set(selectedUnitIds);
+      const hasArty = state.units.some(
+        (u) => u.ownerId === state.humanPlayerId && selSet.has(u.id) && u.type === 'ARTILLERY',
+      );
+      if (hasArty) {
+        artilleryFireMode = !artilleryFireMode;
+        paradropUnitId = null;
+        selectedBuildType = null;
+        syncHud();
       }
       return;
     }
@@ -1120,7 +1178,9 @@ function bootstrap(): void {
           : Number(e.code.slice(5)) - 1
         : e.code === 'Minus'
           ? 10
-          : -1;
+          : e.code === 'Equal'
+            ? 11
+            : -1;
     if (buildHotkeyIdx >= 0 && buildHotkeyIdx < ALL_BUILDING_TYPES.length) {
       const state = engine.getRenderState();
       if (state.phase === 'PLAYING') {
@@ -1325,6 +1385,18 @@ function bootstrap(): void {
         paradropUnitId = null;
       }
     }
+    if (artilleryFireMode) {
+      const selSet = new Set(selectedUnitIds);
+      const hasSelectedArty = finalState.units.some(
+        (u) =>
+          u.ownerId === finalState.humanPlayerId &&
+          selSet.has(u.id) &&
+          u.type === 'ARTILLERY',
+      );
+      if (!hasSelectedArty) {
+        artilleryFireMode = false;
+      }
+    }
     if (
       selectedBuildingId !== null &&
       !finalState.buildings.some((b) => b.id === selectedBuildingId)
@@ -1383,6 +1455,7 @@ function bootstrap(): void {
       selectedUnitIds: new Set(selectedUnitIds),
       unitSelectRect,
       paradropUnitId,
+      artilleryFireMode,
       moveOrderPings,
     });
 

@@ -306,6 +306,69 @@ function ensureBotPowerGrid(state: GameState, player: PlayerState): void {
   placeBuilding(state, player.id, 'POWER_PLANT', spot.x, spot.y, 1);
 }
 
+function ensureBotBorderDefenses(
+  state: GameState,
+  player: PlayerState,
+  rngBox: { rngState: number },
+): void {
+  if (!player.freePowerPlantUsed || player.blackoutActive || state.tick < 120) {
+    return;
+  }
+  const existingTrenches = state.buildings.filter(
+    (b) => b.ownerId === player.id && b.type === 'TRENCH',
+  ).length;
+  if (existingTrenches >= 4 || player.money < 110 || player.buildingMaterial < 80) {
+    return;
+  }
+
+  const candidates: Point[] = [];
+  for (let y = 4; y < state.height - 4; y += 4) {
+    const row = y * state.width;
+    for (let x = 4; x < state.width - 4; x += 4) {
+      if (state.owners[row + x] !== player.id) continue;
+      if (!isBorderCell(state, x, y, player.id)) continue;
+
+      let touchesWarOrForeign = false;
+      for (let dy = -3; dy <= 3 && !touchesWarOrForeign; dy += 3) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= state.height) continue;
+        for (let dx = -3; dx <= 3; dx += 3) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= state.width) continue;
+          const nOwner = state.owners[ny * state.width + nx];
+          if (
+            nOwner >= 0 &&
+            nOwner !== player.id &&
+            (getRelation(state, player.id, nOwner) === 'WAR' || state.tick >= 200)
+          ) {
+            touchesWarOrForeign = true;
+            break;
+          }
+        }
+      }
+      if (!touchesWarOrForeign) continue;
+
+      // Step slightly inland from frontline border cell
+      const capX = player.capitalX >= 0 ? player.capitalX : x;
+      const capY = player.capitalY >= 0 ? player.capitalY : y;
+      const dirX = capX - x;
+      const dirY = capY - y;
+      const len = Math.hypot(dirX, dirY);
+      const tx = len > 1 ? Math.round(x + (dirX / len) * 3) : x;
+      const ty = len > 1 ? Math.round(y + (dirY / len) * 3) : y;
+      const check = validateBuildingPlacement(state, player, 'TRENCH', tx, ty, 1);
+      if (check.valid) {
+        candidates.push({ x: tx, y: ty });
+      }
+    }
+  }
+
+  if (candidates.length > 0) {
+    const pick = candidates[Math.floor(nextRandom(rngBox) * candidates.length)];
+    placeBuilding(state, player.id, 'TRENCH', pick.x, pick.y, 1);
+  }
+}
+
 export function stepBots(state: GameState): void {
   const { width, height, owners, terrain } = state;
   const rngBox = { rngState: state.rngState };
@@ -319,14 +382,17 @@ export function stepBots(state: GameState): void {
       continue;
     }
     player.nextBotDecisionTick =
-      state.tick + 14 + Math.floor(nextRandom(rngBox) * 6);
+      state.tick + 8 + Math.floor(nextRandom(rngBox) * 5);
 
     ensureBotPowerGrid(state, player);
+    ensureBotBorderDefenses(state, player, rngBox);
 
-    // One well-coordinated attack at a time to avoid scattered manpower waste
+    // Aggressive multi-front limit: up to 2 simultaneous orders during wartime
     const activeBotOrders = state.attackOrders.filter((o) => o.playerId === player.id).length;
+    const inWar = hasActiveWarOpponent(state, player.id);
+    const maxOrders = inWar ? 2 : 1;
     const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
-    if (activeBotOrders >= 1 || activeMp < player.maxManpower * 0.38) {
+    if (activeBotOrders >= maxOrders || activeMp < player.maxManpower * 0.28) {
       continue;
     }
 
@@ -398,7 +464,8 @@ export function stepBots(state: GameState): void {
               tacticalScore: wildCount,
             });
           }
-        } else if (warCount > 0 && warOwnerId >= 0) {
+        }
+        if (warCount > 0 && warOwnerId >= 0) {
           const len = Math.hypot(sumWarX, sumWarY);
           if (len > 0.1) {
             const enemyNeighbors = countFriendlyNeighbors(state, x, y, warOwnerId);
@@ -415,7 +482,8 @@ export function stepBots(state: GameState): void {
                 warPlainsCount * 1.4 - enemyNeighbors * 0.8 + betrayalBonus + nextRandom(rngBox),
             });
           }
-        } else if (neutralCount > 0 && neutralOwnerId >= 0) {
+        }
+        if (neutralCount > 0 && neutralOwnerId >= 0) {
           const len = Math.hypot(sumNeutralX, sumNeutralY);
           if (len > 0.1) {
             neutralTargets.push({
@@ -433,21 +501,39 @@ export function stepBots(state: GameState): void {
     }
 
     let chosen: BotTargetCandidate | null = null;
-    if (wildernessTargets.length > 0) {
+    const preferWarNow =
+      warTargets.length > 0 &&
+      activeMp >= player.maxManpower * 0.28 &&
+      (wildernessTargets.length === 0 || nextRandom(rngBox) < 0.72);
+    const proactiveWarDeclare =
+      neutralTargets.length > 0 &&
+      state.tick >= 140 &&
+      !inWar &&
+      activeMp >= player.maxManpower * 0.28 &&
+      (wildernessTargets.length === 0
+        ? nextRandom(rngBox) < 0.68
+        : player.territoryCells > 260 && nextRandom(rngBox) < 0.45);
+
+    if (preferWarNow) {
+      warTargets.sort((a, b) => b.tacticalScore - a.tacticalScore);
+      const topSlice = Math.min(4, warTargets.length);
+      chosen = warTargets[Math.floor(nextRandom(rngBox) * topSlice)];
+    } else if (proactiveWarDeclare) {
+      neutralTargets.sort((a, b) => b.tacticalScore - a.tacticalScore);
+      const topSlice = Math.min(3, neutralTargets.length);
+      chosen = neutralTargets[Math.floor(nextRandom(rngBox) * topSlice)];
+    } else if (wildernessTargets.length > 0) {
       chosen =
         wildernessTargets[Math.floor(nextRandom(rngBox) * wildernessTargets.length)];
-    } else if (
-      warTargets.length > 0 &&
-      activeMp >= player.maxManpower * 0.44
-    ) {
+    } else if (warTargets.length > 0 && activeMp >= player.maxManpower * 0.28) {
       warTargets.sort((a, b) => b.tacticalScore - a.tacticalScore);
       const topSlice = Math.min(4, warTargets.length);
       chosen = warTargets[Math.floor(nextRandom(rngBox) * topSlice)];
     } else if (
       neutralTargets.length > 0 &&
-      !hasActiveWarOpponent(state, player.id) &&
-      activeMp >= player.maxManpower * 0.48 &&
-      nextRandom(rngBox) < 0.35
+      !inWar &&
+      activeMp >= player.maxManpower * 0.38 &&
+      nextRandom(rngBox) < 0.55
     ) {
       chosen = neutralTargets[Math.floor(nextRandom(rngBox) * neutralTargets.length)];
     }
@@ -461,7 +547,7 @@ export function stepBots(state: GameState): void {
       setWarRelation(state, player.id, chosen.targetOwnerId);
     }
 
-    const pushDist = chosen.isWilderness ? 42 : 30;
+    const pushDist = chosen.isWilderness ? 42 : 36;
     const rawPts: Point[] = [
       { x: chosen.bx + 0.5, y: chosen.by + 0.5 },
       {
@@ -476,7 +562,7 @@ export function stepBots(state: GameState): void {
       continue;
     }
 
-    const commitRatio = chosen.isWilderness ? 0.2 : 0.25;
+    const commitRatio = chosen.isWilderness ? 0.22 : 0.28;
     const manpowerCommitted = activeMp * commitRatio;
     if (manpowerCommitted < 16) {
       continue;

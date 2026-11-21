@@ -583,10 +583,10 @@ function generateResourceZones(
   publicResourceZones: ResourceZonePublic[];
   secretResourceZones: ResourceZoneSecret[];
 } {
-  const targetZones = 26;
+  const targetZones = 30;
   const publicResourceZones: ResourceZonePublic[] = [];
   const secretResourceZones: ResourceZoneSecret[] = [];
-  const minZoneSeparation = 42;
+  const minZoneSeparation = 40;
 
   let attempts = 0;
   while (publicResourceZones.length < targetZones && attempts < 6000) {
@@ -661,8 +661,9 @@ function generateResourceZones(
     }
 
     const id = publicResourceZones.length + 1;
+    const mod = id % 3;
     const type: ResourceType =
-      id % 2 === 1 ? 'CONSTRUCTION_MATERIAL' : 'BASIC_ENERGY';
+      mod === 1 ? 'CONSTRUCTION_MATERIAL' : mod === 2 ? 'BASIC_ENERGY' : 'INDUSTRIAL';
 
     publicResourceZones.push({
       id,

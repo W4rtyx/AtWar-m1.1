@@ -13,6 +13,8 @@ export interface UnitPanelCallbacks {
   readonly onSetUnitsStance: (unitIds: ReadonlyArray<number>, stance: UnitStance) => void;
   readonly onMergeUnits: (unitIds: ReadonlyArray<number>) => void;
   readonly onStartParadrop: (unitId: number) => void;
+  readonly onStartArtilleryFire: () => void;
+  readonly onCancelArtilleryFire: (unitIds: ReadonlyArray<number>) => void;
   readonly onClearUnitSelection: () => void;
 }
 
@@ -59,10 +61,13 @@ export class UnitPanelController {
   private readonly rangeBtn: HTMLButtonElement;
   private readonly mergeBtn: HTMLButtonElement;
   private readonly paradropBtn: HTMLButtonElement;
+  private readonly fireMissionBtn: HTMLButtonElement;
+  private readonly cancelFireBtn: HTMLButtonElement;
   private readonly clearBtn: HTMLButtonElement;
 
   private activeSelectedIds: number[] = [];
   private activeParadropUnitId: number | null = null;
+  private activeArtilleryIds: number[] = [];
 
   public constructor(callbacks: UnitPanelCallbacks) {
     this.callbacks = callbacks;
@@ -122,6 +127,12 @@ export class UnitPanelController {
           <button type="button" class="hud-btn hud-unit-act-btn hud-btn-drop hidden" data-up="paradrop" title="Vysadit parašutisty do týlu z letiště (P)">
             Výsadek (P)
           </button>
+          <button type="button" class="hud-btn hud-unit-act-btn hud-btn-artillery hidden" data-up="fire-mission" title="Zvolit cíl plošného ostřelování dělostřelectvem v dostřelu (F)">
+            Ostřelovat cíl (F)
+          </button>
+          <button type="button" class="hud-btn hud-unit-act-btn hud-btn-danger hidden" data-up="cancel-fire" title="Zastavit aktuální palebnou misi dělostřelectva">
+            Stop palby
+          </button>
         </div>
 
         <div class="hud-unit-order-hint" data-up="order-hint">
@@ -179,6 +190,8 @@ export class UnitPanelController {
     this.rangeBtn = this.query<HTMLButtonElement>('[data-up="stance-range"]');
     this.mergeBtn = this.query<HTMLButtonElement>('[data-up="merge"]');
     this.paradropBtn = this.query<HTMLButtonElement>('[data-up="paradrop"]');
+    this.fireMissionBtn = this.query<HTMLButtonElement>('[data-up="fire-mission"]');
+    this.cancelFireBtn = this.query<HTMLButtonElement>('[data-up="cancel-fire"]');
     this.clearBtn = this.query<HTMLButtonElement>('[data-up="clear"]');
 
     this.lockBtn.addEventListener('mousedown', (e) => {
@@ -213,6 +226,22 @@ export class UnitPanelController {
         this.callbacks.onStartParadrop(this.activeParadropUnitId);
       }
     });
+    this.fireMissionBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || this.fireMissionBtn.disabled) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.activeArtilleryIds.length > 0) {
+        this.callbacks.onStartArtilleryFire();
+      }
+    });
+    this.cancelFireBtn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.activeArtilleryIds.length > 0) {
+        this.callbacks.onCancelArtilleryFire(this.activeArtilleryIds);
+      }
+    });
     this.clearBtn.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -241,6 +270,7 @@ export class UnitPanelController {
     state: ClientRenderState,
     selectedUnitIds: ReadonlySet<number>,
     paradropUnitId: number | null,
+    artilleryFireMode: boolean = false,
   ): void {
     const isPlaying = state.phase === 'PLAYING';
     this.panelEl.classList.toggle('hidden', !isPlaying);
@@ -305,6 +335,7 @@ export class UnitPanelController {
     this.selectionBoxEl.classList.toggle('hidden', selectedUnits.length === 0);
     if (selectedUnits.length === 0) {
       this.activeParadropUnitId = null;
+      this.activeArtilleryIds = [];
       return;
     }
 
@@ -403,6 +434,18 @@ export class UnitPanelController {
         : Number.isFinite(minAirfieldCooldown)
           ? `Výsadek (${(minAirfieldCooldown / TICK_RATE).toFixed(1)}s)`
           : 'Výsadek (bez letiště)';
+    }
+
+    const artillerySelected = selectedUnits.filter((u) => u.type === 'ARTILLERY');
+    this.activeArtilleryIds = artillerySelected.map((u) => u.id);
+    this.fireMissionBtn.classList.toggle('hidden', artillerySelected.length === 0);
+    const anyFiring = artillerySelected.some((u) => u.fireMissionTicksRemaining > 0);
+    this.cancelFireBtn.classList.toggle('hidden', !anyFiring);
+    if (artillerySelected.length > 0) {
+      this.fireMissionBtn.classList.toggle('active', artilleryFireMode);
+      this.fireMissionBtn.textContent = artilleryFireMode
+        ? 'Vyberte cíl palby...'
+        : 'Ostřelovat cíl (F)';
     }
   }
 }

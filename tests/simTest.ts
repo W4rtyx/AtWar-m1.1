@@ -42,6 +42,7 @@ import {
 } from '../src/engine/types';
 import {
   UNIT_SPECS,
+  queueUnitProduction,
   spawnUnitStack,
 } from '../src/engine/units';
 
@@ -1865,8 +1866,8 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
   placeBuilding(state, humanId, 'POWER_PLANT', ppSpot.x, ppSpot.y, 5);
   const barSpot = findSpacedOwnedSpot(state, humanId, arena.x - 16, arena.y + 6, 8, false)!;
   const barracks = placeBuilding(state, humanId, 'BARRACKS', barSpot.x, barSpot.y, 1)!;
-  const facSpot = findSpacedOwnedSpot(state, humanId, arena.x - 4, arena.y - 8, 8, false)!;
-  const factory = placeBuilding(state, humanId, 'FACTORY', facSpot.x, facSpot.y, 1)!;
+  const armSpot = findSpacedOwnedSpot(state, humanId, arena.x - 4, arena.y - 8, 8, false)!;
+  const armory = placeBuilding(state, humanId, 'ARMORY', armSpot.x, armSpot.y, 1)!;
   const afSpot = findSpacedOwnedSpot(state, humanId, arena.x - 4, arena.y + 6, 8, false)!;
   const airfield = placeBuilding(state, humanId, 'AIRFIELD', afSpot.x, afSpot.y, 1)!;
 
@@ -1874,8 +1875,8 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
     dispatchAction(state, { type: 'TICK' });
   }
   assert(
-    barracks.stackCount === 1 && factory.stackCount === 1 && airfield.stackCount === 1,
-    'Barracks, Factory, and Airfield must finish construction',
+    barracks.stackCount === 1 && armory.stackCount === 1 && airfield.stackCount === 1,
+    'Barracks, Armory, and Airfield must finish construction',
   );
 
   // Produce all 4 ground unit types
@@ -1889,13 +1890,13 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
   dispatchAction(state, {
     type: 'PRODUCE_UNIT',
     playerId: humanId,
-    buildingId: factory.id,
+    buildingId: armory.id,
     unitType: 'TANK',
   });
   dispatchAction(state, {
     type: 'PRODUCE_UNIT',
     playerId: humanId,
-    buildingId: factory.id,
+    buildingId: armory.id,
     unitType: 'ARTILLERY',
   });
   dispatchAction(state, {
@@ -2004,6 +2005,15 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
       para1.hp === para1.maxHp,
     'Uncontested paradrop must land cleanly, set vulnerability + cooldown, and consume one-time drop',
   );
+
+  const parkedArty = state.units.find((u) => u.ownerId === humanId && u.type === 'ARTILLERY');
+  if (parkedArty) {
+    parkedArty.x = human.capitalX + 0.5;
+    parkedArty.y = human.capitalY + 0.5;
+    parkedArty.targetX = null;
+    parkedArty.targetY = null;
+    parkedArty.waypoints = [];
+  }
 
   // Build enemy 2x AA_BATTERY and wait for airfield cooldown, then drop para2 into AA coverage
   enemy.money = 5000;
@@ -2805,6 +2815,353 @@ function testRangeUnitDisciplineAndArtilleryAutoShelling(): void {
   );
 }
 
+function testLandPathfindingAroundBayAndIslandRejection(): void {
+  const state = createInitialGameState(9806);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  human.energyReserve = human.energyReserveMax;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  // Paint a controlled inland arena (420, 240) with a water bay blocking the straight line
+  // and a clear northern land bridge around the bay, plus an isolated southern island
+  const bx = 420;
+  const by = 240;
+  for (let y = by - 36; y <= by + 36; y++) {
+    for (let x = bx - 36; x <= bx + 36; x++) {
+      const idx = y * state.width + x;
+      state.terrain[idx] = TerrainType.PLAINS;
+      state.owners[idx] = humanId;
+    }
+  }
+
+  // Deep water bay right across y = by - 6 .. by + 34 blocking direct E-W crossing
+  for (let y = by - 6; y <= by + 34; y++) {
+    for (let x = bx - 5; x <= bx + 5; x++) {
+      const idx = y * state.width + x;
+      state.terrain[idx] = TerrainType.WATER;
+      state.owners[idx] = WILDERNESS_OWNER;
+    }
+  }
+
+  // Isolated island surrounded by >= 10 cells of WATER moat in SE quadrant of arena
+  for (let y = by + 12; y <= by + 34; y++) {
+    for (let x = bx + 12; x <= bx + 34; x++) {
+      const idx = y * state.width + x;
+      state.terrain[idx] = TerrainType.WATER;
+      state.owners[idx] = WILDERNESS_OWNER;
+    }
+  }
+  for (let y = by + 22; y <= by + 30; y++) {
+    for (let x = bx + 22; x <= bx + 30; x++) {
+      const idx = y * state.width + x;
+      state.terrain[idx] = TerrainType.PLAINS;
+      state.owners[idx] = humanId;
+    }
+  }
+
+  const tank = spawnUnitStack(state, humanId, 'TANK', bx - 16, by + 6, 1, { stance: 'LOCK' });
+  const goalX = bx + 16;
+  const goalY = by + 4;
+
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [tank.id],
+    targetX: goalX,
+    targetY: goalY,
+  });
+
+  assert(
+    tank.waypoints.length >= 2 && tank.targetX !== null,
+    `Expected multi-waypoint A* land route around bay (waypoints=${tank.waypoints.length})`,
+  );
+
+  let minYReached = tank.y;
+  for (let t = 0; t < 240 && tank.targetX !== null; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    const cTerrain = state.terrain[Math.floor(tank.y) * state.width + Math.floor(tank.x)];
+    assert(cTerrain !== TerrainType.WATER, 'Pathfound tank must never step into WATER');
+    if (tank.y < minYReached) {
+      minYReached = tank.y;
+    }
+  }
+
+  const distToGoal = Math.hypot(tank.x - goalX, tank.y - goalY);
+  assert(
+    distToGoal <= 2.2 && minYReached < by - 6,
+    `Tank must walk north around bay cleanly without coastal jamming (dist=${distToGoal.toFixed(2)}, minY=${minYReached.toFixed(1)} vs bayTop=${by - 6})`,
+  );
+
+  // Attempting to march across open sea to isolated island must cleanly reject with UI notice
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [tank.id],
+    targetX: bx + 26,
+    targetY: by + 26,
+  });
+  assert(
+    tank.targetX === null &&
+      state.lastNotice !== null &&
+      state.lastNotice.messageCs.includes('přístav/loď'),
+    `Disconnected island move order must reject with port/ship notice (got "${state.lastNotice?.messageCs ?? 'none'}")`,
+  );
+
+  console.log(
+    `PASS [w]: Coarse A* land pathfinding around bay (${tank.x.toFixed(1)},${tank.y.toFixed(1)}) & island rejection verified.`,
+  );
+}
+
+function testManualArtilleryFireMissionBarrage(): void {
+  const state = createInitialGameState(9807);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  human.energyReserve = human.energyReserveMax;
+
+  let enemy = null;
+  for (const p of state.players.values()) {
+    if (p.isBot) {
+      p.nextBotDecisionTick = 999999;
+      if (!enemy && p.alive) enemy = p;
+    }
+  }
+  assert(enemy !== null, 'Expected alive bot enemy');
+  const enemyId = enemy!.id;
+  setWarRelation(state, humanId, enemyId);
+
+  const ax = 440;
+  const ay = 230;
+  for (let y = ay - 20; y <= ay + 20; y++) {
+    for (let x = ax - 24; x <= ax + 34; x++) {
+      const idx = y * state.width + x;
+      state.terrain[idx] = TerrainType.PLAINS;
+      state.owners[idx] = x >= ax ? enemyId : humanId;
+    }
+  }
+
+  enemy!.money = 5000;
+  enemy!.buildingMaterial = 5000;
+  enemy!.industry = 5000;
+  enemy!.energyReserve = enemy!.energyReserveMax;
+  const enemyBunker = placeBuilding(state, enemyId, 'BUNKER', ax + 14, ay, 1)!;
+  assert(enemyBunker !== null, 'Expected enemy BUNKER inside target zone');
+  enemyBunker.stackCount = 3;
+  enemyBunker.underConstructionCount = 0;
+  enemyBunker.constructionTicksRemaining = 0;
+
+  const enemyInf = spawnUnitStack(state, enemyId, 'INFANTRY', ax + 15, ay + 2, 2, {
+    stance: 'LOCK',
+  });
+  const enemyInfHpBefore = enemyInf.hp;
+
+  enemy!.manpower = enemy!.maxManpower;
+  const enemyMpBefore = enemy!.manpower;
+
+  // Create active enemy offensive arrow inside blast radius
+  state.attackOrders.push({
+    id: state.nextOrderId++,
+    playerId: enemyId,
+    origin: { x: ax + 12, y: ay },
+    waypoints: [
+      { x: ax + 12, y: ay },
+      { x: ax - 10, y: ay },
+    ],
+    frontierArc: 0,
+    targetOwnerIds: [humanId],
+    wildernessOnly: false,
+    currentSegmentIndex: 0,
+    segmentProgress: 0,
+    totalPathLength: 22,
+    manpowerCommitted: 120,
+    manpowerRemaining: 120,
+    ticksRemaining: 60,
+    maxTicks: 60,
+    stagnantTicks: 0,
+    mountainAccum: 0,
+  });
+
+  const arty = spawnUnitStack(state, humanId, 'ARTILLERY', ax - 4, ay, 4, { stance: 'LOCK' });
+
+  // Verify out-of-range manual mission gets rejected with notice
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [arty.id],
+    targetX: ax + 42,
+    targetY: ay,
+  });
+  assert(
+    arty.fireMissionTicksRemaining === 0 &&
+      state.lastNotice !== null &&
+      state.lastNotice.messageCs.includes('mimo dostřel'),
+    'Out-of-range fire mission must be rejected with UI notice',
+  );
+
+  // Launch manual artillery fire mission within range (dist = 18 <= 34)
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [arty.id],
+    targetX: ax + 14,
+    targetY: ay,
+  });
+  assert(arty.fireMissionTicksRemaining > 0, 'Manual artillery fire mission must activate');
+
+  let sawExplosion = false;
+  let sawEnemyInfDamaged = false;
+  let sawOrderDisrupted = false;
+  for (let t = 0; t < 24; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    if (state.artilleryExplosions.length > 0) sawExplosion = true;
+    const infCurr = state.units.find((u) => u.id === enemyInf.id);
+    if (!infCurr || infCurr.hp < enemyInfHpBefore - 5) sawEnemyInfDamaged = true;
+    const ordCurr = state.attackOrders.find((o) => o.playerId === enemyId);
+    if (!ordCurr || ordCurr.manpowerRemaining < 105) sawOrderDisrupted = true;
+  }
+
+  const bunkerCurr = state.buildings.find((b) => b.id === enemyBunker.id);
+  const bunkerStacksAfter = bunkerCurr ? bunkerCurr.stackCount : 0;
+
+  assert(sawExplosion, 'Artillery fire mission must spawn ArtilleryExplosionFx bursts');
+  assert(sawEnemyInfDamaged, 'Fire mission splash must damage enemy units in blast circle');
+  assert(sawOrderDisrupted, 'Fire mission must disrupt enemy offensive orders in sector');
+  assert(
+    bunkerStacksAfter < 3 && enemy!.manpower < enemyMpBefore,
+    `Fire mission must degrade BUNKER stacks (3 -> ${bunkerStacksAfter}) and enemy manpower`,
+  );
+
+  console.log(
+    `PASS [x]: Manual ARTILLERY Fire Mission barrage verified (bunker stacks 3 -> ${bunkerStacksAfter}).`,
+  );
+}
+
+function testFactoryArmorySeparationAndCityNoOverload(): void {
+  const state = createInitialGameState(9808);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  const indZone = state.publicResourceZones.find((z) => z.type === 'INDUSTRIAL');
+  assert(indZone !== undefined, 'Map generator must spawn INDUSTRIAL resource zones');
+  const secretInd = state.secretResourceZones.find((s) => s.zoneId === indZone!.id)!;
+
+  // Claim human territory around secret industrial optimum
+  for (let y = secretInd.optimumY - 22; y <= secretInd.optimumY + 22; y++) {
+    for (let x = secretInd.optimumX - 22; x <= secretInd.optimumX + 22; x++) {
+      if (x < 0 || x >= state.width || y < 0 || y >= state.height) continue;
+      if (state.terrain[y * state.width + x] !== TerrainType.WATER) {
+        state.owners[y * state.width + x] = humanId;
+      }
+    }
+  }
+
+  human.money = 12000;
+  human.buildingMaterial = 6000;
+  human.industry = 4000;
+  human.energyReserve = 2500;
+  human.maxManpower = 2000;
+  human.manpower = 1500;
+
+  const ppSpot = findSpacedOwnedSpot(state, humanId, secretInd.optimumX - 14, secretInd.optimumY, 10, false)!;
+  placeBuilding(state, humanId, 'POWER_PLANT', ppSpot.x, ppSpot.y, 5);
+
+  assert(
+    BUILDING_SPECS.FACTORY.resourceZoneType === 'INDUSTRIAL',
+    'FACTORY must target INDUSTRIAL resource zones',
+  );
+  const factory = placeBuilding(
+    state,
+    humanId,
+    'FACTORY',
+    secretInd.optimumX,
+    secretInd.optimumY,
+    1,
+  )!;
+  assert(factory !== null, 'FACTORY must build cleanly at industrial zone optimum');
+
+  const armSpot = findSpacedOwnedSpot(state, humanId, secretInd.optimumX + 12, secretInd.optimumY, 10, false)!;
+  const armory = placeBuilding(state, humanId, 'ARMORY', armSpot.x, armSpot.y, 1)!;
+  assert(armory !== null, 'ARMORY must build cleanly');
+
+  for (let t = 0; t < BUILDING_SPECS.ARMORY.constructionTicks + 4; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  assert(
+    factory.stackCount === 1 &&
+      factory.revealedEfficiencyPct !== null &&
+      factory.revealedEfficiencyPct >= 85 &&
+      human.industryIncomePerSec > 0,
+    `FACTORY inside INDUSTRIAL optimum must produce industry with high site efficiency (${factory.revealedEfficiencyPct}%, +${human.industryIncomePerSec.toFixed(1)}/s)`,
+  );
+
+  // FACTORY must NOT produce military vehicles; ARMORY produces TANK & ARTILLERY
+  const rejectedTankFromFactory = queueUnitProduction(state, humanId, factory.id, 'TANK', 1);
+  assert(rejectedTankFromFactory === 0, 'FACTORY must reject TANK production');
+
+  const indBeforeArmory = human.industry;
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: armory.id,
+    unitType: 'TANK',
+  });
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: armory.id,
+    unitType: 'ARTILLERY',
+  });
+  assert(
+    armory.unitQueue.length === 2 && human.industry < indBeforeArmory,
+    'ARMORY must queue heavy armor/artillery and consume accumulated Industry',
+  );
+
+  for (let t = 0; t < UNIT_SPECS.TANK.productionTicks + UNIT_SPECS.ARTILLERY.productionTicks + 4; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    state.units.some((u) => u.ownerId === humanId && u.type === 'TANK') &&
+      state.units.some((u) => u.ownerId === humanId && u.type === 'ARTILLERY'),
+    'ARMORY must complete production of TANK and ARTILLERY',
+  );
+
+  // CITY must strictly forbid > 100% overload
+  const capCity = state.buildings.find((b) => b.ownerId === humanId && b.isCapital)!;
+  dispatchAction(state, {
+    type: 'SET_BUILDING_TYPE_OCCUPANCY',
+    playerId: humanId,
+    buildingType: 'CITY',
+    occupancyPct: 200,
+  });
+  dispatchAction(state, {
+    type: 'SET_BUILDING_OCCUPANCY',
+    playerId: humanId,
+    buildingId: capCity.id,
+    occupancyPct: 200,
+  });
+  assert(
+    human.buildingOccupancyByType.CITY <= 100 &&
+      capCity.effectiveOccupancyPct <= 100 &&
+      Math.abs(capCity.currentEnergyUse - BUILDING_SPECS.CITY.baseEnergyConsumption) < 0.01,
+    `CITY must strictly clamp occupancy <= 100% with no 200% overload (got type=${human.buildingOccupancyByType.CITY}, eff=${capCity.effectiveOccupancyPct})`,
+  );
+
+  console.log(
+    `PASS [y]: FACTORY (${factory.revealedEfficiencyPct}% zone), ARMORY tank/arty production & CITY <= 100% cap verified.`,
+  );
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -2828,7 +3185,10 @@ function main(): void {
   testLassoUnitSelectionPriorityOverFront();
   testAllAiBotsSpawnSurviveAndStayActive();
   testRangeUnitDisciplineAndArtilleryAutoShelling();
-  console.log('ALL 22 SIMULATION TESTS PASSED.');
+  testLandPathfindingAroundBayAndIslandRejection();
+  testManualArtilleryFireMissionBarrage();
+  testFactoryArmorySeparationAndCityNoOverload();
+  console.log('ALL 25 SIMULATION TESTS PASSED.');
 }
 
 main();

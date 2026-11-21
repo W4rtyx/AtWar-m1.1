@@ -461,7 +461,8 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
         continue;
       }
       const rawPct = b.occupancyOverride ?? player.buildingOccupancyByType[b.type] ?? 100;
-      const clampedPct = Math.max(0, Math.min(200, rawPct));
+      const maxOcc = b.type === 'CITY' ? 100 : 200;
+      const clampedPct = Math.max(0, Math.min(maxOcc, rawPct));
       buildingTargetPcts.push(clampedPct);
       if (spec.baseManpowerRequired <= 0) {
         buildingDesiredMps.push(0);
@@ -585,8 +586,9 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       } else if (b.type === 'POWER_PLANT') {
         b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier);
       } else if (b.type === 'FACTORY') {
-        industryIncome += spec.baseIndustryPerSec * curve.outputMultiplier * energyFactor * units;
-        b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
+        industryIncome +=
+          spec.baseIndustryPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
+        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * energyFactor);
       } else if (b.type === 'LAB') {
         knowledgeIncome += spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor * units;
         b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
