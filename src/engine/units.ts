@@ -15,6 +15,15 @@ import {
   supportsFireMission,
 } from './navalAir';
 import {
+  getEffectiveAirfieldRange,
+  getEffectiveFireMissionIndustryCost,
+  getEffectiveUnitAttackRange,
+  getEffectiveUnitMaxHpPerUnit,
+  getEffectiveUnitOperationRadius,
+  getEffectiveUnitSpeed,
+  getTechLevel,
+} from './techTree';
+import {
   ALL_UNIT_TYPES,
   AttackOrder,
   Building,
@@ -373,8 +382,11 @@ export function spawnUnitStack(
   opts?: SpawnUnitOptions,
 ): Unit {
   const spec = UNIT_SPECS[type];
+  const ownerPlayer = state.players.get(ownerId);
   const clampedCount = Math.max(1, Math.min(MAX_UNIT_STACK, Math.round(count)));
-  const maxHp = clampedCount * spec.hpPerUnit;
+  const hpPerUnit = getEffectiveUnitMaxHpPerUnit(ownerPlayer, type, spec.hpPerUnit);
+  const opRadius = getEffectiveUnitOperationRadius(ownerPlayer, type, spec.operationRadius);
+  const maxHp = clampedCount * hpPerUnit;
   let spawnX = Math.max(0.5, Math.min(state.width - 0.5, x));
   let spawnY = Math.max(0.5, Math.min(state.height - 0.5, y));
 
@@ -397,7 +409,7 @@ export function spawnUnitStack(
     maxHp,
     morale: 100,
     stance: opts?.stance ?? 'RANGE',
-    operationRadius: spec.operationRadius,
+    operationRadius: opRadius,
     targetX: null,
     targetY: null,
     waypoints: [],
@@ -1076,6 +1088,7 @@ export function issueUnitMoveOrder(
     getUnitRelation(state, playerId, targetOwner) === 'NEUTRAL';
 
   const idSet = new Set(unitIds);
+  const player = state.players.get(playerId);
   let updated = 0;
   let firstFailureMsg: string | null = null;
 
@@ -1090,9 +1103,25 @@ export function issueUnitMoveOrder(
     }
     const spec = UNIT_SPECS[unit.type];
 
+    // If fresh PARATROOPERS are ordered far across land with RMB, drop via airlift transit automatically
+    if (
+      unit.type === 'PARATROOPERS' &&
+      unit.canParadrop &&
+      !targetIsWater &&
+      Math.hypot(clampedX - unit.x, clampedY - unit.y) > 8 &&
+      executeParadrop(state, playerId, unit.id, clampedX, clampedY)
+    ) {
+      updated++;
+      continue;
+    }
+
     // 1. Air units: move freely over land & water within AIRFIELD operational range
     if (isAirUnitType(unit.type)) {
-      const airRange = spec.airRange ?? 120;
+      const baseAirRange = spec.airRange ?? 120;
+      const airRange =
+        getTechLevel(player, 'AIR_STRATEGIC') >= 2
+          ? Math.round(baseAirRange * 1.25)
+          : baseAirRange;
       const airfield = findAirfieldCoveringPoint(state, playerId, clampedX, clampedY, airRange);
       if (!airfield) {
         if (!firstFailureMsg) {
@@ -1282,22 +1311,31 @@ export function issueArtilleryFireMission(
     ) {
       continue;
     }
-    const ammoCost = getFireMissionSalvoIndustryCost(unit.type, unit.count);
+    const ammoCost = getEffectiveFireMissionIndustryCost(
+      owner,
+      unit.type,
+      getFireMissionSalvoIndustryCost(unit.type, unit.count),
+    );
     if (!owner || owner.industry < ammoCost) {
       insufficientIndustry = true;
       continue;
     }
     const spec = UNIT_SPECS[unit.type];
+    const effectiveRange = getEffectiveUnitAttackRange(owner, unit.type, spec.attackRange);
     if (unit.type === 'BOMBER') {
-      const airRange = spec.airRange ?? 125;
+      const baseAirRange = spec.airRange ?? 125;
+      const airRange =
+        getTechLevel(owner, 'AIR_STRATEGIC') >= 2
+          ? Math.round(baseAirRange * 1.25)
+          : baseAirRange;
       const airfield = findAirfieldCoveringPoint(state, playerId, clampedX, clampedY, airRange);
-      if (!airfield && Math.hypot(clampedX - unit.x, clampedY - unit.y) > spec.attackRange) {
+      if (!airfield && Math.hypot(clampedX - unit.x, clampedY - unit.y) > effectiveRange) {
         continue;
       }
       unit.waypoints = [{ x: clampedX, y: clampedY }];
       unit.targetX = clampedX;
       unit.targetY = clampedY;
-    } else if (Math.hypot(clampedX - unit.x, clampedY - unit.y) > spec.attackRange) {
+    } else if (Math.hypot(clampedX - unit.x, clampedY - unit.y) > effectiveRange) {
       continue;
     }
 
@@ -1390,6 +1428,7 @@ export function findReadyAirfieldForParadrop(
 ): Building | null {
   let best: Building | null = null;
   let bestDist = Infinity;
+  const maxRange = getEffectiveAirfieldRange(state.players.get(playerId));
   for (const b of state.buildings) {
     if (
       b.ownerId !== playerId ||
@@ -1400,7 +1439,7 @@ export function findReadyAirfieldForParadrop(
       continue;
     }
     const dist = Math.hypot(b.x + 0.5 - targetX, b.y + 0.5 - targetY);
-    if (dist <= AIRFIELD_PARADROP_RANGE && dist < bestDist) {
+    if (dist <= maxRange && dist < bestDist) {
       bestDist = dist;
       best = b;
     }
@@ -1564,7 +1603,7 @@ function completeParadropLanding(state: GameState, unit: Unit): boolean {
     ) {
       continue;
     }
-    const cov = getAirDefenseCoverageAt(state.buildings, other.id, ix, iy);
+    const cov = getAirDefenseCoverageAt(state.buildings, other.id, ix, iy, other);
     if (cov > bestAaCoverage) {
       bestAaCoverage = cov;
       aaOwnerId = other.id;
@@ -1573,13 +1612,15 @@ function completeParadropLanding(state: GameState, unit: Unit): boolean {
 
   if (bestAaCoverage > 0) {
     const spec = UNIT_SPECS.PARATROOPERS;
+    const unitOwner = state.players.get(unit.ownerId);
+    const hpPerUnit = getEffectiveUnitMaxHpPerUnit(unitOwner, 'PARATROOPERS', spec.hpPerUnit);
     const damageRatio = Math.min(0.85, bestAaCoverage * 0.45);
     const dmg = unit.maxHp * damageRatio;
     const prevCount = unit.count;
     unit.hp = Math.max(0, unit.hp - dmg);
     unit.morale = Math.max(25, unit.morale - Math.round(damageRatio * 45));
     const newCount =
-      unit.hp <= 0 ? 0 : Math.min(unit.count, Math.max(1, Math.ceil(unit.hp / spec.hpPerUnit)));
+      unit.hp <= 0 ? 0 : Math.min(unit.count, Math.max(1, Math.ceil(unit.hp / hpPerUnit)));
 
     if (newCount < prevCount && aaOwnerId >= 0) {
       const aaOwner = state.players.get(aaOwnerId);
@@ -1597,7 +1638,7 @@ function completeParadropLanding(state: GameState, unit: Unit): boolean {
     }
 
     unit.count = newCount;
-    unit.maxHp = newCount * spec.hpPerUnit;
+    unit.maxHp = newCount * hpPerUnit;
     unit.hp = Math.min(unit.hp, unit.maxHp);
   }
 
@@ -2026,9 +2067,11 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           unit.waypoints = [];
           unit.manualOrder = false;
         } else if (dist > 1e-4) {
+          // Pure air movement: never penalized by ground MOUNTAINS, TRENCH, or BUNKER
           const supplyMul = 0.65 + 0.35 * unit.supplyLevel;
           const moraleMul = 0.65 + 0.35 * (unit.morale / 100);
-          const stepDist = Math.min(dist, spec.speedPlains * supplyMul * moraleMul * TICK_DT);
+          const airSpeed = getEffectiveUnitSpeed(owner, unit.type, spec.speedPlains);
+          const stepDist = Math.min(dist, airSpeed * supplyMul * moraleMul * TICK_DT);
           unit.x = Math.max(0.5, Math.min(width - 0.5, unit.x + (dx / dist) * stepDist));
           unit.y = Math.max(0.5, Math.min(height - 0.5, unit.y + (dy / dist) * stepDist));
         }
@@ -2048,13 +2091,18 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
               : findNearestCoastalLandCell(state, unit.ownerId, unit.x, unit.y, 3);
           if (nearLanding && Math.hypot(nearLanding.x - unit.x, nearLanding.y - unit.y) <= 3.8) {
             const cargoType = unit.cargoUnitType ?? 'INFANTRY';
+            const cargoHp = getEffectiveUnitMaxHpPerUnit(
+              owner,
+              cargoType,
+              UNIT_SPECS[cargoType].hpPerUnit,
+            );
             if (
               disembarkTransportShip(
                 state,
                 unit,
                 nearLanding.x,
                 nearLanding.y,
-                UNIT_SPECS[cargoType].hpPerUnit,
+                cargoHp,
               )
             ) {
               anyMapClaimed = true;
@@ -2071,7 +2119,8 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           } else if (dist > 1e-4) {
             const supplyMul = 0.55 + 0.45 * unit.supplyLevel;
             const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
-            let stepDist = Math.min(dist, spec.speedPlains * supplyMul * moraleMul * TICK_DT);
+            const shipSpeed = getEffectiveUnitSpeed(owner, unit.type, spec.speedPlains);
+            let stepDist = Math.min(dist, shipSpeed * supplyMul * moraleMul * TICK_DT);
             let ux = dx / dist;
             let uy = dy / dist;
             let stepEndX = unit.x + ux * stepDist;
@@ -2144,8 +2193,9 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           unit.manualOrder = false;
         } else if (dist > 1e-4) {
           const curTerrain = terrain[curIy * width + curIx];
-          const baseSpeed =
+          const rawSpeed =
             curTerrain === TerrainType.MOUNTAINS ? spec.speedMountains : spec.speedPlains;
+          const baseSpeed = getEffectiveUnitSpeed(owner, unit.type, rawSpeed);
           const supplyMul = 0.55 + 0.45 * unit.supplyLevel;
           const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
           let stepDist = Math.min(dist, baseSpeed * supplyMul * moraleMul * TICK_DT);
@@ -2218,10 +2268,13 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
               probeOwner !== unit.ownerId &&
               getUnitRelation(state, unit.ownerId, probeOwner) === 'WAR'
             ) {
-              const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY);
+              const defOwner = state.players.get(probeOwner);
+              const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY, defOwner);
+              const tankArmorRes =
+                unit.type === 'TANK' && getTechLevel(owner, 'GROUND') >= 4 ? 0.75 : 1.0;
               const armorPenalty =
                 unit.type === 'TANK'
-                  ? 1 / (1 + def.antiArmorFactor * 1.15)
+                  ? 1 / (1 + def.antiArmorFactor * 1.15 * tankArmorRes)
                   : def.advanceSpeedMultiplier;
               const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
 
@@ -2254,9 +2307,11 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
               unit.y = ny;
 
               // Advancing non-encircled tactical units claim entered WAR/WILDERNESS cells along their spearhead
+              // Paratroopers (PARATROOPERS) never draw an overland trail line when walking or airborne.
               const enteredOwner = owners[nIdx];
               if (
                 !unit.isEncircled &&
+                unit.type !== 'PARATROOPERS' &&
                 (enteredOwner === WILDERNESS_OWNER ||
                   (enteredOwner >= 0 &&
                     enteredOwner !== unit.ownerId &&

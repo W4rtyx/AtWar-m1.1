@@ -8,6 +8,13 @@ import {
   supportsFireMission,
 } from './navalAir';
 import {
+  getEffectiveFireMissionIndustryCost,
+  getEffectiveUnitAttack,
+  getEffectiveUnitAttackRange,
+  getEffectiveUnitMaxHpPerUnit,
+  getTechLevel,
+} from './techTree';
+import {
   Building,
   BuildingType,
   GameState,
@@ -81,8 +88,11 @@ export function evaluateFrontUnitSupport(
     };
   }
 
+  const defenderPlayer = defenderId >= 0 ? state.players.get(defenderId) : undefined;
+  const attackerPlayer = state.players.get(attackerId);
+  const attackerEliteMech = getTechLevel(attackerPlayer, 'GROUND') >= 5;
   const enemyDef =
-    defenderId >= 0 ? evaluateCellDefense(state.buildings, defenderId, cellX, cellY) : null;
+    defenderId >= 0 ? evaluateCellDefense(state.buildings, defenderId, cellX, cellY, defenderPlayer) : null;
 
   let attackerSupportWeight = 0;
   let costReduction = 0;
@@ -91,7 +101,7 @@ export function evaluateFrontUnitSupport(
   let defenderResist = 0;
 
   for (const u of state.units) {
-    if (u.count <= 0 || u.hp <= 0) continue;
+    if (u.count <= 0 || u.hp <= 0 || u.inAirTransit) continue;
     const spec = UNIT_SPECS[u.type];
     const radius = Math.max(u.ownerId === attackerId ? 20 : 18, spec.attackRange);
     const dist = Math.hypot(u.x - (cellX + 0.5), u.y - (cellY + 0.5));
@@ -111,8 +121,9 @@ export function evaluateFrontUnitSupport(
       } else if (u.type === 'TANK') {
         const terrainScale = cellTerrain === TerrainType.MOUNTAINS ? 0.35 : 1.0;
         const bunkerDamp = enemyDef ? 1 / (1 + enemyDef.antiArmorFactor * 0.65) : 1.0;
-        costReduction += 0.24 * w * terrainScale * bunkerDamp;
-        speedBoost += 0.34 * w * terrainScale * bunkerDamp;
+        const mechAuraMul = attackerEliteMech ? 1.15 : 1.0;
+        costReduction += 0.24 * w * terrainScale * bunkerDamp * mechAuraMul;
+        speedBoost += 0.34 * w * terrainScale * bunkerDamp * mechAuraMul;
         fortSuppression += 0.12 * w * terrainScale;
       } else if (u.type === 'ARTILLERY') {
         costReduction += 0.16 * w;
@@ -199,7 +210,11 @@ function executeArtilleryFireMissionSalvo(
     return;
   }
 
-  const ammoCost = getFireMissionSalvoIndustryCost(attacker.type, attacker.count);
+  const ammoCost = getEffectiveFireMissionIndustryCost(
+    attOwner,
+    attacker.type,
+    getFireMissionSalvoIndustryCost(attacker.type, attacker.count),
+  );
   if (!attOwner || attOwner.industry < ammoCost) {
     attacker.fireMissionX = null;
     attacker.fireMissionY = null;
@@ -221,8 +236,17 @@ function executeArtilleryFireMissionSalvo(
   const blackoutMul = getCombatBlackoutMultiplier(attOwner);
   const hpEfficiency = 0.45 + 0.55 * Math.min(1, attacker.hp / Math.max(1, attacker.maxHp));
   const countScale = Math.pow(attacker.count, 0.88);
+  const baseAttack = getEffectiveUnitAttack(attOwner, attacker.type, attSpec.attack);
+  const heavyAmmoMul =
+    attacker.type === 'BOMBER'
+      ? getTechLevel(attOwner, 'AIR_STRATEGIC') >= 3
+        ? 1.3
+        : 1.0
+      : getTechLevel(attOwner, 'ARTILLERY_SUPPORT') >= 2
+        ? 1.25
+        : 1.0;
   const salvoPower =
-    attSpec.attack * countScale * hpEfficiency * supplyMul * moraleMul * blackoutMul;
+    baseAttack * heavyAmmoMul * countScale * hpEfficiency * supplyMul * moraleMul * blackoutMul;
 
   // 1. Area splash damage & morale shock to WAR enemy units (including naval ships/transports) inside blast circle
   for (const candidate of state.units) {
@@ -243,7 +267,15 @@ function executeArtilleryFireMissionSalvo(
   }
 
   // 2. Direct structural damage to enemy fortifications & structures inside impact zone
-  const canChipSingle = attacker.count >= 2 || Math.floor(remainingAfterDec / 10) % 2 === 0;
+  const heavyBomberTech =
+    attacker.type === 'BOMBER' && getTechLevel(attOwner, 'AIR_STRATEGIC') >= 3;
+  const heavyArtyTech =
+    attacker.type !== 'BOMBER' && getTechLevel(attOwner, 'ARTILLERY_SUPPORT') >= 2;
+  const canChipSingle =
+    attacker.count >= 2 ||
+    heavyBomberTech ||
+    heavyArtyTech ||
+    Math.floor(remainingAfterDec / 10) % 2 === 0;
   for (const b of state.buildings) {
     if (b.isCapital || deadBuildingIds.has(b.id)) continue;
     if (b.stackCount <= 0 && b.underConstructionCount <= 0) continue;
@@ -315,7 +347,11 @@ function executeArtilleryFireMissionSalvo(
     const occupier = state.players.get(enemyId);
     if (!occupier || !occupier.alive || occupier.isEliminated) continue;
     const coverageRatio = Math.min(1, hitCells / refArea);
-    const suppressionAdd = Math.min(0.22, (0.1 + 0.04 * Math.min(3, countScale)) * coverageRatio);
+    const supTechMul = getTechLevel(attOwner, 'ARTILLERY_SUPPORT') >= 2 ? 1.3 : 1.0;
+    const suppressionAdd = Math.min(
+      0.28,
+      (0.1 + 0.04 * Math.min(3, countScale)) * coverageRatio * supTechMul,
+    );
     applyManpowerSuppression(occupier, 80, suppressionAdd);
 
     const activeMp = Math.max(0, occupier.manpower - occupier.allocatedManpower);
@@ -513,7 +549,7 @@ export function stepUnitsCombat(state: GameState): void {
         ) {
           continue;
         }
-        const cov = getAirDefenseCoverageAt(state.buildings, other.id, ax, ay);
+        const cov = getAirDefenseCoverageAt(state.buildings, other.id, ax, ay, other);
         if (cov > bestAaCoverage) {
           bestAaCoverage = cov;
           aaOwnerId = other.id;
@@ -535,6 +571,12 @@ export function stepUnitsCombat(state: GameState): void {
       continue;
     }
 
+    const effectiveAttackRange = getEffectiveUnitAttackRange(
+      attOwner,
+      attacker.type,
+      attSpec.attackRange,
+    );
+
     if (
       supportsFireMission(attacker.type) &&
       attacker.fireMissionTicksRemaining > 0 &&
@@ -545,7 +587,7 @@ export function stepUnitsCombat(state: GameState): void {
       const fy = attacker.fireMissionY;
       const distToTarget = Math.hypot(fx - attacker.x, fy - attacker.y);
       const inStrikeProximity =
-        attacker.type === 'BOMBER' ? distToTarget <= 18 : distToTarget <= attSpec.attackRange;
+        attacker.type === 'BOMBER' ? distToTarget <= 18 : distToTarget <= effectiveAttackRange;
       if (attacker.type === 'BOMBER' && !inStrikeProximity) {
         // Bomber is still flying toward strike zone; wait until it enters release radius
       } else if (inStrikeProximity) {
@@ -595,7 +637,7 @@ export function stepUnitsCombat(state: GameState): void {
       }
 
       const dist = Math.hypot(candidate.x - attacker.x, candidate.y - attacker.y);
-      if (dist > attSpec.attackRange) continue;
+      if (dist > effectiveAttackRange) continue;
       if (!isUnitVisibleToPlayer(state, attacker.ownerId, candidate)) continue;
 
       const targetPriority =
@@ -622,7 +664,7 @@ export function stepUnitsCombat(state: GameState): void {
     const defIy = Math.max(0, Math.min(state.height - 1, Math.floor(bestTarget.y)));
     const defTerrain = state.terrain[defIy * state.width + defIx];
     const defOwner = state.players.get(bestTarget.ownerId);
-    const enemyFort = evaluateCellDefense(state.buildings, bestTarget.ownerId, defIx, defIy);
+    const enemyFort = evaluateCellDefense(state.buildings, bestTarget.ownerId, defIx, defIy, defOwner);
 
     const supplyMul = 0.45 + 0.55 * attacker.supplyLevel;
     const moraleMul = 0.5 + 0.5 * (attacker.morale / 100);
@@ -630,9 +672,10 @@ export function stepUnitsCombat(state: GameState): void {
     const countScale = Math.pow(attacker.count, 0.88);
     const hpEfficiency = 0.45 + 0.55 * Math.min(1, attacker.hp / Math.max(1, attacker.maxHp));
     const bestDist = Math.hypot(bestTarget.x - attacker.x, bestTarget.y - attacker.y);
+    const effectiveAttack = getEffectiveUnitAttack(attOwner, attacker.type, attSpec.attack);
 
     let dmg =
-      attSpec.attack *
+      effectiveAttack *
       countScale *
       hpEfficiency *
       supplyMul *
@@ -646,7 +689,8 @@ export function stepUnitsCombat(state: GameState): void {
         dmg *= 1.35;
       }
       if (enemyFort.antiArmorFactor > 0.2) {
-        dmg *= Math.max(0.45, 1 / (1 + enemyFort.antiArmorFactor * 0.55));
+        const tankArmorRes = getTechLevel(attOwner, 'GROUND') >= 4 ? 0.55 : 1.0;
+        dmg *= Math.max(0.45, 1 / (1 + enemyFort.antiArmorFactor * 0.55 * tankArmorRes));
       }
     } else if (attacker.type === 'ARTILLERY') {
       if (enemyFort.attackerCostMultiplier > 1.2) {
@@ -691,16 +735,26 @@ export function stepUnitsCombat(state: GameState): void {
     bestTarget.combatCooldownTicks = 6;
   }
 
-  // 2. Encircled pocket combat: isolated units fight enemy garrison/terrain without energy supply
+  // 2. Encircled pocket combat: isolated ground units fight enemy garrison/terrain without energy supply
+  // Airborne units & paratroopers in airlift transit are strictly immune to ground encirclement attrition
   for (const unit of state.units) {
-    if (unit.count <= 0 || unit.hp <= 0 || !unit.isEncircled) continue;
+    if (
+      unit.count <= 0 ||
+      unit.hp <= 0 ||
+      !unit.isEncircled ||
+      unit.inAirTransit ||
+      isAirUnitType(unit.type)
+    ) {
+      continue;
+    }
     const ix = Math.max(0, Math.min(state.width - 1, Math.floor(unit.x)));
     const iy = Math.max(0, Math.min(state.height - 1, Math.floor(unit.y)));
     const cellOwner = state.owners[iy * state.width + ix];
     if (cellOwner < 0 || cellOwner === unit.ownerId) continue;
 
     const spec = UNIT_SPECS[unit.type];
-    const enemyFort = evaluateCellDefense(state.buildings, cellOwner, ix, iy);
+    const occupier = state.players.get(cellOwner);
+    const enemyFort = evaluateCellDefense(state.buildings, cellOwner, ix, iy, occupier);
     const dropMul = unit.dropVulnerabilityTicks > 0 ? 1.55 : 1.0;
     const fortMul = 1 + Math.min(0.8, (enemyFort.attackerCostMultiplier - 1) * 0.35);
     const pocketDmg = unit.maxHp * 0.048 * dropMul * fortMul * TICK_DT;
@@ -711,7 +765,6 @@ export function stepUnitsCombat(state: GameState): void {
     }
 
     // Encircled unit fights back against occupying state's local manpower
-    const occupier = state.players.get(cellOwner);
     if (occupier && occupier.alive && !occupier.isEliminated) {
       const mpAttrition = Math.min(
         18 * TICK_DT,
@@ -738,16 +791,26 @@ export function stepUnitsCombat(state: GameState): void {
     if (dmg <= 0) continue;
 
     const spec = UNIT_SPECS[unit.type];
+    const unitOwner = state.players.get(unit.ownerId);
+    const effectiveHpPerUnit = getEffectiveUnitMaxHpPerUnit(unitOwner, unit.type, spec.hpPerUnit);
     const prevCount = unit.count;
     unit.hp = Math.max(0, unit.hp - dmg);
     unit.morale = Math.max(0, unit.morale - 2.2 * TICK_DT);
 
     const newCount =
-      unit.hp <= 0 ? 0 : Math.min(prevCount, Math.max(1, Math.ceil(unit.hp / spec.hpPerUnit)));
+      unit.hp <= 0 ? 0 : Math.min(prevCount, Math.max(1, Math.ceil(unit.hp / effectiveHpPerUnit)));
 
     if (newCount < prevCount) {
       const victorId = lastAttacker.get(unit.id) ?? -1;
-      awardUnitDefeatLoot(state, victorId, unit.type, prevCount - newCount);
+      const lostCount = prevCount - newCount;
+      awardUnitDefeatLoot(state, victorId, unit.type, lostCount);
+      if (unit.isEncircled && victorId >= 0) {
+        const victor = state.players.get(victorId);
+        if (victor && victor.alive && getTechLevel(victor, 'GROUND') >= 5) {
+          victor.manpower = Math.min(victor.maxManpower, victor.manpower + 12 * lostCount);
+          syncPlayerActiveManpower(victor);
+        }
+      }
     }
 
     if (newCount <= 0 || unit.hp <= 0) {
@@ -756,7 +819,7 @@ export function stepUnitsCombat(state: GameState): void {
       anyRemoved = true;
     } else if (newCount !== prevCount) {
       unit.count = newCount;
-      unit.maxHp = newCount * spec.hpPerUnit;
+      unit.maxHp = newCount * effectiveHpPerUnit;
       unit.hp = Math.min(unit.hp, unit.maxHp);
       state.stateVersion++;
     }

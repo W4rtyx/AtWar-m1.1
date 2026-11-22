@@ -43,6 +43,57 @@ export enum TerrainType {
   MOUNTAINS = 2,
 }
 
+export type TechBranch =
+  | 'GROUND'
+  | 'ARTILLERY_SUPPORT'
+  | 'AIR_STRATEGIC'
+  | 'NAVAL'
+  | 'ECONOMY_DEFENSE';
+
+export const ALL_TECH_BRANCHES: ReadonlyArray<TechBranch> = [
+  'GROUND',
+  'ARTILLERY_SUPPORT',
+  'AIR_STRATEGIC',
+  'NAVAL',
+  'ECONOMY_DEFENSE',
+];
+
+export type TechLevel = 0 | 1 | 2 | 3 | 4 | 5;
+export type TechStateByBranch = Record<TechBranch, TechLevel>;
+export type IntelTier = 1 | 2 | 3 | 4;
+export type ArrowProfile = 'STANDARD' | 'SPEARHEAD' | 'BROAD_FRONT';
+export type StrategicStrikeKind = 'MISSILE' | 'NUCLEAR';
+
+export type RareLootRewardType = 'MONEY' | 'MATERIAL' | 'INDUSTRY' | 'KNOWLEDGE';
+
+export interface RareLootZonePublic {
+  readonly id: number;
+  readonly rewardType: RareLootRewardType;
+  readonly displayCenterX: number;
+  readonly displayCenterY: number;
+  readonly displayRadius: number;
+  readonly amount: number;
+  readonly claimedByPlayerId: number | null;
+}
+
+export interface RareLootZoneSecret {
+  readonly id: number;
+  readonly rewardType: RareLootRewardType;
+  readonly exactX: number;
+  readonly exactY: number;
+  readonly baseCenterX: number;
+  readonly baseCenterY: number;
+  readonly baseRadius: number;
+  readonly l1CenterX: number;
+  readonly l1CenterY: number;
+  readonly l1Radius: number;
+  readonly l5CenterX: number;
+  readonly l5CenterY: number;
+  readonly l5Radius: number;
+  readonly amount: number;
+  claimedByPlayerId: number | null;
+}
+
 export type ResourceType = 'CONSTRUCTION_MATERIAL' | 'BASIC_ENERGY' | 'INDUSTRIAL';
 
 export type DefenseBuildingType = 'TRENCH' | 'BUNKER' | 'AA_BATTERY';
@@ -58,6 +109,7 @@ export type BuildingType =
   | 'PORT'
   | 'AIRFIELD'
   | 'RADAR_STATION'
+  | 'MISSILE_SILO'
   | DefenseBuildingType;
 
 export const DEFENSE_BUILDING_TYPES: ReadonlyArray<DefenseBuildingType> = [
@@ -77,6 +129,7 @@ export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'PORT',
   'AIRFIELD',
   'RADAR_STATION',
+  'MISSILE_SILO',
   'TRENCH',
   'BUNKER',
   'AA_BATTERY',
@@ -92,6 +145,7 @@ export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'PORT',
   'AIRFIELD',
   'RADAR_STATION',
+  'MISSILE_SILO',
   'TRENCH',
   'BUNKER',
   'AA_BATTERY',
@@ -192,7 +246,7 @@ export interface Unit {
   maxHp: number;
   morale: number;
   stance: UnitStance;
-  readonly operationRadius: number;
+  operationRadius: number;
   targetX: number | null;
   targetY: number | null;
   waypoints: Point[];
@@ -365,6 +419,7 @@ export interface PlayerState {
   betrayalDebuffTicks: number;
   manpowerSuppressionTicks: number;
   manpowerSuppressionIntensity: number;
+  techLevels: TechStateByBranch;
   nextBotDecisionTick: number;
   territoryCells: number;
   alive: boolean;
@@ -419,6 +474,8 @@ export interface PublicPlayerInfo {
   readonly buildingOccupancyByType?: Readonly<OccupancyByType>;
   readonly manpowerSuppressionTicks?: number;
   readonly manpowerSuppressionIntensity?: number;
+  readonly techLevels?: Readonly<TechStateByBranch>;
+  readonly intelTier?: IntelTier;
 }
 
 export interface AttackOrder {
@@ -430,6 +487,7 @@ export interface AttackOrder {
   targetOwnerId: number;
   targetOwnerIds: number[];
   readonly wildernessOnly: boolean;
+  readonly profile?: ArrowProfile;
   currentSegmentIndex: number;
   segmentProgress: number;
   totalPathLength: number;
@@ -489,6 +547,7 @@ export interface GameState {
   frontPushOrders: FrontPushOrder[];
   readonly publicResourceZones: ResourceZonePublic[];
   readonly secretResourceZones: ResourceZoneSecret[];
+  readonly secretLootZones: RareLootZoneSecret[];
   nextOrderId: number;
   rngState: number;
   stateVersion: number;
@@ -514,6 +573,7 @@ export interface ClientRenderState {
   readonly attackOrders: ReadonlyArray<Readonly<AttackOrder>>;
   readonly frontPushOrders: ReadonlyArray<Readonly<FrontPushOrder>>;
   readonly publicResourceZones: ReadonlyArray<ResourceZonePublic>;
+  readonly rareLootZones: ReadonlyArray<RareLootZonePublic>;
   readonly visibilityGrid: Uint8Array;
   readonly visibilityGridWidth: number;
   readonly visibilityGridHeight: number;
@@ -528,6 +588,7 @@ export type Action =
       readonly waypoints: ReadonlyArray<Point>;
       readonly manpowerPercent: number;
       readonly targetOwnerId?: number;
+      readonly profile?: ArrowProfile;
     }
   | {
       readonly type: 'AMBUSH_ATTACK';
@@ -535,6 +596,7 @@ export type Action =
       readonly targetId: number;
       readonly waypoints: ReadonlyArray<Point>;
       readonly manpowerPercent: number;
+      readonly profile?: ArrowProfile;
     }
   | {
       readonly type: 'BEND_ATTACK_ORDER';
@@ -668,4 +730,17 @@ export type Action =
       readonly type: 'CANCEL_FIRE_MISSION';
       readonly playerId: number;
       readonly unitIds: ReadonlyArray<number>;
+    }
+  | {
+      readonly type: 'RESEARCH_TECH';
+      readonly playerId: number;
+      readonly branch: TechBranch;
+      readonly level?: number;
+    }
+  | {
+      readonly type: 'LAUNCH_STRATEGIC_STRIKE';
+      readonly playerId: number;
+      readonly strikeKind: StrategicStrikeKind;
+      readonly targetX: number;
+      readonly targetY: number;
     };

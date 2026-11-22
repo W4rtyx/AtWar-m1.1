@@ -1,10 +1,14 @@
 import { BASE_ENERGY_RESERVE_CAPACITY } from '../engine/energyGrid';
+import { isArrowProfileUnlocked } from '../engine/techTree';
 import {
+  ArrowProfile,
   BuildBatchSize,
   BuildingType,
   ClientRenderState,
   PublicPlayerInfo,
+  StrategicStrikeKind,
   TICK_RATE,
+  TechBranch,
 } from '../engine/types';
 import { SelectedTarget } from '../render/canvasRenderer';
 import {
@@ -17,6 +21,7 @@ import {
 } from './buildMenu';
 import { DiplomacyCallbacks, LeaderboardController } from './leaderboard';
 import { ManpowerPanelCallbacks, ManpowerPanelController } from './manpowerPanel';
+import { TechTreeModalController } from './techTreeModal';
 import { UnitPanelCallbacks, UnitPanelController } from './unitPanel';
 
 export type TacticalMode = 'ARROW' | 'UNIT_SELECT' | 'FRONT_SELECT';
@@ -32,6 +37,7 @@ export interface HudCallbacks
   readonly onTogglePause: () => void;
   readonly onRestart: () => void;
   readonly onModeChange: (mode: TacticalMode) => void;
+  readonly onArrowProfileChange: (profile: ArrowProfile) => void;
   readonly onManpowerPercentChange: (percent: number) => void;
   readonly onFrontPushDirection: (dirX: number, dirY: number) => void;
   readonly onClearFrontSelection: () => void;
@@ -39,6 +45,8 @@ export interface HudCallbacks
   readonly onSpeedChange: (speed: SimSpeed) => void;
   readonly onLaunchTargetAttack: () => void;
   readonly onClearTarget: () => void;
+  readonly onResearchTech: (branch: TechBranch, level: number) => void;
+  readonly onLaunchStrategicStrikeMode: (strikeKind: StrategicStrikeKind) => void;
 }
 
 function formatGameTimer(tick: number): string {
@@ -62,6 +70,7 @@ export class HudController {
   public readonly terrainBuildMenu: TerrainBuildMenuController;
   public readonly buildingMenu: BuildingContextMenuController;
   public readonly unitPanel: UnitPanelController;
+  public readonly techTreeModal: TechTreeModalController;
 
   private phaseBadge!: HTMLElement;
   private statsGroup!: HTMLElement;
@@ -103,6 +112,10 @@ export class HudController {
   private modeUnitBtn!: HTMLButtonElement;
   private modeFrontBtn!: HTMLButtonElement;
   private cancelOrdersBtn!: HTMLButtonElement;
+  private techToggleBtn!: HTMLButtonElement;
+  private techBadgeEl!: HTMLElement;
+  private profileButtons!: NodeListOf<HTMLButtonElement>;
+  private currentArrowProfile: ArrowProfile = 'STANDARD';
 
   private defeatOverlayEl!: HTMLElement;
   private defeatReasonEl!: HTMLElement;
@@ -187,6 +200,11 @@ export class HudController {
       this.unitPanel.getPanelElement(),
       bottomRightStack.firstElementChild,
     );
+
+    this.techTreeModal = new TechTreeModalController(this.root, {
+      onResearchTech: callbacks.onResearchTech,
+      onLaunchStrikeMode: callbacks.onLaunchStrategicStrikeMode,
+    });
   }
 
   private buildDom(): void {
@@ -223,6 +241,9 @@ export class HudController {
             <span class="hud-stat-value" data-el="knowledge-val">0</span>
             <span class="hud-stat-sub" data-el="knowledge-rate">+0.0/s</span>
           </div>
+          <button type="button" class="hud-btn hud-research-btn" data-action="toggle-tech" title="Otevřít Technologický strom (T)">
+            Výzkum (T) <span class="hud-research-badge hidden" data-el="tech-badge">0</span>
+          </button>
           <div class="hud-res-pill">
             <span class="hud-stat-label">Stav. mat.</span>
             <span class="hud-stat-value" data-el="material-val">0</span>
@@ -331,6 +352,21 @@ export class HudController {
               </button>
             </div>
 
+            <div class="hud-divider"></div>
+
+            <div class="hud-control-group hud-profile-group" role="group" aria-label="Profil útočné šipky">
+              <span class="hud-stat-label">Šipka:</span>
+              <button type="button" class="hud-btn hud-profile-btn active" data-profile="STANDARD" title="Vyvážený standardní průlom">
+                Std
+              </button>
+              <button type="button" class="hud-btn hud-profile-btn" data-profile="SPEARHEAD" title="Špička (Pozemní L3): užší koridor a +25 % rychlost průlomu">
+                Špička
+              </button>
+              <button type="button" class="hud-btn hud-profile-btn" data-profile="BROAD_FRONT" title="Široká fronta: +45 % šířka záběru, o 15 % pomalejší postup">
+                Široká
+              </button>
+            </div>
+
             <div class="hud-front-pad hidden" data-el="front-pad">
               <span class="hud-front-count" data-el="front-count">Fronta: 0</span>
               <button type="button" class="hud-btn hud-dir-btn" data-dir="0,-1" title="Tlačit na sever">↑ Sever</button>
@@ -421,6 +457,9 @@ export class HudController {
     this.modeUnitBtn = this.query<HTMLButtonElement>('[data-mode="UNIT_SELECT"]');
     this.modeFrontBtn = this.query<HTMLButtonElement>('[data-mode="FRONT_SELECT"]');
     this.cancelOrdersBtn = this.query<HTMLButtonElement>('[data-action="cancel-orders"]');
+    this.techToggleBtn = this.query<HTMLButtonElement>('[data-action="toggle-tech"]');
+    this.techBadgeEl = this.query('[data-el="tech-badge"]');
+    this.profileButtons = this.root.querySelectorAll<HTMLButtonElement>('[data-profile]');
     this.frontPadEl = this.query('[data-el="front-pad"]');
     this.frontCountEl = this.query('[data-el="front-count"]');
 
@@ -440,6 +479,16 @@ export class HudController {
     this.pauseBtn.addEventListener('click', () => this.callbacks.onTogglePause());
     this.restartBtn.addEventListener('click', () => this.callbacks.onRestart());
     this.cancelOrdersBtn.addEventListener('click', () => this.callbacks.onCancelOrders());
+    this.techToggleBtn.addEventListener('click', () => {
+      this.techTreeModal.toggle();
+    });
+    for (const btn of this.profileButtons) {
+      btn.addEventListener('click', () => {
+        if (btn.disabled) return;
+        const prof = btn.dataset.profile as ArrowProfile;
+        this.setArrowProfile(prof);
+      });
+    }
     this.allocToggleBtn.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -555,6 +604,18 @@ export class HudController {
     return this.currentPercent;
   }
 
+  public setArrowProfile(profile: ArrowProfile): void {
+    this.currentArrowProfile = profile;
+    for (const btn of this.profileButtons) {
+      btn.classList.toggle('active', btn.dataset.profile === profile);
+    }
+    this.callbacks.onArrowProfileChange(profile);
+  }
+
+  public getArrowProfile(): ArrowProfile {
+    return this.currentArrowProfile;
+  }
+
   public update(
     state: ClientRenderState,
     selectedFrontierCount: number,
@@ -590,6 +651,13 @@ export class HudController {
     this.terrainBuildMenu.update(state, buildBatchSize);
     this.buildingMenu.update(state);
     this.unitPanel.update(state, selectedUnitIds, paradropUnitId, artilleryFireMode);
+    this.techTreeModal.update(state);
+    this.techToggleBtn.classList.toggle('active', this.techTreeModal.isOpen());
+    const availableTechs = this.techTreeModal.countAvailableNodes(state);
+    this.techBadgeEl.classList.toggle('hidden', availableTechs <= 0);
+    if (availableTechs > 0) {
+      this.techBadgeEl.textContent = String(availableTechs);
+    }
 
     if (state.lastNotice && state.lastNotice.id !== this.lastNoticeId) {
       this.lastNoticeId = state.lastNotice.id;
@@ -617,6 +685,16 @@ export class HudController {
     const human: PublicPlayerInfo | undefined = state.players.find(
       (p) => p.id === state.humanPlayerId,
     );
+    const spearheadUnlocked = isArrowProfileUnlocked(human, 'SPEARHEAD');
+    if (this.currentArrowProfile === 'SPEARHEAD' && !spearheadUnlocked) {
+      this.setArrowProfile('STANDARD');
+    }
+    for (const btn of this.profileButtons) {
+      const prof = btn.dataset.profile as ArrowProfile;
+      const unlocked = isArrowProfileUnlocked(human, prof);
+      btn.disabled = !unlocked;
+      btn.classList.toggle('active', this.currentArrowProfile === prof && unlocked);
+    }
 
     if (human?.isEliminated) {
       if (!this.defeatDismissed) {

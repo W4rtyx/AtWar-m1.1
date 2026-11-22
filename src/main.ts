@@ -8,13 +8,16 @@ import { isNavalUnitType, supportsFireMission } from './engine/navalAir';
 import { createEngineController, planSimulationTicks } from './engine/simulation';
 import {
   ALL_BUILDING_TYPES,
+  ArrowProfile,
   BuildBatchSize,
   BuildingType,
   ClientRenderState,
   Point,
   PublicBuildingInfo,
   PublicUnitInfo,
+  StrategicStrikeKind,
   TICK_DT,
+  TechBranch,
   TerrainType,
   WILDERNESS_OWNER,
 } from './engine/types';
@@ -61,6 +64,8 @@ function bootstrap(): void {
   let unitSelectRect: UnitSelectionRect | null = null;
   let paradropUnitId: number | null = null;
   let artilleryFireMode = false;
+  let arrowProfile: ArrowProfile = 'STANDARD';
+  let strategicStrikeMode: StrategicStrikeKind | null = null;
   let selectedFrontierCells: number[] = [];
   let initialSelectedCount = 0;
   let frontLassoPoints: Point[] = [];
@@ -147,6 +152,8 @@ function bootstrap(): void {
       selectedUnitIds = [];
       paradropUnitId = null;
       artilleryFireMode = false;
+      strategicStrikeMode = null;
+      arrowProfile = 'STANDARD';
       moveOrderPings = [];
       clearFrontSelection();
       clearInteractionPreviews();
@@ -159,12 +166,33 @@ function bootstrap(): void {
       tacticalMode = mode;
       selectedBuildType = null;
       paradropUnitId = null;
+      strategicStrikeMode = null;
       rawArrowPoints = [];
       arrowBendOffset = 0;
       arrowPreview = null;
       activeBendDrag = null;
       unitSelectRect = null;
       resetAmbush();
+    },
+    onArrowProfileChange: (profile) => {
+      arrowProfile = profile;
+    },
+    onResearchTech: (branch: TechBranch, level: number) => {
+      const state = engine.getRenderState();
+      engine.dispatch({
+        type: 'RESEARCH_TECH',
+        playerId: state.humanPlayerId,
+        branch,
+        level,
+      });
+      syncHud();
+    },
+    onLaunchStrategicStrikeMode: (strikeKind: StrategicStrikeKind) => {
+      strategicStrikeMode = strategicStrikeMode === strikeKind ? null : strikeKind;
+      artilleryFireMode = false;
+      paradropUnitId = null;
+      selectedBuildType = null;
+      syncHud();
     },
     onManpowerPercentChange: (percent) => {
       manpowerPercent = percent;
@@ -639,6 +667,19 @@ function bootstrap(): void {
       return;
     }
 
+    if (strategicStrikeMode !== null) {
+      engine.dispatch({
+        type: 'LAUNCH_STRATEGIC_STRIKE',
+        playerId: state.humanPlayerId,
+        strikeKind: strategicStrikeMode,
+        targetX: worldPt.x,
+        targetY: worldPt.y,
+      });
+      strategicStrikeMode = null;
+      syncHud();
+      return;
+    }
+
     if (artilleryFireMode) {
       engine.dispatch({
         type: 'ARTILLERY_FIRE_MISSION',
@@ -1059,6 +1100,7 @@ function bootstrap(): void {
             waypoints,
             manpowerPercent,
             targetOwnerId: spineNonWar ? WILDERNESS_OWNER : undefined,
+            profile: arrowProfile,
           });
           clearFrontSelection();
         }
@@ -1104,6 +1146,7 @@ function bootstrap(): void {
     if (e.code === 'Escape') {
       paradropUnitId = null;
       artilleryFireMode = false;
+      strategicStrikeMode = null;
       selectedBuildType = null;
       selectedBuildingId = null;
       selectedUnitIds = [];
@@ -1113,6 +1156,17 @@ function bootstrap(): void {
       hud.leaderboard.closeProfile();
       hud.buildingMenu.close();
       hud.terrainBuildMenu.close();
+      hud.techTreeModal.close();
+      return;
+    }
+
+    if (e.code === 'KeyT') {
+      if (e.repeat) return;
+      const state = engine.getRenderState();
+      if (state.phase === 'PLAYING') {
+        hud.techTreeModal.toggle();
+        syncHud(state);
+      }
       return;
     }
 
@@ -1379,6 +1433,7 @@ function bootstrap(): void {
               targetId: nonWarTarget.id,
               waypoints,
               manpowerPercent,
+              profile: arrowProfile,
             });
             clearFrontSelection();
             ambushTriggered = true;
@@ -1493,6 +1548,7 @@ function bootstrap(): void {
       unitSelectRect,
       paradropUnitId,
       artilleryFireMode,
+      strategicStrikeMode,
       moveOrderPings,
     });
 

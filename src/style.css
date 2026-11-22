@@ -1592,6 +1592,249 @@ body {
   margin-top: 6px;
 }
 
+.hud-research-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: #4f7ba3;
+  background: rgba(24, 38, 54, 0.92);
+  color: #cbe4fa;
+  font-weight: 600;
+}
+
+.hud-research-btn.active {
+  border-color: #82bef0;
+  background: #23425c;
+  color: #ffffff;
+}
+
+.hud-research-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #d89b3c;
+  color: #15191f;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.hud-profile-group {
+  gap: 4px;
+}
+
+.hud-profile-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.hud-tech-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  background: rgba(8, 12, 17, 0.78);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  pointer-events: auto;
+}
+
+.hud-tech-modal {
+  width: min(1160px, 96vw);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(16, 22, 30, 0.97);
+  border: 1px solid #3c4d5f;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.72);
+}
+
+.hud-tech-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #2b3846;
+}
+
+.hud-tech-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hud-tech-title {
+  margin: 0;
+  font-size: 16px;
+  color: #eef1ea;
+  letter-spacing: 0.03em;
+}
+
+.hud-tech-intel-pill {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #1a3344;
+  border: 1px solid #44789a;
+  color: #9ed9f7;
+}
+
+.hud-tech-funds {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: #a9b5c2;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-tech-funds strong {
+  color: #f0e6cc;
+}
+
+.hud-tech-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(185px, 1fr));
+  gap: 10px;
+}
+
+.hud-tech-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hud-tech-col-head {
+  padding: 6px 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #e6e9ec;
+  background: rgba(25, 34, 44, 0.9);
+  border: 1px solid #314050;
+  border-top-width: 3px;
+  border-radius: 4px;
+}
+
+.hud-tech-node {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 9px;
+  border-radius: 5px;
+  background: rgba(22, 29, 38, 0.92);
+  border: 1px solid #2e3b4a;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.hud-tech-node.is-unlocked {
+  background: rgba(24, 48, 38, 0.78);
+  border-color: #4f9972;
+}
+
+.hud-tech-node.is-available {
+  background: rgba(30, 48, 66, 0.88);
+  border-color: #d6a44e;
+}
+
+.hud-tech-node.is-locked {
+  opacity: 0.65;
+}
+
+.hud-tech-node-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-tech-lvl {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  background: #253342;
+  color: #cfe0ef;
+}
+
+.hud-tech-node-name {
+  flex: 1;
+  font-size: 11.5px;
+  color: #eef1ea;
+  line-height: 1.25;
+}
+
+.hud-tech-status {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #93a6b8;
+}
+
+.hud-tech-node.is-unlocked .hud-tech-status {
+  color: #7ee0ac;
+}
+
+.hud-tech-node.is-available .hud-tech-status {
+  color: #f2cc72;
+}
+
+.hud-tech-node-desc {
+  font-size: 10.5px;
+  line-height: 1.32;
+  color: #a7b4c2;
+}
+
+.hud-tech-node-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.hud-tech-cost {
+  font-size: 10px;
+  color: #cfbe94;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-tech-research-btn {
+  padding: 2px 7px;
+  font-size: 10.5px;
+}
+
+.hud-tech-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #2b3846;
+}
+
+.hud-tech-footer-hint {
+  font-size: 11px;
+  color: #90a0b0;
+}
+
+.hud-tech-strike-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .hidden {
   display: none !important;
 }

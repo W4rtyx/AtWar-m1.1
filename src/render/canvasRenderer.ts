@@ -6,6 +6,11 @@ import {
   supportsFireMission,
 } from '../engine/navalAir';
 import {
+  MISSILE_STRIKE_RANGE,
+  getEffectiveAirfieldRange,
+  getEffectiveRadarVisionRadius,
+} from '../engine/techTree';
+import {
   BuildingType,
   ClientRenderState,
   MAP_HEIGHT,
@@ -14,8 +19,10 @@ import {
   Point,
   PublicBuildingInfo,
   PublicPlayerInfo,
+  RareLootZonePublic,
   ResourceType,
   ResourceZonePublic,
+  StrategicStrikeKind,
   TerrainType,
   WILDERNESS_OWNER,
 } from '../engine/types';
@@ -95,6 +102,7 @@ export interface RenderOverlayState {
   readonly unitSelectRect: UnitSelectionRect | null;
   readonly paradropUnitId: number | null;
   readonly artilleryFireMode: boolean;
+  readonly strategicStrikeMode?: StrategicStrikeKind | null;
   readonly moveOrderPings: ReadonlyArray<MoveOrderPing>;
 }
 
@@ -757,6 +765,7 @@ export class CanvasRenderer {
         : null;
 
     this.drawResourceZones(ctx, camera, state.publicResourceZones, highlightZoneType);
+    this.drawRareLootZones(ctx, camera, state.rareLootZones);
     this.drawFogOfWar(ctx, camera, state);
     this.drawFrontPushOrders(ctx, camera, state);
     this.drawSelectedFrontierCells(ctx, camera, state.width, overlays.selectedFrontierCells);
@@ -808,6 +817,14 @@ export class CanvasRenderer {
     }
     if (overlays.buildPreview) {
       this.drawBuildPlacementPreview(ctx, camera, overlays.buildPreview);
+    }
+    if (overlays.strategicStrikeMode && overlays.hoverCell) {
+      this.drawStrategicStrikeOverlay(
+        ctx,
+        camera,
+        overlays.strategicStrikeMode,
+        overlays.hoverCell,
+      );
     }
     if (overlays.arrowPreview) {
       this.drawArrowPreview(ctx, camera, overlays.arrowPreview);
@@ -1143,6 +1160,8 @@ export class CanvasRenderer {
         return { fill: '#1e2730', border: '#9ebad0' };
       case 'RADAR_STATION':
         return { fill: '#132a2c', border: '#6edcd0' };
+      case 'MISSILE_SILO':
+        return { fill: '#2c1b28', border: '#d97fb8' };
       case 'TRENCH':
         return { fill: '#242a1c', border: '#a3b36d' };
       case 'BUNKER':
@@ -1196,7 +1215,8 @@ export class CanvasRenderer {
       case 'ARMORY':
       case 'PORT':
       case 'AIRFIELD':
-      case 'RADAR_STATION': {
+      case 'RADAR_STATION':
+      case 'MISSILE_SILO': {
         // Heraldic military shield
         ctx.moveTo(cx - r * 0.94, cy - r * 0.88);
         ctx.lineTo(cx + r * 0.94, cy - r * 0.88);
@@ -1259,6 +1279,7 @@ export class CanvasRenderer {
     for (const b of buildings) {
       const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
       const isOwn = b.ownerId === humanPlayerId;
+      const humanPlayer = isOwn ? playerById.get(humanPlayerId) : undefined;
       const ownerPlayer = !isOwn ? playerById.get(b.ownerId) : undefined;
       const isSelected = isOwn && selectedBuildingId === b.id;
       const isHovered = isOwn && hoveredBuildingId === b.id;
@@ -1269,10 +1290,12 @@ export class CanvasRenderer {
 
       const defRadius =
         b.type === 'RADAR_STATION'
-          ? RADAR_STATION_VISION_RADIUS
+          ? getEffectiveRadarVisionRadius(humanPlayer)
           : b.type === 'AIRFIELD'
-            ? AIRFIELD_OPERATION_RANGE
-            : getDefenseRadius(b.type);
+            ? getEffectiveAirfieldRange(humanPlayer)
+            : b.type === 'MISSILE_SILO'
+              ? MISSILE_STRIKE_RANGE
+              : getDefenseRadius(b.type);
       if (
         isOwn &&
         isDefenseBuildingType(b.type) &&
@@ -1300,7 +1323,7 @@ export class CanvasRenderer {
         ctx.setLineDash([]);
       } else if (
         isOwn &&
-        ((b.type === 'AIRFIELD' && (isSelected || isHovered)) ||
+        (((b.type === 'AIRFIELD' || b.type === 'MISSILE_SILO') && (isSelected || isHovered)) ||
           (isSelected && (b.type === 'BARRACKS' || b.type === 'RADAR_STATION'))) &&
         defRadius > 0
       ) {
@@ -1316,21 +1339,30 @@ export class CanvasRenderer {
         ctx.strokeStyle =
           b.type === 'AIRFIELD'
             ? 'rgba(92, 198, 240, 0.72)'
-            : b.type === 'RADAR_STATION'
-              ? 'rgba(110, 220, 208, 0.62)'
-              : 'rgba(130, 198, 150, 0.65)';
+            : b.type === 'MISSILE_SILO'
+              ? 'rgba(225, 134, 192, 0.65)'
+              : b.type === 'RADAR_STATION'
+                ? 'rgba(110, 220, 208, 0.62)'
+                : 'rgba(130, 198, 150, 0.65)';
         ctx.stroke();
         ctx.setLineDash([]);
 
-        if (b.type === 'AIRFIELD' || b.type === 'RADAR_STATION') {
+        if (b.type === 'AIRFIELD' || b.type === 'RADAR_STATION' || b.type === 'MISSILE_SILO') {
           const badge =
             b.type === 'AIRFIELD'
               ? `Dolet letiště · ${defRadius} b.`
-              : `Radar · ${defRadius} b.`;
+              : b.type === 'MISSILE_SILO'
+                ? `Dosah sila · ${defRadius} b.`
+                : `Radar · ${defRadius} b.`;
           ctx.font = '600 10px "Segoe UI", system-ui, sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'bottom';
-          ctx.fillStyle = b.type === 'AIRFIELD' ? 'rgba(154, 228, 250, 0.92)' : 'rgba(148, 232, 220, 0.88)';
+          ctx.fillStyle =
+            b.type === 'AIRFIELD'
+              ? 'rgba(154, 228, 250, 0.92)'
+              : b.type === 'MISSILE_SILO'
+                ? 'rgba(242, 178, 222, 0.92)'
+                : 'rgba(148, 232, 220, 0.88)';
           ctx.fillText(badge, sc.x, sc.y - rangePx - 4);
         }
       }
@@ -1582,6 +1614,20 @@ export class CanvasRenderer {
         ctx.arc(cx + s * 0.18, cy - s * 0.28, s * 0.34, -Math.PI * 0.45, Math.PI * 0.15);
         ctx.stroke();
         break;
+      case 'MISSILE_SILO':
+        // Vertical strategic rocket inside launch hatch
+        ctx.fillStyle = '#e8a2cf';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - s * 0.82);
+        ctx.lineTo(cx + s * 0.24, cy - s * 0.28);
+        ctx.lineTo(cx + s * 0.24, cy + s * 0.54);
+        ctx.lineTo(cx + s * 0.46, cy + s * 0.72);
+        ctx.lineTo(cx - s * 0.46, cy + s * 0.72);
+        ctx.lineTo(cx - s * 0.24, cy + s * 0.54);
+        ctx.lineTo(cx - s * 0.24, cy - s * 0.28);
+        ctx.closePath();
+        ctx.fill();
+        break;
       case 'TRENCH':
         // Zig-zag earthwork parapet + sandbag baseline
         ctx.strokeStyle = '#d5c589';
@@ -1645,7 +1691,9 @@ export class CanvasRenderer {
         ? RADAR_STATION_VISION_RADIUS
         : preview.buildingType === 'AIRFIELD'
           ? AIRFIELD_OPERATION_RANGE
-          : getDefenseRadius(preview.buildingType)) * camera.zoom;
+          : preview.buildingType === 'MISSILE_SILO'
+            ? MISSILE_STRIKE_RANGE
+            : getDefenseRadius(preview.buildingType)) * camera.zoom;
 
     ctx.save();
 
@@ -1834,6 +1882,89 @@ export class CanvasRenderer {
       }
       ctx.restore();
     }
+  }
+
+  private drawRareLootZones(
+    ctx: CanvasRenderingContext2D,
+    camera: Camera,
+    lootZones: ReadonlyArray<RareLootZonePublic>,
+  ): void {
+    for (const z of lootZones) {
+      if (z.claimedByPlayerId !== null) continue;
+      const sc = camera.worldToScreen(z.displayCenterX + 0.5, z.displayCenterY + 0.5);
+      const radPx = z.displayRadius * camera.zoom;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, radPx, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(232, 188, 72, 0.08)';
+      ctx.fill();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(244, 206, 98, 0.85)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Small diamond treasure emblem at zone display center
+      const d = Math.max(3.5, Math.min(6, camera.zoom * 1.4));
+      ctx.beginPath();
+      ctx.moveTo(sc.x, sc.y - d);
+      ctx.lineTo(sc.x + d, sc.y);
+      ctx.lineTo(sc.x, sc.y + d);
+      ctx.lineTo(sc.x - d, sc.y);
+      ctx.closePath();
+      ctx.fillStyle = '#f2c752';
+      ctx.fill();
+
+      const tag =
+        z.rewardType === 'KNOWLEDGE'
+          ? `+${z.amount} Znal.`
+          : z.rewardType === 'INDUSTRY'
+            ? `+${z.amount} P`
+            : z.rewardType === 'MONEY'
+              ? `+${z.amount}$`
+              : `+${z.amount} M`;
+      ctx.font = '700 9.5px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = 'rgba(248, 224, 146, 0.92)';
+      ctx.fillText(`Rare: ${tag}`, sc.x, sc.y + d + 3);
+      ctx.restore();
+    }
+  }
+
+  private drawStrategicStrikeOverlay(
+    ctx: CanvasRenderingContext2D,
+    camera: Camera,
+    kind: StrategicStrikeKind,
+    hoverCell: Point,
+  ): void {
+    const sc = camera.worldToScreen(hoverCell.x, hoverCell.y);
+    const radiusWorld = kind === 'NUCLEAR' ? 18 : 10.5;
+    const radPx = radiusWorld * camera.zoom;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sc.x, sc.y, radPx, 0, Math.PI * 2);
+    ctx.fillStyle =
+      kind === 'NUCLEAR' ? 'rgba(240, 88, 68, 0.18)' : 'rgba(242, 152, 62, 0.16)';
+    ctx.fill();
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = kind === 'NUCLEAR' ? '#ff7c6e' : '#ffb866';
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.font = '700 11px "Segoe UI", system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = kind === 'NUCLEAR' ? '#ffd4ce' : '#ffe4bd';
+    ctx.fillText(
+      kind === 'NUCLEAR' ? 'Cíl jaderného úderu (LMB)' : 'Cíl raketového úderu (LMB)',
+      sc.x,
+      sc.y - radPx - 6,
+    );
+    ctx.restore();
   }
 
   private drawStartHoverPreview(

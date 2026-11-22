@@ -1,5 +1,9 @@
 import { ARTILLERY_BLAST_RADIUS } from '../engine/combat';
 import {
+  getEffectiveAirfieldRange,
+  getEffectiveUnitAttackRange,
+} from '../engine/techTree';
+import {
   ArtilleryExplosionFx,
   ClientRenderState,
   Point,
@@ -8,7 +12,7 @@ import {
   TerrainType,
   WILDERNESS_OWNER,
 } from '../engine/types';
-import { AIRFIELD_PARADROP_RANGE, UNIT_SPECS } from '../engine/units';
+import { UNIT_SPECS } from '../engine/units';
 import { Camera } from './camera';
 
 export interface UnitSelectionRect {
@@ -667,7 +671,12 @@ export function drawUnits(
       }
 
       if (unit.type === 'ARTILLERY') {
-        const atkR = UNIT_SPECS.ARTILLERY.attackRange * camera.zoom;
+        const atkR =
+          getEffectiveUnitAttackRange(
+            playerMap.get(unit.ownerId),
+            'ARTILLERY',
+            UNIT_SPECS.ARTILLERY.attackRange,
+          ) * camera.zoom;
         ctx.save();
         ctx.beginPath();
         ctx.arc(sc.x, sc.y, atkR, 0, Math.PI * 2);
@@ -998,6 +1007,8 @@ export function drawParadropOverlay(
   unit: PublicUnitInfo,
   hoverCell: Point | null,
 ): void {
+  const human = state.players.find((p) => p.id === state.humanPlayerId);
+  const airfieldRange = getEffectiveAirfieldRange(human);
   const readyAirfields = state.buildings.filter(
     (b) =>
       b.ownerId === state.humanPlayerId &&
@@ -1010,7 +1021,7 @@ export function drawParadropOverlay(
   for (const af of readyAirfields) {
     const sc = camera.worldToScreen(af.x + 0.5, af.y + 0.5);
     ctx.beginPath();
-    ctx.arc(sc.x, sc.y, AIRFIELD_PARADROP_RANGE * camera.zoom, 0, Math.PI * 2);
+    ctx.arc(sc.x, sc.y, airfieldRange * camera.zoom, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(116, 212, 240, 0.05)';
     ctx.fill();
     ctx.setLineDash([7, 5]);
@@ -1034,8 +1045,7 @@ export function drawParadropOverlay(
       const ownerId = state.owners[idx];
       const inRange = readyAirfields.some(
         (af) =>
-          Math.hypot(af.x + 0.5 - (ix + 0.5), af.y + 0.5 - (iy + 0.5)) <=
-          AIRFIELD_PARADROP_RANGE,
+          Math.hypot(af.x + 0.5 - (ix + 0.5), af.y + 0.5 - (iy + 0.5)) <= airfieldRange,
       );
       const ownerPlayer =
         ownerId >= 0 ? state.players.find((p) => p.id === ownerId) : undefined;
@@ -1093,9 +1103,15 @@ export function drawArtilleryFireMissionOverlay(
   hoverCell: Point | null,
 ): void {
   if (artilleryUnits.length === 0) return;
+  const human = state.players.find((p) => p.id === state.humanPlayerId);
+  const airfieldRange = getEffectiveAirfieldRange(human);
   const isBomberMode = artilleryUnits.some((u) => u.type === 'BOMBER');
   const maxRange = Math.max(
-    ...artilleryUnits.map((u) => UNIT_SPECS[u.type].airRange ?? UNIT_SPECS[u.type].attackRange),
+    ...artilleryUnits.map((u) =>
+      u.type === 'BOMBER'
+        ? airfieldRange
+        : getEffectiveUnitAttackRange(human, u.type, UNIT_SPECS[u.type].attackRange),
+    ),
   );
 
   ctx.save();
@@ -1104,7 +1120,7 @@ export function drawArtilleryFireMissionOverlay(
       if (b.ownerId !== state.humanPlayerId || b.type !== 'AIRFIELD' || b.stackCount <= 0) continue;
       const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
       ctx.beginPath();
-      ctx.arc(sc.x, sc.y, (UNIT_SPECS.BOMBER.airRange ?? 125) * camera.zoom, 0, Math.PI * 2);
+      ctx.arc(sc.x, sc.y, airfieldRange * camera.zoom, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(245, 162, 74, 0.04)';
       ctx.fill();
       ctx.setLineDash([6, 4]);
@@ -1116,8 +1132,13 @@ export function drawArtilleryFireMissionOverlay(
   } else {
     for (const unit of artilleryUnits) {
       const sc = camera.worldToScreen(unit.x, unit.y);
+      const effRange = getEffectiveUnitAttackRange(
+        human,
+        unit.type,
+        UNIT_SPECS[unit.type].attackRange,
+      );
       ctx.beginPath();
-      ctx.arc(sc.x, sc.y, UNIT_SPECS[unit.type].attackRange * camera.zoom, 0, Math.PI * 2);
+      ctx.arc(sc.x, sc.y, effRange * camera.zoom, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(245, 162, 74, 0.05)';
       ctx.fill();
       ctx.setLineDash([6, 4]);
@@ -1142,10 +1163,14 @@ export function drawArtilleryFireMissionOverlay(
             Math.hypot(hoverCell.x - (b.x + 0.5), hoverCell.y - (b.y + 0.5)) <= maxRange,
         ) ||
         artilleryUnits.some(
-          (u) => Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <= UNIT_SPECS[u.type].attackRange,
+          (u) =>
+            Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <=
+            getEffectiveUnitAttackRange(human, u.type, UNIT_SPECS[u.type].attackRange),
         )
       : artilleryUnits.some(
-          (u) => Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <= UNIT_SPECS[u.type].attackRange,
+          (u) =>
+            Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <=
+            getEffectiveUnitAttackRange(human, u.type, UNIT_SPECS[u.type].attackRange),
         );
 
     let valid = false;

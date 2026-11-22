@@ -35,9 +35,17 @@ import {
   setWarRelation,
   stepFrontExpansion,
 } from './frontExpansion';
+import { checkAndAwardCapturedLootZones, toPublicRareLootZones } from './lootZones';
 import { generateEuropeMap } from './mapGenerator';
 import {
+  executeStrategicStrike,
+  getPlayerBaseIntelTier,
+  isArrowProfileUnlocked,
+  researchTech,
+} from './techTree';
+import {
   Action,
+  ArrowProfile,
   ArtilleryExplosionFx,
   BETRAYAL_DEBUFF_TICKS,
   BETRAYAL_MONEY_PENALTY_RATIO,
@@ -144,6 +152,7 @@ function createBaseState(seed: number): GameState {
     frontPushOrders: [],
     publicResourceZones: generated.publicResourceZones,
     secretResourceZones: generated.secretResourceZones,
+    secretLootZones: generated.secretLootZones,
     nextOrderId: 1,
     rngState: seed,
     stateVersion: 1,
@@ -457,6 +466,7 @@ function handleCreateAttackOrder(
   rawWaypoints: ReadonlyArray<Point>,
   manpowerPercent: number,
   explicitTargetOwnerId?: number,
+  requestedProfile: ArrowProfile = 'STANDARD',
 ): void {
   if (state.phase !== 'PLAYING' || rawWaypoints.length < 2) {
     return;
@@ -537,6 +547,9 @@ function handleCreateAttackOrder(
 
   const wildernessOnly = targetOwnerId === WILDERNESS_OWNER;
   const targetOwnerIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
+  const profile: ArrowProfile = isArrowProfileUnlocked(player, requestedProfile)
+    ? requestedProfile
+    : 'STANDARD';
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
@@ -557,6 +570,7 @@ function handleCreateAttackOrder(
     targetOwnerId,
     targetOwnerIds,
     wildernessOnly,
+    profile,
     currentSegmentIndex: 0,
     segmentProgress: 0,
     totalPathLength,
@@ -1147,6 +1161,7 @@ function handleTick(state: GameState): void {
     syncTerritoriesCapitalsAndNeighbors(state);
     state.lastTerritorySyncVersion = state.stateVersion;
   }
+  checkAndAwardCapturedLootZones(state);
 
   for (const player of state.players.values()) {
     if (!player.alive) continue;
@@ -1227,6 +1242,7 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.waypoints,
         action.manpowerPercent,
         action.targetOwnerId,
+        action.profile,
       );
       break;
     case 'AMBUSH_ATTACK':
@@ -1237,6 +1253,7 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.waypoints,
         action.manpowerPercent,
         action.targetId,
+        action.profile,
       );
       break;
     case 'BEND_ATTACK_ORDER':
@@ -1392,6 +1409,11 @@ export function dispatchAction(state: GameState, action: Action): void {
         state.secretResourceZones.length,
         ...fresh.secretResourceZones,
       );
+      state.secretLootZones.splice(
+        0,
+        state.secretLootZones.length,
+        ...fresh.secretLootZones,
+      );
       state.nextOrderId = 1;
       state.rngState = fresh.rngState;
       state.stateVersion++;
@@ -1452,6 +1474,20 @@ export function dispatchAction(state: GameState, action: Action): void {
       break;
     case 'CANCEL_FIRE_MISSION':
       cancelArtilleryFireMission(state, action.playerId, action.unitIds);
+      break;
+    case 'RESEARCH_TECH':
+      if (researchTech(state, action.playerId, action.branch, action.level)) {
+        updateAllPlayersEconomy(state, false);
+      }
+      break;
+    case 'LAUNCH_STRATEGIC_STRIKE':
+      executeStrategicStrike(
+        state,
+        action.playerId,
+        action.strikeKind,
+        action.targetX,
+        action.targetY,
+      );
       break;
   }
 }
@@ -1556,6 +1592,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         buildingOccupancyByType: { ...p.buildingOccupancyByType },
         manpowerSuppressionTicks: p.manpowerSuppressionTicks,
         manpowerSuppressionIntensity: p.manpowerSuppressionIntensity,
+        techLevels: { ...p.techLevels },
+        intelTier: getPlayerBaseIntelTier(p),
       });
     } else {
       const finishOffRequiredManpower = isNeighborOfHuman
@@ -1687,6 +1725,7 @@ export function createClientRenderState(state: GameState): ClientRenderState {
       frontierCells: [...o.frontierCells],
     })),
     publicResourceZones: state.publicResourceZones,
+    rareLootZones: toPublicRareLootZones(state, state.humanPlayerId),
     visibilityGrid,
     visibilityGridWidth: FOG_GRID_WIDTH,
     visibilityGridHeight: FOG_GRID_HEIGHT,

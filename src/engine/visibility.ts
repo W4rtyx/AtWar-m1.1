@@ -1,12 +1,17 @@
 import {
   CLOSE_SONAR_RADIUS,
-  RADAR_STATION_VISION_RADIUS,
   isAirUnitType,
   isNavalUnitType,
 } from './navalAir';
 import {
+  getEffectiveRadarVisionRadius,
+  getPlayerBaseIntelTier,
+  getTechLevel,
+} from './techTree';
+import {
   Building,
   GameState,
+  IntelTier,
   MAP_HEIGHT,
   MAP_WIDTH,
   Unit,
@@ -19,6 +24,61 @@ export const FOG_GRID_STEP = 4;
 export const FOG_GRID_WIDTH = Math.ceil(MAP_WIDTH / FOG_GRID_STEP); // 180
 export const FOG_GRID_HEIGHT = Math.ceil(MAP_HEIGHT / FOG_GRID_STEP); // 125
 export const BORDER_VISION_RADIUS = 18;
+export const FRONTLINE_TRENCH_VISION_RADIUS = 6;
+
+export function getViewerIntelTier(
+  state: GameState,
+  viewerPlayerId: number,
+): IntelTier {
+  return getPlayerBaseIntelTier(state.players.get(viewerPlayerId));
+}
+
+function hasViewerRadarDomeAt(
+  state: GameState,
+  viewerPlayerId: number,
+  wx: number,
+  wy: number,
+): boolean {
+  for (const b of state.buildings) {
+    if (b.stackCount <= 0 || b.type !== 'RADAR_STATION') continue;
+    if (!isFriendlyOrAllied(state, viewerPlayerId, b.ownerId)) continue;
+    const radarR = getEffectiveRadarVisionRadius(state.players.get(b.ownerId));
+    if (Math.hypot(wx - (b.x + 0.5), wy - (b.y + 0.5)) <= radarR) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isWithinDistanceOfViewerBorder(
+  state: GameState,
+  viewerPlayerId: number,
+  wx: number,
+  wy: number,
+  radius: number,
+): boolean {
+  const ux = Math.floor(wx);
+  const uy = Math.floor(wy);
+  const rCeil = Math.ceil(radius);
+  const rSq = radius * radius;
+  const minX = Math.max(0, ux - rCeil);
+  const maxX = Math.min(state.width - 1, ux + rCeil);
+  const minY = Math.max(0, uy - rCeil);
+  const maxY = Math.min(state.height - 1, uy + rCeil);
+
+  for (let y = minY; y <= maxY; y++) {
+    const dy = y + 0.5 - wy;
+    const row = y * state.width;
+    for (let x = minX; x <= maxX; x++) {
+      const dx = x + 0.5 - wx;
+      if (dx * dx + dy * dy > rSq) continue;
+      if (isFriendlyOrAllied(state, viewerPlayerId, state.owners[row + x])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 interface VisionCircle {
   readonly x: number;
@@ -68,7 +128,7 @@ function collectViewerVisionCircles(
     if (b.stackCount <= 0) continue;
     if (!isFriendlyOrAllied(state, viewerPlayerId, b.ownerId)) continue;
     if (b.type === 'RADAR_STATION') {
-      const r = RADAR_STATION_VISION_RADIUS;
+      const r = getEffectiveRadarVisionRadius(state.players.get(b.ownerId));
       circles.push({
         x: b.x + 0.5,
         y: b.y + 0.5,
@@ -217,30 +277,39 @@ export function isSubmarineDetectedByPlayer(
   sub: Unit,
   unitSpecs: Readonly<Record<UnitType, UnitSpec>>,
 ): boolean {
+  const viewerTier = getViewerIntelTier(state, viewerPlayerId);
+  const subOwner = state.players.get(sub.ownerId);
+  const silentSubMul = getTechLevel(subOwner, 'NAVAL') >= 4 ? 0.75 : 1.0;
+  const hasAswTech = viewerTier >= 4;
+
   for (const spotter of state.units) {
     if (spotter.count <= 0 || spotter.hp <= 0) continue;
     if (!isFriendlyOrAllied(state, viewerPlayerId, spotter.ownerId)) continue;
     const spec = unitSpecs[spotter.type];
     const dist = Math.hypot(sub.x - spotter.x, sub.y - spotter.y);
 
-    if (spec.detectsStealth === true && dist <= spec.visionRadius) {
+    if (spec.detectsStealth === true) {
+      const detR = spec.visionRadius * (hasAswTech ? 1.4 : 1.0) * silentSubMul;
+      if (dist <= detR) return true;
+    }
+    if (spotter.type === 'CRUISER') {
+      const cruiserSonarR = (hasAswTech ? 36 : CLOSE_SONAR_RADIUS) * silentSubMul;
+      if (dist <= cruiserSonarR) return true;
+    }
+    if (isNavalUnitType(spotter.type) && dist <= 7 * silentSubMul) {
       return true;
     }
-    if (spotter.type === 'CRUISER' && dist <= CLOSE_SONAR_RADIUS) {
-      return true;
-    }
-    if (isNavalUnitType(spotter.type) && dist <= 7) {
-      return true;
-    }
-    if (isAirUnitType(spotter.type) && dist <= 12) {
-      return true;
+    if (isAirUnitType(spotter.type)) {
+      const airAswR = (hasAswTech ? 24 : 12) * silentSubMul;
+      if (dist <= airAswR) return true;
     }
   }
 
   for (const b of state.buildings) {
     if (b.stackCount <= 0 || b.type !== 'RADAR_STATION') continue;
     if (!isFriendlyOrAllied(state, viewerPlayerId, b.ownerId)) continue;
-    if (Math.hypot(sub.x - (b.x + 0.5), sub.y - (b.y + 0.5)) <= RADAR_STATION_VISION_RADIUS) {
+    const radarR = getEffectiveRadarVisionRadius(state.players.get(b.ownerId)) * silentSubMul;
+    if (Math.hypot(sub.x - (b.x + 0.5), sub.y - (b.y + 0.5)) <= radarR) {
       return true;
     }
   }
@@ -282,30 +351,14 @@ export function isUnitVisibleToPlayer(
   for (const b of state.buildings) {
     if (b.stackCount <= 0 || b.type !== 'RADAR_STATION') continue;
     if (!isFriendlyOrAllied(state, viewerPlayerId, b.ownerId)) continue;
-    if (Math.hypot(unit.x - (b.x + 0.5), unit.y - (b.y + 0.5)) <= RADAR_STATION_VISION_RADIUS) {
+    const radarR = getEffectiveRadarVisionRadius(state.players.get(b.ownerId));
+    if (Math.hypot(unit.x - (b.x + 0.5), unit.y - (b.y + 0.5)) <= radarR) {
       return true;
     }
   }
 
-  const ux = Math.floor(unit.x);
-  const uy = Math.floor(unit.y);
-  const r = BORDER_VISION_RADIUS;
-  const rSq = r * r;
-  const minX = Math.max(0, ux - r);
-  const maxX = Math.min(state.width - 1, ux + r);
-  const minY = Math.max(0, uy - r);
-  const maxY = Math.min(state.height - 1, uy + r);
-
-  for (let y = minY; y <= maxY; y++) {
-    const dy = y + 0.5 - unit.y;
-    const row = y * state.width;
-    for (let x = minX; x <= maxX; x++) {
-      const dx = x + 0.5 - unit.x;
-      if (dx * dx + dy * dy > rSq) continue;
-      if (isFriendlyOrAllied(state, viewerPlayerId, state.owners[row + x])) {
-        return true;
-      }
-    }
+  if (isWithinDistanceOfViewerBorder(state, viewerPlayerId, unit.x, unit.y, BORDER_VISION_RADIUS)) {
+    return true;
   }
 
   return false;
@@ -323,10 +376,33 @@ export function isBuildingVisibleToPlayer(
   if (building.ownerId === viewerPlayerId) {
     return true;
   }
-  return isWorldPointVisibleInGrid(
-    state,
-    visibilityGrid,
-    building.x + 0.5,
-    building.y + 0.5,
-  );
+  const bx = building.x + 0.5;
+  const by = building.y + 0.5;
+  if (!isWorldPointVisibleInGrid(state, visibilityGrid, bx, by)) {
+    return false;
+  }
+
+  const tier = getViewerIntelTier(state, viewerPlayerId);
+  if (building.type === 'TRENCH') {
+    // Camouflaged trenches only show at immediate frontline contact (<=6) or with IntelTier >= 3
+    if (tier >= 3) {
+      return true;
+    }
+    return isWithinDistanceOfViewerBorder(
+      state,
+      viewerPlayerId,
+      bx,
+      by,
+      FRONTLINE_TRENCH_VISION_RADIUS,
+    );
+  }
+
+  if (building.type === 'BUNKER' || building.type === 'AA_BATTERY') {
+    if (tier >= 3 || hasViewerRadarDomeAt(state, viewerPlayerId, bx, by)) {
+      return true;
+    }
+    return isWithinDistanceOfViewerBorder(state, viewerPlayerId, bx, by, BORDER_VISION_RADIUS);
+  }
+
+  return true;
 }

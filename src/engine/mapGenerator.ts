@@ -1,6 +1,8 @@
+import { generateRareLootZones } from './lootZones';
 import {
   MAP_HEIGHT,
   MAP_WIDTH,
+  RareLootZoneSecret,
   ResourceType,
   ResourceZonePublic,
   ResourceZoneSecret,
@@ -16,6 +18,7 @@ export interface GeneratedEuropeMap {
   readonly owners: Int16Array;
   readonly publicResourceZones: ResourceZonePublic[];
   readonly secretResourceZones: ResourceZoneSecret[];
+  readonly secretLootZones: RareLootZoneSecret[];
 }
 
 /** Deterministic xorshift32 PRNG returning [0, 1) and updating seed wrapper. */
@@ -849,13 +852,14 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
     }
   }
 
-  // Step 3: Generate circular resource zones (public bounds + hidden optima)
+  // Step 3: Generate circular resource zones (public bounds + hidden optima) & rare loot zones
   const { publicResourceZones, secretResourceZones } = generateResourceZones(
     terrain,
     width,
     height,
     rngBox,
   );
+  const secretLootZones = generateRareLootZones(terrain, width, height, rngBox);
 
   return {
     width,
@@ -865,5 +869,6 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
     owners,
     publicResourceZones,
     secretResourceZones,
+    secretLootZones,
   };
 }

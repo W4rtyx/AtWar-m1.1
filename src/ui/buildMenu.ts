@@ -7,6 +7,7 @@ import {
   validateBuildingPlacement,
 } from '../engine/buildings';
 import { DEFENSE_SPECS, isDefenseBuildingType } from '../engine/defenses';
+import { isBuildingTechUnlocked } from '../engine/techTree';
 import {
   ALL_BUILDING_TYPES,
   BuildBatchSize,
@@ -182,7 +183,16 @@ export class BuildMenuController {
 
     ALL_BUILDING_TYPES.forEach((bType, idx) => {
       const spec = BUILDING_SPECS[bType];
-      const hotkeyLabel = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : idx === 10 ? '-' : '=';
+      const hotkeyLabel =
+        idx < 9
+          ? String(idx + 1)
+          : idx === 9
+            ? '0'
+            : idx === 10
+              ? '-'
+              : idx === 11
+                ? '='
+                : '·';
       const isDef = isDefenseBuildingType(bType);
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -338,8 +348,12 @@ export class BuildMenuController {
             : costStr;
 
       ref.costEl.classList.toggle('free-bonus', displayQuote.usesFreePowerPlant);
+      const techUnlocked = isBuildingTechUnlocked(human, ref.type);
       ref.button.classList.toggle('active', selectedBuildType === ref.type);
-      ref.button.classList.toggle('unaffordable', !affordable);
+      ref.button.classList.toggle('unaffordable', !affordable || !techUnlocked);
+      if (!techUnlocked) {
+        ref.costEl.textContent = 'Tech: Děl. L5';
+      }
     }
   }
 }
@@ -466,7 +480,8 @@ export class TerrainBuildMenuController {
 
     const ix = this.openWorldX;
     const iy = this.openWorldY;
-    const validTypes = getValidBuildingsForCell(state, state.humanPlayerId, ix, iy);
+    const human = state.players.find((p) => p.id === state.humanPlayerId);
+    const validTypes = getValidBuildingsForCell(state, state.humanPlayerId, ix, iy, human);
 
     for (const ref of this.batchButtons) {
       ref.button.classList.toggle('active', ref.batch === batchSize);
@@ -510,7 +525,6 @@ export class TerrainBuildMenuController {
     this.zoneLabelEl.classList.toggle('hidden', zoneText.length === 0);
     this.zoneLabelEl.textContent = zoneText;
 
-    const human = state.players.find((p) => p.id === state.humanPlayerId);
     const key = `${ix}|${iy}|${batchSize}|${validTypes.length}|${state.stateVersion}|${Math.floor(human?.money ?? 0)}|${Math.floor(human?.buildingMaterial ?? 0)}|${Math.floor(human?.industry ?? 0)}`;
     if (key === this.lastStructureKey) {
       return;

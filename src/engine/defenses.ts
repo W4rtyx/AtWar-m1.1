@@ -1,8 +1,10 @@
+import { getTechLevel } from './techTree';
 import {
   BARRACKS_DEFENSE_RADIUS,
   Building,
   BuildingType,
   DefenseBuildingType,
+  TechStateByBranch,
 } from './types';
 
 export type DefenseDomain = 'GROUND_INFANTRY' | 'GROUND_ARMOR' | 'AIR_DEFENSE';
@@ -98,6 +100,7 @@ export function evaluateCellDefense(
   defenderId: number,
   x: number,
   y: number,
+  defenderPlayer?: { readonly techLevels?: Readonly<TechStateByBranch> },
 ): CellDefenseModifiers {
   let bestBarracksBonus = 0;
   let costBonus = 0;
@@ -106,6 +109,9 @@ export function evaluateCellDefense(
   let antiArmor = 0;
   let antiAir = 0;
   let nodeProt = 0;
+
+  const hasBunkerL2 = getTechLevel(defenderPlayer, 'ECONOMY_DEFENSE') >= 3;
+  const hasEnhancedAa = getTechLevel(defenderPlayer, 'ARTILLERY_SUPPORT') >= 3;
 
   for (const b of buildings) {
     if (b.ownerId !== defenderId || b.stackCount <= 0 || b.effectiveOutputPct <= 0) {
@@ -128,7 +134,9 @@ export function evaluateCellDefense(
     }
 
     const spec = DEFENSE_SPECS[b.type];
-    if (Math.hypot(b.x - x, b.y - y) > spec.radius) {
+    const effectiveRadius =
+      b.type === 'AA_BATTERY' && hasEnhancedAa ? spec.radius * 1.3 : spec.radius;
+    if (Math.hypot(b.x - x, b.y - y) > effectiveRadius) {
       continue;
     }
 
@@ -137,17 +145,21 @@ export function evaluateCellDefense(
     const levelScale = 1 + Math.max(0, b.level - 1) * 0.2;
     const weight = eff * stackScale * levelScale;
 
-    costBonus += spec.frontCostBonusPerStack * weight;
+    const costMulTech = b.type === 'BUNKER' && hasBunkerL2 ? 1.35 : 1.0;
+    const antiArmorMulTech = b.type === 'BUNKER' && hasBunkerL2 ? 1.85 : 1.0;
+    const antiAirMulTech = b.type === 'AA_BATTERY' && hasEnhancedAa ? 1.3 : 1.0;
+
+    costBonus += spec.frontCostBonusPerStack * weight * costMulTech;
     slowdown += spec.frontSlowdownPerStack * weight;
     antiInfantry += spec.antiInfantryRating * weight;
-    antiArmor += spec.antiArmorRating * weight;
-    antiAir += spec.antiAirRating * weight;
+    antiArmor += spec.antiArmorRating * weight * antiArmorMulTech;
+    antiAir += spec.antiAirRating * weight * antiAirMulTech;
     nodeProt += spec.buildingProtectionRatio * weight;
   }
 
   const cappedBarracks = Math.min(0.55, bestBarracksBonus);
   return {
-    attackerCostMultiplier: 1 + Math.min(2.9, cappedBarracks + costBonus),
+    attackerCostMultiplier: 1 + Math.min(3.2, cappedBarracks + costBonus),
     advanceSpeedMultiplier: Math.max(0.16, 1 - Math.min(0.84, slowdown)),
     defenderLossMultiplier: Math.max(0.5, 1 - Math.min(0.5, (cappedBarracks + costBonus) * 0.24)),
     antiInfantryFactor: antiInfantry,
@@ -157,12 +169,13 @@ export function evaluateCellDefense(
   };
 }
 
-/** Returns local anti-air defense coverage factor at (x, y) for Step 6 aircraft and drops. */
+/** Returns local anti-air defense coverage factor at (x, y) for Step 6/7 aircraft and drops. */
 export function getAirDefenseCoverageAt(
   buildings: ReadonlyArray<Building>,
   ownerId: number,
   x: number,
   y: number,
+  ownerPlayer?: { readonly techLevels?: Readonly<TechStateByBranch> },
 ): number {
-  return evaluateCellDefense(buildings, ownerId, x, y).antiAirFactor;
+  return evaluateCellDefense(buildings, ownerId, x, y, ownerPlayer).antiAirFactor;
 }

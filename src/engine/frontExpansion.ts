@@ -556,7 +556,7 @@ function computeCellCaptureCost(
   const defenderNeighbors = countFriendlyNeighbors(state, nx, ny, prevOwner);
   const cohesionFactor = 0.85 + defenderNeighbors * 0.18;
 
-  const defense = evaluateCellDefense(state.buildings, prevOwner, nx, ny);
+  const defense = evaluateCellDefense(state.buildings, prevOwner, nx, ny, defender);
   const support = evaluateFrontUnitSupport(state, attackerId, prevOwner, nx, ny, cellTerrain);
   const defenderBlackoutMul = getCombatBlackoutMultiplier(defender);
   const attackerBlackoutMul = getCombatBlackoutMultiplier(attacker);
@@ -618,6 +618,7 @@ function applyExpansionCandidates(
   candidates: ExpansionCandidate[],
   allowTransitWilderness = false,
   onClaim?: (claimedIdx: number) => void,
+  speedBudgetMul = 1.0,
 ): ApplyExpansionResult {
   if (candidates.length === 0) {
     return { claimed: false, capturedForeign: false };
@@ -627,12 +628,15 @@ function applyExpansionCandidates(
 
   const attacker = state.players.get(order.playerId);
   const attackerCombatMul = getCombatBlackoutMultiplier(attacker);
-  const budgetRate = order.finishOff ? 0.24 : 0.12;
-  const maxForeignPerTick = order.finishOff ? 22 : 10;
+  const budgetRate = (order.finishOff ? 0.24 : 0.12) * speedBudgetMul;
+  const maxForeignPerTick = Math.max(
+    4,
+    Math.round((order.finishOff ? 22 : 10) * speedBudgetMul),
+  );
   const tickBudget =
     Math.min(
       order.manpowerRemaining,
-      Math.max(4.5, order.manpowerCommitted * budgetRate),
+      Math.max(4.5 * speedBudgetMul, order.manpowerCommitted * budgetRate),
     ) * attackerCombatMul;
   let budgetSpent = 0;
   let foreignClaimedThisTick = 0;
@@ -895,7 +899,12 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
     const totalLen = cumDist[cumDist.length - 1];
     order.totalPathLength = totalLen;
 
-    const halfCorridor = 8.5;
+    const profile = order.profile ?? 'STANDARD';
+    const profileCorridorScale =
+      profile === 'SPEARHEAD' ? 0.65 : profile === 'BROAD_FRONT' ? 1.45 : 1.0;
+    const profileSpeedScale =
+      profile === 'SPEARHEAD' ? 1.25 : profile === 'BROAD_FRONT' ? 0.85 : 1.0;
+    const halfCorridor = 8.5 * profileCorridorScale;
     const scanPad = halfCorridor + 6;
 
     let minX = width - 1;
@@ -1033,9 +1042,10 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
             1.5,
             Math.max(-0.5, (nProj.arcDist - order.frontierArc) * 0.06),
           );
+          const centerPenalty = profile === 'SPEARHEAD' ? 0.42 : profile === 'BROAD_FRONT' ? 0.14 : 0.26;
           const score =
             dot * 3.0 -
-            nProj.perpDist * 0.26 +
+            nProj.perpDist * centerPenalty +
             friendly * 0.45 +
             arcLeadBonus +
             terrainBonus +
@@ -1062,6 +1072,8 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
       targetOwnerId,
       candidates,
       targetOwnerId >= 0,
+      undefined,
+      profileSpeedScale,
     );
     if (res.claimed) {
       mapChanged = true;

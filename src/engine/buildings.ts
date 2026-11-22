@@ -1,4 +1,5 @@
 import { ENERGY_RESERVE_PER_POWER_PLANT } from './energyGrid';
+import { isBuildingTechUnlocked } from './techTree';
 import {
   ALL_BUILDING_TYPES,
   BUILDING_COST_SCALING_PER_UNIT,
@@ -14,6 +15,7 @@ import {
   OccupancyByType,
   ResourceType,
   ResourceZonePublic,
+  TechStateByBranch,
   TerrainType,
 } from './types';
 
@@ -227,6 +229,27 @@ export const BUILDING_SPECS: Readonly<Record<BuildingType, BuildingSpec>> = {
     requiresCoast: false,
     resourceZoneType: null,
   },
+  MISSILE_SILO: {
+    type: 'MISSILE_SILO',
+    nameCs: 'Raketové silo',
+    shortCode: 'SILO',
+    descriptionCs:
+      'Strategické odpalovací silo dlouhého doletu (Tech: Dělostřelectvo L5). Odpaluje dálkové raketové a jaderné údery.',
+    cost: { money: 480, buildingMaterial: 220, industry: 260 },
+    baseEnergyConsumption: 8.0,
+    baseEnergyProduction: 0,
+    baseManpowerRequired: 40,
+    baseMoneyPerSec: 0,
+    baseMaterialPerSec: 0,
+    baseIndustryPerSec: 0,
+    baseKnowledgePerSec: 0,
+    baseMaxManpowerBonus: 0,
+    baseManpowerIncomeBonus: 0,
+    energyReserveBonus: 0,
+    constructionTicks: 60,
+    requiresCoast: false,
+    resourceZoneType: null,
+  },
   TRENCH: {
     type: 'TRENCH',
     nameCs: 'Zákopy',
@@ -319,6 +342,7 @@ export interface PlacementPlayerView {
   readonly buildingMaterial?: number;
   readonly industry?: number;
   readonly freePowerPlantUsed?: boolean;
+  readonly techLevels?: Readonly<TechStateByBranch>;
 }
 
 export interface BatchCostQuote {
@@ -350,6 +374,7 @@ export function createDefaultOccupancyByType(): OccupancyByType {
     PORT: 100,
     AIRFIELD: 100,
     RADAR_STATION: 100,
+    MISSILE_SILO: 100,
     TRENCH: 100,
     BUNKER: 100,
     AA_BATTERY: 100,
@@ -596,6 +621,26 @@ export function validateBuildingPlacement(
       reasonCs: 'Stát není aktivní',
       inMatchingZone: false,
       isFreePowerPlant: fallbackQuote.usesFreePowerPlant,
+      effectiveCost: fallbackQuote.totalCost,
+      stackTargetId: null,
+      plannedUnits: 0,
+    };
+  }
+
+  if (!isBuildingTechUnlocked(player, buildingType)) {
+    const fallbackQuote = computeBatchQuote(
+      buildingType,
+      existingScaledCount,
+      freeUsed,
+      1,
+      MAX_STACK_PER_NODE,
+      funds,
+    );
+    return {
+      valid: false,
+      reasonCs: 'Vyžaduje výzkum (Dělostřelectvo L5)',
+      inMatchingZone: false,
+      isFreePowerPlant: false,
       effectiveCost: fallbackQuote.totalCost,
       stackTargetId: null,
       plannedUnits: 0,
@@ -1078,12 +1123,13 @@ export function syncBuildingOwnership(state: GameState): boolean {
   return anyChanged;
 }
 
-/** Returns all building types valid for placement on cell (x, y) owned by playerId (coast-aware). */
+/** Returns all building types valid for placement on cell (x, y) owned by playerId (coast & tech-aware). */
 export function getValidBuildingsForCell(
   view: PlacementValidationState,
   playerId: number,
   x: number,
   y: number,
+  player?: PlacementPlayerView,
 ): BuildingType[] {
   const ix = Math.floor(x);
   const iy = Math.floor(y);
@@ -1095,5 +1141,9 @@ export function getValidBuildingsForCell(
     return [];
   }
   const coastal = isCoastalLandCell(view.terrain, view.width, view.height, ix, iy, 2);
-  return ALL_BUILDING_TYPES.filter((bType) => !BUILDING_SPECS[bType].requiresCoast || coastal);
+  return ALL_BUILDING_TYPES.filter(
+    (bType) =>
+      (!BUILDING_SPECS[bType].requiresCoast || coastal) &&
+      (!player || isBuildingTechUnlocked(player, bType)),
+  );
 }

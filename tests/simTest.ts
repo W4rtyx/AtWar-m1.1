@@ -22,6 +22,7 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  AIRFIELD_OPERATION_RANGE,
   NAVAL_COAST_CLEARANCE,
   WATER_NAV_STEP,
   findWaterPath,
@@ -38,7 +39,15 @@ import {
   planSimulationTicks,
 } from '../src/engine/simulation';
 import {
+  MISSILE_STRIKE_COST,
+  NUCLEAR_STRIKE_COST,
+  TECH_TREE_SPECS,
+  getEffectiveAirfieldRange,
+  isArrowProfileUnlocked,
+} from '../src/engine/techTree';
+import {
   FOG_GRID_STEP,
+  getViewerIntelTier,
   isWorldPointVisibleInGrid,
 } from '../src/engine/visibility';
 import {
@@ -48,6 +57,7 @@ import {
   MAX_STACK_PER_NODE,
   MIN_BUILDING_SPACING,
   TICK_DT,
+  TechBranch,
   TerrainType,
   WILDERNESS_OWNER,
   getRelationKey,
@@ -4149,6 +4159,631 @@ function testFireMissionIndustryAmmoConsumptionAndZeroBlock(): void {
   console.log('PASS [zj]: Fire mission Industry ammo cost, FACTORY scarcity & 0-Industry lock verified.');
 }
 
+function testParatroopersInAirImmunityAndAirUnitsIgnoreTrenchSlowdown(): void {
+  const state = createInitialGameState(9701);
+  const start = findPlainsLandSpot(state, 340, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  const arena = findInlandPlainsCenter(state, 34, 16);
+  const ax = arena.x;
+  const ay = arena.y;
+  for (let y = ay - 14; y <= ay + 14; y++) {
+    for (let x = ax - 32; x <= ax + 32; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = x < ax - 18 ? humanId : enemyId;
+    }
+  }
+  human.money = 10000;
+  human.buildingMaterial = 10000;
+  human.industry = 10000;
+  enemy.money = 5000;
+  enemy.energyReserve = enemy.energyReserveMax;
+
+  // Build ready Airfield behind own lines and fortify enemy MOUNTAINS + TRENCH + BUNKER strip
+  const airfield = placeBuilding(state, humanId, 'AIRFIELD', ax - 26, ay, 1)!;
+  airfield.stackCount = 1;
+  airfield.underConstructionCount = 0;
+
+  const corridorEnemyCells: number[] = [];
+  for (let x = ax - 14; x <= ax + 24; x++) {
+    state.terrain[ay * state.width + x] = TerrainType.MOUNTAINS;
+    state.terrain[(ay + 1) * state.width + x] = TerrainType.MOUNTAINS;
+    corridorEnemyCells.push(ay * state.width + x);
+    if (x >= ax - 10 && x <= ax + 14 && (x - ax) % 10 === 0) {
+      const trench = placeBuilding(state, enemyId, 'TRENCH', x, ay, 1);
+      if (trench) {
+        trench.stackCount = 1;
+        trench.underConstructionCount = 0;
+      }
+      const bunker = placeBuilding(state, enemyId, 'BUNKER', x + 3, ay, 1);
+      if (bunker) {
+        bunker.stackCount = 1;
+        bunker.underConstructionCount = 0;
+      }
+    }
+  }
+
+  const para = spawnUnitStack(state, humanId, 'PARATROOPERS', ax - 24, ay, 2, { stance: 'LOCK' });
+  const initialParaHp = para.hp;
+  const dropX = ax + 26;
+  const dropY = ay;
+
+  dispatchAction(state, {
+    type: 'PARADROP_UNIT',
+    playerId: humanId,
+    unitId: para.id,
+    targetX: dropX,
+    targetY: dropY,
+  });
+  assert(para.inAirTransit, 'PARATROOPERS must enter inAirTransit flight');
+
+  let paraFlightDistPerTick = 0;
+  let prevX = para.x;
+  let ticks = 0;
+  while (para.inAirTransit && ticks < 20) {
+    dispatchAction(state, { type: 'TICK' });
+    ticks++;
+    if (ticks === 3 && para.inAirTransit) {
+      paraFlightDistPerTick = para.x - prevX;
+    }
+    prevX = para.x;
+    if (para.inAirTransit) {
+      assert(!para.isEncircled, `Flying paratroopers must not be encircled at tick ${ticks}`);
+      assert(
+        para.morale >= 99.9 && Math.abs(para.hp - initialParaHp) < 1e-6,
+        `Flying paratroopers must take 0 encirclement attrition/morale loss (hp=${para.hp}, morale=${para.morale})`,
+      );
+    }
+    const paintedCorridor = corridorEnemyCells.filter((idx) => state.owners[idx] === humanId).length;
+    assert(
+      paintedCorridor === 0,
+      `Flying paratroopers must paint 0 cells over corridor (painted=${paintedCorridor})`,
+    );
+  }
+  assert(
+    paraFlightDistPerTick >= 2.2,
+    `Flying paratroopers must cruise at ~2.4 cells/tick across mountainous fortified corridor (got ${paraFlightDistPerTick.toFixed(3)})`,
+  );
+
+  // Verify FIGHTER & BOMBER fly at identical speed over TRENCH + BUNKER + MOUNTAINS vs clear PLAINS
+  const fighterMtn = spawnUnitStack(state, humanId, 'FIGHTER', ax - 8, ay, 1);
+  const fighterPln = spawnUnitStack(state, humanId, 'FIGHTER', ax - 8, ay + 10, 1);
+  const bomberMtn = spawnUnitStack(state, humanId, 'BOMBER', ax - 8, ay + 1, 1);
+  const bomberPln = spawnUnitStack(state, humanId, 'BOMBER', ax - 8, ay + 11, 1);
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [fighterMtn.id],
+    targetX: ax + 22,
+    targetY: ay,
+  });
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [fighterPln.id],
+    targetX: ax + 22,
+    targetY: ay + 10,
+  });
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [bomberMtn.id],
+    targetX: ax + 22,
+    targetY: ay + 1,
+  });
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [bomberPln.id],
+    targetX: ax + 22,
+    targetY: ay + 11,
+  });
+
+  const fMtnStart = fighterMtn.x;
+  const fPlnStart = fighterPln.x;
+  const bMtnStart = bomberMtn.x;
+  const bPlnStart = bomberPln.x;
+  for (let t = 0; t < 4; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const fMtnDelta = fighterMtn.x - fMtnStart;
+  const fPlnDelta = fighterPln.x - fPlnStart;
+  const bMtnDelta = bomberMtn.x - bMtnStart;
+  const bPlnDelta = bomberPln.x - bPlnStart;
+  assert(
+    Math.abs(fMtnDelta - fPlnDelta) < 1e-5 && fMtnDelta > 1,
+    `FIGHTER speed must ignore MOUNTAINS/TRENCH/BUNKER (mtn=${fMtnDelta.toFixed(4)}, pln=${fPlnDelta.toFixed(4)})`,
+  );
+  assert(
+    Math.abs(bMtnDelta - bPlnDelta) < 1e-5 && bMtnDelta > 1,
+    `BOMBER speed must ignore MOUNTAINS/TRENCH/BUNKER (mtn=${bMtnDelta.toFixed(4)}, pln=${bPlnDelta.toFixed(4)})`,
+  );
+  console.log('PASS [zk]: Paratrooper transit immunity & air unit immunity to TRENCH/BUNKER/MOUNTAINS verified.');
+}
+
+function runArrowProfileComparison(profile: 'SPEARHEAD' | 'BROAD_FRONT'): {
+  readonly maxAdvanceX: number;
+  readonly lateralSpan: number;
+} {
+  const state = createInitialGameState(9702);
+  const arena = findInlandPlainsCenter(state, 36, 20);
+  const ax = arena.x;
+  const ay = arena.y;
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: ax - 24, y: ay });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  for (let y = ay - 18; y <= ay + 18; y++) {
+    for (let x = ax - 32; x <= ax + 32; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = x <= ax ? humanId : WILDERNESS_OWNER;
+    }
+  }
+  human.knowledge = 5000;
+  human.money = 10000;
+  human.industry = 5000;
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'GROUND', level: 1 });
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'GROUND', level: 2 });
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'GROUND', level: 3 });
+  human.maxManpower = 600;
+  human.manpower = 600;
+
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: ax - 1, y: ay },
+      { x: ax + 26, y: ay },
+    ],
+    manpowerPercent: 45,
+    profile,
+  });
+
+  for (let t = 0; t < 24; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  let maxAdvanceX = ax;
+  let minY = state.height;
+  let maxY = -1;
+  for (let y = ay - 18; y <= ay + 18; y++) {
+    for (let x = ax + 1; x <= ax + 32; x++) {
+      if (state.owners[y * state.width + x] === humanId) {
+        if (x > maxAdvanceX) maxAdvanceX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return {
+    maxAdvanceX,
+    lateralSpan: maxY >= minY ? maxY - minY : 0,
+  };
+}
+
+function testTechTreeResearchPrerequisitesBonusesAndArrowProfiles(): void {
+  const state = createInitialGameState(9703);
+  const start = findPlainsLandSpot(state, 350, 250);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  human.knowledge = 1200;
+  human.money = 3000;
+  human.industry = 1200;
+
+  assert(
+    isArrowProfileUnlocked(human, 'STANDARD') &&
+      isArrowProfileUnlocked(human, 'BROAD_FRONT') &&
+      !isArrowProfileUnlocked(human, 'SPEARHEAD'),
+    'Only STANDARD and BROAD_FRONT must be unlocked at start; SPEARHEAD requires GROUND L3',
+  );
+
+  // Skip attempt L0 -> L3 must fail without charging resources
+  const kBeforeSkip = human.knowledge;
+  const mBeforeSkip = human.money;
+  const iBeforeSkip = human.industry;
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'GROUND', level: 3 });
+  assert(
+    human.techLevels.GROUND === 0 &&
+      human.knowledge === kBeforeSkip &&
+      human.money === mBeforeSkip &&
+      human.industry === iBeforeSkip,
+    'Skipping prerequisite tech level (GROUND L3 without L1/L2) must be rejected without charging resources',
+  );
+
+  // Sequential GROUND L1 -> L2 -> L3
+  let expectedK = human.knowledge;
+  let expectedM = human.money;
+  let expectedI = human.industry;
+  for (let lvl = 1 as 1 | 2 | 3; lvl <= 3; lvl = (lvl + 1) as 1 | 2 | 3) {
+    const cost = TECH_TREE_SPECS.GROUND[lvl - 1].cost;
+    expectedK -= cost.knowledge;
+    expectedM -= cost.money;
+    expectedI -= cost.industry;
+    dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'GROUND', level: lvl });
+    assert(human.techLevels.GROUND === lvl, `GROUND L${lvl} must unlock sequentially`);
+    assert(
+      human.knowledge === expectedK && human.money === expectedM && human.industry === expectedI,
+      `GROUND L${lvl} must deduct exact knowledge/money/industry cost`,
+    );
+  }
+  assert(isArrowProfileUnlocked(human, 'SPEARHEAD'), 'GROUND L3 must unlock SPEARHEAD arrow profile');
+
+  // AIR_STRATEGIC L1 -> L2 +25% airfield range bonus
+  const baseRange = getEffectiveAirfieldRange(human);
+  assert(baseRange === AIRFIELD_OPERATION_RANGE, `Expected base airfield range ${AIRFIELD_OPERATION_RANGE}, got ${baseRange}`);
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'AIR_STRATEGIC', level: 1 });
+  dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: 'AIR_STRATEGIC', level: 2 });
+  const boostedRange = getEffectiveAirfieldRange(human);
+  assert(
+    boostedRange === Math.round(AIRFIELD_OPERATION_RANGE * 1.25),
+    `AIR_STRATEGIC L2 must increase airfield range +25% to ${Math.round(AIRFIELD_OPERATION_RANGE * 1.25)} (got ${boostedRange})`,
+  );
+
+  // SPEARHEAD vs BROAD_FRONT behavioral difference (faster advance along narrow tip vs wider front)
+  const spearhead = runArrowProfileComparison('SPEARHEAD');
+  const broad = runArrowProfileComparison('BROAD_FRONT');
+  assert(
+    spearhead.maxAdvanceX > broad.maxAdvanceX,
+    `SPEARHEAD must spearhead further east than BROAD_FRONT (${spearhead.maxAdvanceX} vs ${broad.maxAdvanceX})`,
+  );
+  assert(
+    broad.lateralSpan > spearhead.lateralSpan,
+    `BROAD_FRONT must maintain wider corridor than SPEARHEAD (${broad.lateralSpan} vs ${spearhead.lateralSpan})`,
+  );
+  console.log('PASS [zl]: Tech Tree prerequisites, costs, AirRange +25% bonus & SPEARHEAD vs BROAD_FRONT verified.');
+}
+
+function testMultiTierFogOfWarIntelTiers(): void {
+  const state = createInitialGameState(9704);
+  const arena = findInlandPlainsCenter(state, 28, 16);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: arena.x - 16, y: arena.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  // Find a water spot well away from any Player 0 radar
+  let waterX = -1;
+  let waterY = -1;
+  for (let y = 120; y < state.height - 60 && waterX < 0; y += 6) {
+    for (let x = 50; x < 240; x += 6) {
+      let allWater = true;
+      for (let dy = -3; dy <= 3 && allWater; dy++) {
+        for (let dx = -3; dx <= 34; dx++) {
+          if (state.terrain[(y + dy) * state.width + (x + dx)] !== TerrainType.WATER) {
+            allWater = false;
+            break;
+          }
+        }
+      }
+      const nearRadar = state.buildings.some(
+        (b) => b.ownerId === humanId && b.type === 'RADAR_STATION' && Math.hypot(b.x - x, b.y - y) < 120,
+      );
+      if (allWater && !nearRadar) {
+        waterX = x;
+        waterY = y;
+        break;
+      }
+    }
+  }
+  assert(waterX > 0, 'Must locate open water channel for submarine ASW visibility test');
+
+  for (let y = arena.y - 10; y <= arena.y + 10; y++) {
+    for (let x = arena.x - 18; x <= arena.x + 24; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = x <= arena.x - 4 ? humanId : enemyId;
+    }
+  }
+  human.knowledge = 3000;
+  human.money = 5000;
+  human.industry = 3000;
+  enemy.money = 5000;
+  enemy.energyReserve = enemy.energyReserveMax;
+
+  assert(getViewerIntelTier(state, humanId) === 1, 'Initial viewer IntelTier must be 1');
+
+  // Enemy TRENCH 14 cells from P0 border (inside 18-cell border vision, outside 6-cell frontline contact)
+  const trench = placeBuilding(state, enemyId, 'TRENCH', arena.x + 10, arena.y, 1)!;
+  assert(trench !== null, 'Enemy TRENCH placement must succeed');
+  trench.stackCount = 1;
+  trench.underConstructionCount = 0;
+
+  // Player CRUISER + Enemy SUBMARINE 26 cells apart (outside 14-cell base sonar, inside 36-cell Tier 4 ASW)
+  spawnUnitStack(state, humanId, 'CRUISER', waterX + 0.5, waterY + 0.5, 1, { stance: 'LOCK' });
+  const sub = spawnUnitStack(state, enemyId, 'SUBMARINE', waterX + 26.5, waterY + 0.5, 1, {
+    stance: 'LOCK',
+  });
+
+  const tier1Client = createClientRenderState(state);
+  assert(
+    !tier1Client.buildings.some((b) => b.id === trench.id),
+    'At IntelTier 1 enemy TRENCH at dist 14 must be hidden from ClientRenderState',
+  );
+  assert(
+    !tier1Client.units.some((u) => u.id === sub.id),
+    'At IntelTier 1 enemy SUBMARINE at dist 26 must be hidden from ClientRenderState',
+  );
+
+  // Unlock ECONOMY_DEFENSE L1 -> L3 => IntelTier 3 reveals remote TRENCH
+  for (let lvl = 1 as 1 | 2 | 3; lvl <= 3; lvl = (lvl + 1) as 1 | 2 | 3) {
+    dispatchAction(state, {
+      type: 'RESEARCH_TECH',
+      playerId: humanId,
+      branch: 'ECONOMY_DEFENSE',
+      level: lvl,
+    });
+  }
+  assert(getViewerIntelTier(state, humanId) === 3, 'ECONOMY_DEFENSE L3 must raise IntelTier to 3');
+  const tier3Client = createClientRenderState(state);
+  assert(
+    tier3Client.buildings.some((b) => b.id === trench.id),
+    'At IntelTier 3 enemy TRENCH inside 18-cell perimeter must become visible',
+  );
+  assert(
+    !tier3Client.units.some((u) => u.id === sub.id),
+    'At IntelTier 3 enemy SUBMARINE at dist 26 must still remain hidden',
+  );
+
+  // Unlock NAVAL L1 -> L3 => IntelTier 4 reveals SUBMARINE at ASW range 36
+  for (let lvl = 1 as 1 | 2 | 3; lvl <= 3; lvl = (lvl + 1) as 1 | 2 | 3) {
+    dispatchAction(state, {
+      type: 'RESEARCH_TECH',
+      playerId: humanId,
+      branch: 'NAVAL',
+      level: lvl,
+    });
+  }
+  assert(getViewerIntelTier(state, humanId) === 4, 'NAVAL L3 must raise IntelTier to 4');
+  const tier4Client = createClientRenderState(state);
+  assert(
+    tier4Client.units.some((u) => u.id === sub.id),
+    'At IntelTier 4 enemy SUBMARINE at dist 26 from CRUISER must become visible',
+  );
+  console.log('PASS [zm]: Multi-tier Fog of War (Tier 1 -> Tier 3 remote TRENCH -> Tier 4 ASW SUBMARINE) verified.');
+}
+
+function testSecretRareLootZonesDiscoveryAndCapture(): void {
+  const state = createInitialGameState(9705);
+  const start = findPlainsLandSpot(state, 340, 250);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  assert(
+    state.secretLootZones.length >= 6 && state.secretLootZones.length <= 8,
+    `Expected 6-8 secret Rare Loot zones, got ${state.secretLootZones.length}`,
+  );
+  const secretZone = state.secretLootZones.find((z) => z.claimedByPlayerId === null)!;
+  assert(secretZone !== undefined, 'Must find an unclaimed secret Rare Loot zone');
+
+  const clientBefore = createClientRenderState(state);
+  assert(
+    !('secretLootZones' in (clientBefore as object)),
+    'ClientRenderState must never expose secretLootZones',
+  );
+  const pubBefore = clientBefore.rareLootZones.find((z) => z.id === secretZone.id)!;
+  assert(pubBefore !== undefined, 'Public rareLootZones must include matching zone id');
+  assert(
+    !('exactX' in (pubBefore as object)) && !('exactY' in (pubBefore as object)),
+    'Public RareLootZonePublic must never leak exactX or exactY (anti-F12)',
+  );
+  assert(
+    pubBefore.displayRadius > 15 &&
+      (pubBefore.displayCenterX !== secretZone.exactX ||
+        pubBefore.displayCenterY !== secretZone.exactY),
+    `Unupgraded Rare Loot circle must be wide & offset (r=${pubBefore.displayRadius})`,
+  );
+
+  human.knowledge = 1500;
+  human.money = 3000;
+  human.industry = 1500;
+  dispatchAction(state, {
+    type: 'RESEARCH_TECH',
+    playerId: humanId,
+    branch: 'ECONOMY_DEFENSE',
+    level: 1,
+  });
+  const pubAfterL1 = createClientRenderState(state).rareLootZones.find(
+    (z) => z.id === secretZone.id,
+  )!;
+  assert(
+    pubAfterL1.displayRadius < pubBefore.displayRadius,
+    `ECONOMY_DEFENSE L1 must shrink search radius (${pubBefore.displayRadius} -> ${pubAfterL1.displayRadius})`,
+  );
+
+  // Clear other human buildings and test one-time payout on capturing exact cell
+  const readMetric = (): number => {
+    switch (secretZone.rewardType) {
+      case 'MONEY':
+        return human.money;
+      case 'MATERIAL':
+        return human.buildingMaterial;
+      case 'INDUSTRY':
+        return human.industry;
+      case 'KNOWLEDGE':
+        return human.knowledge;
+    }
+  };
+  const metricBefore = readMetric();
+  state.owners[secretZone.exactY * state.width + secretZone.exactX] = humanId;
+  dispatchAction(state, { type: 'TICK' });
+  const metricAfterClaim = readMetric();
+  assert(
+    secretZone.claimedByPlayerId === humanId,
+    'Capturing exactX, exactY must mark Rare Loot zone as claimed by capturer',
+  );
+  assert(
+    metricAfterClaim - metricBefore >= secretZone.amount - 5,
+    `Claiming ${secretZone.rewardType} Rare Loot must award +${secretZone.amount} (delta=${(metricAfterClaim - metricBefore).toFixed(1)})`,
+  );
+
+  const metricBeforeRepeat = readMetric();
+  dispatchAction(state, { type: 'TICK' });
+  const metricAfterRepeat = readMetric();
+  assert(
+    Math.abs(metricAfterRepeat - metricBeforeRepeat) < 25,
+    'Claimed Rare Loot zone must NOT pay out a second time on subsequent ticks',
+  );
+  console.log('PASS [zn]: Secret Rare Loot Zones anti-F12 masking, L1 shrink & one-time capture payout verified.');
+}
+
+function testLevel5MissileSiloAndNuclearStrategicStrikes(): void {
+  const state = createInitialGameState(9706);
+  const start = findPlainsLandSpot(state, 330, 250);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  const arena = findInlandPlainsCenter(state, 40, 18);
+  const ax = arena.x;
+  const ay = arena.y;
+  for (let y = ay - 16; y <= ay + 16; y++) {
+    for (let x = ax - 38; x <= ax + 38; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = x < ax ? humanId : enemyId;
+    }
+  }
+  human.knowledge = 5000;
+  human.money = 12000;
+  human.buildingMaterial = 12000;
+  human.industry = 5000;
+  enemy.money = 5000;
+  enemy.buildingMaterial = 10000;
+  enemy.industry = 5000;
+  enemy.manpower = 4000;
+  enemy.allocatedManpower = 0;
+  enemy.energyReserve = enemy.energyReserveMax;
+
+  // Research ARTILLERY_SUPPORT L1..5 and AIR_STRATEGIC L1..5
+  const branches: TechBranch[] = ['ARTILLERY_SUPPORT', 'AIR_STRATEGIC'];
+  for (const br of branches) {
+    for (let lvl = 1 as 1 | 2 | 3 | 4 | 5; lvl <= 5; lvl = (lvl + 1) as 1 | 2 | 3 | 4 | 5) {
+      dispatchAction(state, { type: 'RESEARCH_TECH', playerId: humanId, branch: br, level: lvl });
+    }
+  }
+  assert(
+    human.techLevels.ARTILLERY_SUPPORT === 5 && human.techLevels.AIR_STRATEGIC === 5,
+    'ARTILLERY_SUPPORT L5 & AIR_STRATEGIC L5 must unlock',
+  );
+
+  // Build two completed MISSILE_SILO launchers spaced >= MIN_BUILDING_SPACING
+  const silo1 = placeBuilding(state, humanId, 'MISSILE_SILO', ax - 30, ay - 6, 1)!;
+  const silo2 = placeBuilding(state, humanId, 'MISSILE_SILO', ax - 30, ay + 6, 1)!;
+  assert(silo1 !== null && silo2 !== null, 'MISSILE_SILO must be buildable after ARTILLERY_SUPPORT L5');
+  silo1.stackCount = 1;
+  silo1.underConstructionCount = 0;
+  silo2.stackCount = 1;
+  silo2.underConstructionCount = 0;
+
+  // Enemy targets clustered at two distinct strike zones
+  const target1X = ax + 18;
+  const target1Y = ay - 6;
+  const target2X = ax + 24;
+  const target2Y = ay + 6;
+  const enemyFactory = placeBuilding(state, enemyId, 'FACTORY', target1X, target1Y, 1)!;
+  assert(enemyFactory !== null, 'Enemy FACTORY target placement must succeed');
+  enemyFactory.stackCount = 2;
+  enemyFactory.underConstructionCount = 0;
+  const enemyBunker = placeBuilding(state, enemyId, 'BUNKER', target2X, target2Y, 1)!;
+  assert(enemyBunker !== null, 'Enemy BUNKER target placement must succeed');
+  enemyBunker.stackCount = 3;
+  enemyBunker.underConstructionCount = 0;
+  const enemyInf = spawnUnitStack(state, enemyId, 'INFANTRY', target2X + 1, target2Y, 3, { stance: 'LOCK' });
+
+  const moneyBeforeMissile = human.money;
+  const industryBeforeMissile = human.industry;
+  const mpBeforeMissile = enemy.manpower;
+  const fxBeforeMissile = state.artilleryExplosions.length;
+
+  dispatchAction(state, {
+    type: 'LAUNCH_STRATEGIC_STRIKE',
+    playerId: humanId,
+    strikeKind: 'MISSILE',
+    targetX: target1X + 0.5,
+    targetY: target1Y + 0.5,
+  });
+
+  assert(
+    human.money === moneyBeforeMissile - MISSILE_STRIKE_COST.money &&
+      human.industry === industryBeforeMissile - MISSILE_STRIKE_COST.industry,
+    'MISSILE strike must deduct exact money and industry costs',
+  );
+  assert(
+    enemyFactory.stackCount === 0,
+    `MISSILE direct hit must destroy target FACTORY stacks (remaining=${enemyFactory.stackCount})`,
+  );
+  assert(
+    enemy.manpower < mpBeforeMissile,
+    `MISSILE strike must inflict enemy activeManpower casualties (${mpBeforeMissile} -> ${enemy.manpower})`,
+  );
+  assert(
+    state.artilleryExplosions.length > fxBeforeMissile,
+    'MISSILE strike must emit ArtilleryExplosionFx',
+  );
+
+  // Nuclear strike from second ready silo
+  const moneyBeforeNuke = human.money;
+  const industryBeforeNuke = human.industry;
+  const mpBeforeNuke = enemy.manpower;
+  const fxBeforeNuke = state.artilleryExplosions.length;
+
+  dispatchAction(state, {
+    type: 'LAUNCH_STRATEGIC_STRIKE',
+    playerId: humanId,
+    strikeKind: 'NUCLEAR',
+    targetX: target2X + 0.5,
+    targetY: target2Y + 0.5,
+  });
+
+  assert(
+    human.money === moneyBeforeNuke - NUCLEAR_STRIKE_COST.money &&
+      human.industry === industryBeforeNuke - NUCLEAR_STRIKE_COST.industry,
+    'NUCLEAR strike must deduct exact money and industry costs',
+  );
+  assert(
+    !state.buildings.some((b) => b.id === enemyBunker.id),
+    'NUCLEAR strike must obliterate enemy BUNKER in blast radius',
+  );
+  assert(
+    enemyInf.hp < enemyInf.maxHp || !state.units.some((u) => u.id === enemyInf.id),
+    'NUCLEAR strike must heavily damage or wipe enemy ground units in blast radius',
+  );
+  assert(
+    enemy.manpower < mpBeforeNuke,
+    `NUCLEAR strike must inflict heavy enemy manpower casualties (${mpBeforeNuke} -> ${enemy.manpower})`,
+  );
+  assert(
+    state.artilleryExplosions.length > fxBeforeNuke,
+    'NUCLEAR strike must emit ArtilleryExplosionFx shockwave',
+  );
+  console.log('PASS [zo]: L5 MISSILE_SILO & NUCLEAR strategic strikes, costs, devastation & FX verified.');
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -4186,7 +4821,12 @@ function main(): void {
   testParatroopersAirTransitNoTrailAndSmallBeachhead();
   testNavalCoastalClearanceWithoutSticking();
   testFireMissionIndustryAmmoConsumptionAndZeroBlock();
-  console.log('ALL 36 SIMULATION TESTS PASSED.');
+  testParatroopersInAirImmunityAndAirUnitsIgnoreTrenchSlowdown();
+  testTechTreeResearchPrerequisitesBonusesAndArrowProfiles();
+  testMultiTierFogOfWarIntelTiers();
+  testSecretRareLootZonesDiscoveryAndCapture();
+  testLevel5MissileSiloAndNuclearStrategicStrikes();
+  console.log('ALL 41 SIMULATION TESTS PASSED.');
 }
 
 main();

@@ -5,6 +5,7 @@ import {
   computeDynamicBuildingEnergyConsumption,
   stepEnergyGrid,
 } from './energyGrid';
+import { createInitialTechState, getTechLevel } from './techTree';
 import {
   Building,
   EliminationReason,
@@ -263,6 +264,7 @@ export function createInitialPlayerState(params: {
     betrayalDebuffTicks: 0,
     manpowerSuppressionTicks: 0,
     manpowerSuppressionIntensity: 0,
+    techLevels: createInitialTechState(),
     nextBotDecisionTick: params.nextBotDecisionTick,
     territoryCells: params.territoryCells,
     alive: true,
@@ -500,6 +502,8 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     let energyProd = 0;
     let energyCons = 0;
     let completedPowerPlantUnits = 0;
+    const ecoLevel = getTechLevel(player, 'ECONOMY_DEFENSE');
+    const powerPlantTechMul = ecoLevel >= 2 ? 1.2 : 1.0;
 
     for (const b of ownedBuildings) {
       const units = b.stackCount;
@@ -516,7 +520,12 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
 
       if (b.type === 'POWER_PLANT') {
         completedPowerPlantUnits += units;
-        prod = spec.baseEnergyProduction * (effPct / 100) * curve.outputMultiplier * units;
+        prod =
+          spec.baseEnergyProduction *
+          (effPct / 100) *
+          curve.outputMultiplier *
+          powerPlantTechMul *
+          units;
         energyProd += prod;
       } else if (spec.baseEnergyConsumption > 0) {
         cons = computeDynamicBuildingEnergyConsumption(
@@ -541,8 +550,10 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       dtSec: TICK_DT,
     });
 
-    player.energyReserve = grid.energyReserve;
-    player.energyReserveMax = grid.energyReserveMax;
+    const reserveCapMul = ecoLevel >= 2 ? 1.25 : 1.0;
+    const effectiveReserveMax = Math.round(grid.energyReserveMax * reserveCapMul);
+    player.energyReserve = Math.min(effectiveReserveMax, grid.energyReserve);
+    player.energyReserveMax = effectiveReserveMax;
     player.energyProductionPerSec = energyProd;
     player.energyConsumptionPerSec = energyCons;
     player.energyNetPerSec = grid.energyNetPerSec;
@@ -563,6 +574,9 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     let cityManpowerIncomeBonus = 0;
     let barracksMaxBonus = 0;
     let barracksIncomeBonus = 0;
+    const mineTechMul = (ecoLevel >= 1 ? 1.1 : 1.0) * (ecoLevel >= 2 ? 1.2 : 1.0);
+    const factoryTechMul = ecoLevel >= 4 ? 1.25 : 1.0;
+    const labTechMul = ecoLevel >= 5 ? 1.25 : 1.0;
 
     for (const b of ownedBuildings) {
       const units = b.stackCount;
@@ -583,17 +597,32 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
         b.effectiveOutputPct = Math.round(curve.outputMultiplier * economyPowerScale * 100);
       } else if (b.type === 'MINE') {
         materialIncome +=
-          spec.baseMaterialPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
-        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * energyFactor);
+          spec.baseMaterialPerSec *
+          siteScale *
+          curve.outputMultiplier *
+          energyFactor *
+          mineTechMul *
+          units;
+        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * energyFactor * mineTechMul);
       } else if (b.type === 'POWER_PLANT') {
-        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier);
+        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * powerPlantTechMul);
       } else if (b.type === 'FACTORY') {
+        const overloadRelief = ecoLevel >= 4 && b.effectiveOccupancyPct > 100 ? 1.08 : 1.0;
         industryIncome +=
-          spec.baseIndustryPerSec * siteScale * curve.outputMultiplier * energyFactor * units;
-        b.effectiveOutputPct = Math.round(effPct * curve.outputMultiplier * energyFactor);
+          spec.baseIndustryPerSec *
+          siteScale *
+          curve.outputMultiplier *
+          energyFactor *
+          factoryTechMul *
+          overloadRelief *
+          units;
+        b.effectiveOutputPct = Math.round(
+          effPct * curve.outputMultiplier * energyFactor * factoryTechMul * overloadRelief,
+        );
       } else if (b.type === 'LAB') {
-        knowledgeIncome += spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor * units;
-        b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor);
+        knowledgeIncome +=
+          spec.baseKnowledgePerSec * curve.outputMultiplier * energyFactor * labTechMul * units;
+        b.effectiveOutputPct = Math.round(100 * curve.outputMultiplier * energyFactor * labTechMul);
       } else if (b.type === 'BARRACKS') {
         const barracksEnergyScale = 0.7 + 0.3 * grid.energySupplyRatio;
         barracksMaxBonus += spec.baseMaxManpowerBonus * curve.outputMultiplier * units;
