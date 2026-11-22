@@ -1,3 +1,4 @@
+import { supportsFireMission } from '../engine/navalAir';
 import {
   ALL_UNIT_TYPES,
   ClientRenderState,
@@ -436,16 +437,19 @@ export class UnitPanelController {
           : 'Výsadek (bez letiště)';
     }
 
-    const artillerySelected = selectedUnits.filter((u) => u.type === 'ARTILLERY');
-    this.activeArtilleryIds = artillerySelected.map((u) => u.id);
-    this.fireMissionBtn.classList.toggle('hidden', artillerySelected.length === 0);
-    const anyFiring = artillerySelected.some((u) => u.fireMissionTicksRemaining > 0);
+    const fireSupportSelected = selectedUnits.filter((u) => supportsFireMission(u.type));
+    this.activeArtilleryIds = fireSupportSelected.map((u) => u.id);
+    this.fireMissionBtn.classList.toggle('hidden', fireSupportSelected.length === 0);
+    const anyFiring = fireSupportSelected.some((u) => u.fireMissionTicksRemaining > 0);
     this.cancelFireBtn.classList.toggle('hidden', !anyFiring);
-    if (artillerySelected.length > 0) {
+    if (fireSupportSelected.length > 0) {
+      const onlyBomber = fireSupportSelected.every((u) => u.type === 'BOMBER');
       this.fireMissionBtn.classList.toggle('active', artilleryFireMode);
       this.fireMissionBtn.textContent = artilleryFireMode
-        ? 'Vyberte cíl palby...'
-        : 'Ostřelovat cíl (F)';
+        ? 'Vyberte cíl palby / náletu...'
+        : onlyBomber
+          ? 'Nálet (F)'
+          : 'Ostřelovat cíl (F)';
     }
   }
 }

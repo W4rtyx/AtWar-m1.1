@@ -295,6 +295,7 @@ export class BuildMenuController {
     const ownedCompleted = new Map<BuildingType, number>();
     const ownedQueued = new Map<BuildingType, number>();
     for (const b of state.buildings) {
+      if (b.ownerId !== state.humanPlayerId) continue;
       ownedCompleted.set(b.type, (ownedCompleted.get(b.type) ?? 0) + b.stackCount);
       ownedQueued.set(b.type, (ownedQueued.get(b.type) ?? 0) + b.underConstructionCount);
     }
@@ -518,6 +519,7 @@ export class TerrainBuildMenuController {
 
     const ownedCounts = new Map<BuildingType, number>();
     for (const b of state.buildings) {
+      if (b.ownerId !== state.humanPlayerId) continue;
       ownedCounts.set(b.type, (ownedCounts.get(b.type) ?? 0) + b.stackCount);
     }
 
@@ -772,7 +774,7 @@ export class BuildingContextMenuController {
     }
 
     const building: PublicBuildingInfo | undefined = state.buildings.find(
-      (b) => b.id === this.openBuildingId,
+      (b) => b.id === this.openBuildingId && b.ownerId === state.humanPlayerId,
     );
     if (!building) {
       this.close();

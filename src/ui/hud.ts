@@ -78,6 +78,7 @@ export class HudController {
   private energyPillEl!: HTMLElement;
   private manpowerValueEl!: HTMLElement;
   private manpowerIncomeEl!: HTMLElement;
+  private mpSuppressionEl!: HTMLElement;
   private optimumBadgeEl!: HTMLElement;
   private allocToggleBtn!: HTMLButtonElement;
   private buildingsValueEl!: HTMLElement;
@@ -241,6 +242,7 @@ export class HudController {
             <span class="hud-stat-label">MP (Ready · Assg · Max)</span>
             <span class="hud-stat-value" data-el="manpower-val">0 (0 %) · 0 · 0</span>
             <span class="hud-stat-sub" data-el="manpower-inc">+0.0/s</span>
+            <span class="hud-betrayal-pill hidden" data-el="mp-suppression-badge">Potlačeno −0 %</span>
             <span class="hud-optimum-badge" data-el="optimum-badge">Opt 100 %</span>
             <button type="button" class="hud-btn hud-alloc-toggle-btn" data-action="toggle-alloc">
               Alokace
@@ -397,6 +399,7 @@ export class HudController {
     this.energyPillEl = this.query('[data-el="energy-pill"]');
     this.manpowerValueEl = this.query('[data-el="manpower-val"]');
     this.manpowerIncomeEl = this.query('[data-el="manpower-inc"]');
+    this.mpSuppressionEl = this.query('[data-el="mp-suppression-badge"]');
     this.optimumBadgeEl = this.query('[data-el="optimum-badge"]');
     this.allocToggleBtn = this.query<HTMLButtonElement>('[data-action="toggle-alloc"]');
     this.buildingsValueEl = this.query('[data-el="buildings-val"]');
@@ -657,6 +660,7 @@ export class HudController {
     let completedBuildings = 0;
     let queuedBuildings = 0;
     for (const b of state.buildings) {
+      if (b.ownerId !== state.humanPlayerId) continue;
       completedBuildings += b.stackCount;
       queuedBuildings += b.underConstructionCount;
     }
@@ -702,6 +706,11 @@ export class HudController {
 
     this.manpowerValueEl.textContent = `${readyManpower} (${readyPct} %) · ${assignedManpower} · ${maxManpower}`;
     this.manpowerIncomeEl.textContent = `+${income.toFixed(1)}/s`;
+    const suppressionPct = Math.round((human?.manpowerSuppressionIntensity ?? 0) * 100);
+    this.mpSuppressionEl.classList.toggle('hidden', suppressionPct < 1);
+    if (suppressionPct >= 1) {
+      this.mpSuppressionEl.textContent = `Potlačeno −${suppressionPct} %`;
+    }
 
     const optPct = Math.round(efficiency * 100);
     this.optimumBadgeEl.textContent = `Opt ${optPct} %`;

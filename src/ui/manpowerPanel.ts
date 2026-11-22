@@ -350,9 +350,12 @@ export class ManpowerPanelController {
 
     let totalCompleted = 0;
     let totalQueued = 0;
+    let ownedNodes = 0;
     const completedCounts = new Map<BuildingType, number>();
     const queuedCounts = new Map<BuildingType, number>();
     for (const b of state.buildings) {
+      if (b.ownerId !== state.humanPlayerId) continue;
+      ownedNodes++;
       totalCompleted += b.stackCount;
       totalQueued += b.underConstructionCount;
       completedCounts.set(b.type, (completedCounts.get(b.type) ?? 0) + b.stackCount);
@@ -365,8 +368,8 @@ export class ManpowerPanelController {
     this.alwaysMaxEl.textContent = `${maxMp}`;
     const queuedPart = totalQueued > 0 ? ` (+${totalQueued} stav.)` : '';
     const nodeWord =
-      state.buildings.length === 1 ? 'uzel' : state.buildings.length < 5 ? 'uzly' : 'uzlů';
-    this.alwaysBuildingsEl.textContent = `Budovy: ${totalCompleted}${queuedPart} (${state.buildings.length} ${nodeWord})`;
+      ownedNodes === 1 ? 'uzel' : ownedNodes < 5 ? 'uzly' : 'uzlů';
+    this.alwaysBuildingsEl.textContent = `Budovy: ${totalCompleted}${queuedPart} (${ownedNodes} ${nodeWord})`;
 
     if (this.collapsed) {
       return;
@@ -387,7 +390,7 @@ export class ManpowerPanelController {
 
     const selectedBuilding: PublicBuildingInfo | undefined =
       selectedBuildingId !== null
-        ? state.buildings.find((b) => b.id === selectedBuildingId)
+        ? state.buildings.find((b) => b.id === selectedBuildingId && b.ownerId === state.humanPlayerId)
         : undefined;
 
     if (!selectedBuilding) {

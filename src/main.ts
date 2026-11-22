@@ -4,6 +4,7 @@ import {
   buildSmoothAttackWaypoints,
   computePolylineLength,
 } from './engine/frontExpansion';
+import { isNavalUnitType, supportsFireMission } from './engine/navalAir';
 import { createEngineController, planSimulationTicks } from './engine/simulation';
 import {
   ALL_BUILDING_TYPES,
@@ -493,6 +494,7 @@ function bootstrap(): void {
     let best: PublicBuildingInfo | null = null;
     let bestDist = 12;
     for (const building of state.buildings) {
+      if (building.ownerId !== state.humanPlayerId) continue;
       const sc = camera.worldToScreen(building.x + 0.5, building.y + 0.5);
       const d = Math.hypot(screenX - sc.x, screenY - sc.y);
       if (d <= bestDist) {
@@ -763,12 +765,23 @@ function bootstrap(): void {
     if (findHumanUnitAtScreen(state, e.clientX, e.clientY) !== null) return;
     if (findHumanBuildingAtScreen(state, e.clientX, e.clientY) !== null) return;
     const worldPt = camera.screenToWorld(e.clientX, e.clientY);
+    const ix = Math.max(0, Math.min(state.width - 1, Math.floor(worldPt.x)));
+    const iy = Math.max(0, Math.min(state.height - 1, Math.floor(worldPt.y)));
+    const clickedOwner = state.owners[iy * state.width + ix];
+    const explicitTargetOwnerId =
+      clickedOwner === WILDERNESS_OWNER
+        ? WILDERNESS_OWNER
+        : clickedOwner >= 0 && clickedOwner !== state.humanPlayerId
+          ? clickedOwner
+          : undefined;
+
     engine.dispatch({
       type: 'BORDER_SURGE_PUSH',
       playerId: state.humanPlayerId,
       x: worldPt.x,
       y: worldPt.y,
       manpowerPercent: Math.max(manpowerPercent, 65),
+      targetOwnerId: explicitTargetOwnerId,
     });
     clearFrontSelection();
   });
@@ -868,13 +881,16 @@ function bootstrap(): void {
         if (selectedUnitIds.length > 0) {
           const ix = Math.floor(worldPt.x);
           const iy = Math.floor(worldPt.y);
-          if (
-            ix >= 0 &&
-            ix < state.width &&
-            iy >= 0 &&
-            iy < state.height &&
-            state.terrain[iy * state.width + ix] !== TerrainType.WATER
-          ) {
+          const selSet = new Set(selectedUnitIds);
+          const selectedUnits = state.units.filter(
+            (u) => u.ownerId === state.humanPlayerId && selSet.has(u.id),
+          );
+          const inBounds = ix >= 0 && ix < state.width && iy >= 0 && iy < state.height;
+          const isWater = inBounds && state.terrain[iy * state.width + ix] === TerrainType.WATER;
+          const canMoveToWater = selectedUnits.some(
+            (u) => u.domain === 'NAVAL' || u.domain === 'AIR' || isNavalUnitType(u.type),
+          );
+          if (inBounds && (!isWater || canMoveToWater)) {
             engine.dispatch({
               type: 'MOVE_UNITS',
               playerId: state.humanPlayerId,
@@ -1161,10 +1177,13 @@ function bootstrap(): void {
     if (e.code === 'KeyF' && selectedUnitIds.length > 0) {
       const state = engine.getRenderState();
       const selSet = new Set(selectedUnitIds);
-      const hasArty = state.units.some(
-        (u) => u.ownerId === state.humanPlayerId && selSet.has(u.id) && u.type === 'ARTILLERY',
+      const hasFireSupport = state.units.some(
+        (u) =>
+          u.ownerId === state.humanPlayerId &&
+          selSet.has(u.id) &&
+          supportsFireMission(u.type),
       );
-      if (hasArty) {
+      if (hasFireSupport) {
         artilleryFireMode = !artilleryFireMode;
         paradropUnitId = null;
         selectedBuildType = null;
@@ -1389,13 +1408,13 @@ function bootstrap(): void {
     }
     if (artilleryFireMode) {
       const selSet = new Set(selectedUnitIds);
-      const hasSelectedArty = finalState.units.some(
+      const hasSelectedFireSupport = finalState.units.some(
         (u) =>
           u.ownerId === finalState.humanPlayerId &&
           selSet.has(u.id) &&
-          u.type === 'ARTILLERY',
+          supportsFireMission(u.type),
       );
-      if (!hasSelectedArty) {
+      if (!hasSelectedFireSupport) {
         artilleryFireMode = false;
       }
     }

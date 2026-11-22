@@ -580,6 +580,7 @@ export function stepBots(state: GameState): void {
       origin: waypoints[0],
       waypoints,
       frontierArc: 0,
+      targetOwnerId: chosen.targetOwnerId,
       targetOwnerIds: chosen.targetOwnerId >= 0 ? [chosen.targetOwnerId] : [],
       wildernessOnly: chosen.targetOwnerId < 0,
       currentSegmentIndex: 0,

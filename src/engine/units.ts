@@ -1,12 +1,26 @@
 import { getAirDefenseCoverageAt, evaluateCellDefense } from './defenses';
 import { syncPlayerActiveManpower, updateAllPlayersEconomy } from './economy';
 import {
+  disembarkTransportShip,
+  findAirfieldCoveringPoint,
+  findNearbyOwnedPort,
+  findNearestCoastalLandCell,
+  findNearestWaterCell,
+  findWaterPath,
+  hasDirectWaterLine,
+  isAirUnitType,
+  isNavalUnitType,
+  supportsFireMission,
+} from './navalAir';
+import {
+  ALL_UNIT_TYPES,
   AttackOrder,
   Building,
   BuildingType,
   DiplomaticRelation,
   FrontPushOrder,
   GameState,
+  GroundUnitType,
   MAX_UNIT_STACK,
   Point,
   PublicUnitInfo,
@@ -19,10 +33,14 @@ import {
   WILDERNESS_OWNER,
   getRelationKey,
 } from './types';
+import {
+  BORDER_VISION_RADIUS as VIS_BORDER_RADIUS,
+  isUnitVisibleToPlayer as isUnitVisibleInternal,
+} from './visibility';
 
 export const UNIT_MERGE_RADIUS = 14;
 export const AUTO_MERGE_RADIUS = 4.2;
-export const BORDER_VISION_RADIUS = 16;
+export const BORDER_VISION_RADIUS = VIS_BORDER_RADIUS;
 export const AIRFIELD_PARADROP_RANGE = 120;
 export const PARADROP_COOLDOWN_TICKS = 100;
 export const PARADROP_VULNERABILITY_TICKS = 50;
@@ -32,10 +50,11 @@ export const BASE_REPAIR_RATE_PER_SEC = 0.068;
 export const UNIT_LOOT_RATIO = 0.25;
 export const MAX_UNIT_QUEUE_PER_BUILDING = 20;
 
-/** Authoritative specification catalog for the 4 specialized ground unit types (max 2-3 cost items + MP). */
+/** Authoritative specification catalog for land, naval, and air unit types (max 2-3 cost items + MP). */
 export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
   INFANTRY: {
     type: 'INFANTRY',
+    domain: 'LAND',
     nameCs: 'Pěší divize',
     shortCode: 'PĚCH',
     descriptionCs:
@@ -54,6 +73,7 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
   },
   TANK: {
     type: 'TANK',
+    domain: 'LAND',
     nameCs: 'Obrněný svaz',
     shortCode: 'TANK',
     descriptionCs:
@@ -72,6 +92,7 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
   },
   ARTILLERY: {
     type: 'ARTILLERY',
+    domain: 'LAND',
     nameCs: 'Dělostřelectvo',
     shortCode: 'DĚLO',
     descriptionCs:
@@ -90,6 +111,7 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
   },
   PARATROOPERS: {
     type: 'PARATROOPERS',
+    domain: 'LAND',
     nameCs: 'Výsadkáři',
     shortCode: 'VÝS',
     descriptionCs:
@@ -105,6 +127,145 @@ export const UNIT_SPECS: Readonly<Record<UnitType, UnitSpec>> = {
     attackRange: 8,
     operationRadius: 36,
     visionRadius: 26,
+  },
+  TRANSPORT_SHIP: {
+    type: 'TRANSPORT_SHIP',
+    domain: 'NAVAL',
+    nameCs: 'Výsadková loď',
+    shortCode: 'TRAN',
+    descriptionCs:
+      'Přepravní plavidlo z Přístavu. Přepravuje pěchotu/síly přes moře na ostrovy a nepřátelské pobřeží; slabý pancíř.',
+    producerBuilding: 'PORT',
+    cost: { money: 150, buildingMaterial: 45, industry: 0, manpower: 40 },
+    productionTicks: 28,
+    speedPlains: 5.2,
+    speedMountains: 5.2,
+    hpPerUnit: 70,
+    attack: 0,
+    defense: 6,
+    attackRange: 0,
+    operationRadius: 24,
+    visionRadius: 28,
+  },
+  CRUISER: {
+    type: 'CRUISER',
+    domain: 'NAVAL',
+    nameCs: 'Křižník',
+    shortCode: 'KŘIŽ',
+    descriptionCs:
+      'Hlavní hladinová válečná loď z Přístavu. Ničí nepřátelské lodě a podporuje pobřežní ostřelování (klávesa F).',
+    producerBuilding: 'PORT',
+    cost: { money: 280, buildingMaterial: 0, industry: 130, manpower: 45 },
+    productionTicks: 50,
+    speedPlains: 5.8,
+    speedMountains: 5.8,
+    hpPerUnit: 220,
+    attack: 36,
+    defense: 24,
+    attackRange: 30,
+    operationRadius: 56,
+    visionRadius: 45,
+  },
+  SUBMARINE: {
+    type: 'SUBMARINE',
+    domain: 'NAVAL',
+    nameCs: 'Ponorka',
+    shortCode: 'PON',
+    descriptionCs:
+      'Skrytá (stealth) útočná ponorka z Přístavu. Neviditelná bez radaru či průzkumu; smrtící přepady proti lodím a transportům.',
+    producerBuilding: 'PORT',
+    cost: { money: 250, buildingMaterial: 0, industry: 120, manpower: 30 },
+    productionTicks: 46,
+    speedPlains: 5.4,
+    speedMountains: 5.4,
+    hpPerUnit: 135,
+    attack: 40,
+    defense: 12,
+    attackRange: 14,
+    operationRadius: 48,
+    visionRadius: 34,
+    isStealth: true,
+  },
+  RADAR_SHIP: {
+    type: 'RADAR_SHIP',
+    domain: 'NAVAL',
+    nameCs: 'Radarová loď',
+    shortCode: 'RLOĎ',
+    descriptionCs:
+      'Průzkumné a protiponorkové plavidlo z Přístavu. Odhaluje ponorky, pobřežní PVO a zázemí na velkou vzdálenost (75).',
+    producerBuilding: 'PORT',
+    cost: { money: 220, buildingMaterial: 0, industry: 105, manpower: 35 },
+    productionTicks: 38,
+    speedPlains: 6.2,
+    speedMountains: 6.2,
+    hpPerUnit: 140,
+    attack: 12,
+    defense: 14,
+    attackRange: 16,
+    operationRadius: 52,
+    visionRadius: 75,
+    detectsStealth: true,
+  },
+  FIGHTER: {
+    type: 'FIGHTER',
+    domain: 'AIR',
+    nameCs: 'Stíhačka',
+    shortCode: 'STÍH',
+    descriptionCs:
+      'Vzdušná nadvláda z Letiště. Hlídkuje v doletu letiště a sestřeluje nepřátelské bombardéry, průzkumníky i výsadky.',
+    producerBuilding: 'AIRFIELD',
+    cost: { money: 230, buildingMaterial: 0, industry: 110, manpower: 25 },
+    productionTicks: 36,
+    speedPlains: 11.5,
+    speedMountains: 11.5,
+    hpPerUnit: 110,
+    attack: 30,
+    defense: 16,
+    attackRange: 22,
+    operationRadius: 54,
+    visionRadius: 42,
+    airRange: 130,
+  },
+  BOMBER: {
+    type: 'BOMBER',
+    domain: 'AIR',
+    nameCs: 'Bombardér',
+    shortCode: 'BOMB',
+    descriptionCs:
+      'Taktický bombardér z Letiště. Cílený nálet (klávesa F) ničí opevnění, budovy, lodě i zálohy Manpoweru v dosahu letiště.',
+    producerBuilding: 'AIRFIELD',
+    cost: { money: 290, buildingMaterial: 0, industry: 145, manpower: 35 },
+    productionTicks: 48,
+    speedPlains: 8.8,
+    speedMountains: 8.8,
+    hpPerUnit: 125,
+    attack: 44,
+    defense: 11,
+    attackRange: 125,
+    operationRadius: 52,
+    visionRadius: 34,
+    airRange: 125,
+  },
+  RECON_PLANE: {
+    type: 'RECON_PLANE',
+    domain: 'AIR',
+    nameCs: 'Průzkumný letoun',
+    shortCode: 'PRŮZ',
+    descriptionCs:
+      'Rychlý průzkumník z Letiště. Odhaluje hluboký Fog of War (68) včetně nepřátelských budov, PVO i skrytých ponorek.',
+    producerBuilding: 'AIRFIELD',
+    cost: { money: 170, buildingMaterial: 0, industry: 80, manpower: 20 },
+    productionTicks: 26,
+    speedPlains: 12.5,
+    speedMountains: 12.5,
+    hpPerUnit: 85,
+    attack: 4,
+    defense: 9,
+    attackRange: 0,
+    operationRadius: 48,
+    visionRadius: 68,
+    detectsStealth: true,
+    airRange: 145,
   },
 };
 
@@ -128,7 +289,7 @@ export function canBuildingProduceUnit(
 
 export function getProducibleUnitsForBuilding(buildingType: BuildingType): UnitType[] {
   const result: UnitType[] = [];
-  for (const unitType of ['INFANTRY', 'TANK', 'ARTILLERY', 'PARATROOPERS'] as const) {
+  for (const unitType of ALL_UNIT_TYPES) {
     if (UNIT_SPECS[unitType].producerBuilding === buildingType) {
       result.push(unitType);
     }
@@ -193,6 +354,8 @@ export interface SpawnUnitOptions {
   readonly stance?: UnitStance;
   readonly canParadrop?: boolean;
   readonly dropVulnerabilityTicks?: number;
+  readonly cargoUnitType?: GroundUnitType | null;
+  readonly homeAirfieldId?: number | null;
 }
 
 export function spawnUnitStack(
@@ -207,12 +370,23 @@ export function spawnUnitStack(
   const spec = UNIT_SPECS[type];
   const clampedCount = Math.max(1, Math.min(MAX_UNIT_STACK, Math.round(count)));
   const maxHp = clampedCount * spec.hpPerUnit;
+  let spawnX = Math.max(0.5, Math.min(state.width - 0.5, x));
+  let spawnY = Math.max(0.5, Math.min(state.height - 0.5, y));
+
+  if (isNavalUnitType(type)) {
+    const waterPt = findNearestWaterCell(state, spawnX, spawnY, 5);
+    if (waterPt) {
+      spawnX = waterPt.x;
+      spawnY = waterPt.y;
+    }
+  }
+
   const unit: Unit = {
     id: state.nextUnitId++,
     ownerId,
     type,
-    x: Math.max(0.5, Math.min(state.width - 0.5, x)),
-    y: Math.max(0.5, Math.min(state.height - 0.5, y)),
+    x: spawnX,
+    y: spawnY,
     count: clampedCount,
     hp: maxHp,
     maxHp,
@@ -237,6 +411,8 @@ export function spawnUnitStack(
     lastCombatTargetX: null,
     lastCombatTargetY: null,
     breakoutAccum: 0,
+    cargoUnitType: opts?.cargoUnitType ?? (type === 'TRANSPORT_SHIP' ? 'INFANTRY' : null),
+    homeAirfieldId: opts?.homeAirfieldId ?? null,
   };
   state.units.push(unit);
   state.stateVersion++;
@@ -511,6 +687,9 @@ export function stepUnitProduction(state: GameState): void {
         building.x + 0.5,
         building.y + 0.5,
         1,
+        {
+          homeAirfieldId: building.type === 'AIRFIELD' ? building.id : null,
+        },
       );
       anySpawned = true;
     }
@@ -882,35 +1061,92 @@ export function issueUnitMoveOrder(
   const clampedY = Math.max(0.5, Math.min(state.height - 0.5, targetY));
   const ix = Math.floor(clampedX);
   const iy = Math.floor(clampedY);
-  if (state.terrain[iy * state.width + ix] === TerrainType.WATER) {
-    pushHumanNotice(
-      state,
-      playerId,
-      'Na vodní plochu nelze poslat pozemní jednotku — přes vodu je potřeba přístav/loď.',
-    );
-    return 0;
-  }
-
+  const targetIsWater = state.terrain[iy * state.width + ix] === TerrainType.WATER;
   const targetOwner = state.owners[iy * state.width + ix];
-  if (
+  const isNeutralForeignLand =
+    !targetIsWater &&
     targetOwner >= 0 &&
     targetOwner !== playerId &&
-    getUnitRelation(state, playerId, targetOwner) === 'NEUTRAL'
-  ) {
-    pushHumanNotice(
-      state,
-      playerId,
-      'Cíl leží v neutrálním státě (nejdřív vyhlaste válku).',
-    );
-    return 0;
-  }
+    getUnitRelation(state, playerId, targetOwner) === 'NEUTRAL';
 
   const idSet = new Set(unitIds);
   let updated = 0;
-  let firstFailedUnit: Unit | null = null;
+  let firstFailureMsg: string | null = null;
+
   for (const unit of state.units) {
     if (unit.ownerId !== playerId || unit.count <= 0 || !idSet.has(unit.id)) continue;
-    const path = findLandPath(
+    const spec = UNIT_SPECS[unit.type];
+
+    // 1. Air units: move freely over land & water within AIRFIELD operational range
+    if (isAirUnitType(unit.type)) {
+      const airRange = spec.airRange ?? 120;
+      const airfield = findAirfieldCoveringPoint(state, playerId, clampedX, clampedY, airRange);
+      if (!airfield) {
+        if (!firstFailureMsg) {
+          firstFailureMsg = 'Cíl leží mimo operační dolet vašich letišť.';
+        }
+        continue;
+      }
+      unit.homeAirfieldId = airfield.id;
+      unit.waypoints = [{ x: clampedX, y: clampedY }];
+      unit.targetX = clampedX;
+      unit.targetY = clampedY;
+      unit.manualOrder = true;
+      unit.attachedOrderId = null;
+      unit.attachedOrderKind = null;
+      unit.mergeTargetUnitId = null;
+      unit.fireMissionX = null;
+      unit.fireMissionY = null;
+      unit.fireMissionTicksRemaining = 0;
+      updated++;
+      continue;
+    }
+
+    // 2. Naval units: navigate water cells via 3x3 A* pathfinding (or coastal landing approach)
+    if (isNavalUnitType(unit.type)) {
+      if (isNeutralForeignLand && unit.type === 'TRANSPORT_SHIP') {
+        if (!firstFailureMsg) {
+          firstFailureMsg = 'Nelze se vylodit v neutrálním státě (nejdřív vyhlaste válku).';
+        }
+        continue;
+      }
+      const waterPath = findWaterPath(state, unit.x, unit.y, clampedX, clampedY);
+      if (!waterPath || waterPath.length === 0) {
+        if (!firstFailureMsg) {
+          firstFailureMsg = 'Námořní trasa k cíli přes vodu nebyla nalezena.';
+        }
+        continue;
+      }
+      unit.waypoints = waterPath;
+      unit.targetX = clampedX;
+      unit.targetY = clampedY;
+      unit.manualOrder = true;
+      unit.attachedOrderId = null;
+      unit.attachedOrderKind = null;
+      unit.mergeTargetUnitId = null;
+      unit.fireMissionX = null;
+      unit.fireMissionY = null;
+      unit.fireMissionTicksRemaining = 0;
+      updated++;
+      continue;
+    }
+
+    // 3. Ground units: land A* pathfinding, with Port amphibious embarkation across sea
+    if (targetIsWater) {
+      if (!firstFailureMsg) {
+        firstFailureMsg =
+          'Na vodní plochu nelze poslat pozemní jednotku — přes vodu je potřeba přístav/loď.';
+      }
+      continue;
+    }
+    if (isNeutralForeignLand) {
+      if (!firstFailureMsg) {
+        firstFailureMsg = 'Cíl leží v neutrálním státě (nejdřív vyhlaste válku).';
+      }
+      continue;
+    }
+
+    const landPath = findLandPath(
       state,
       playerId,
       unit.type,
@@ -920,43 +1156,68 @@ export function issueUnitMoveOrder(
       clampedY,
       false,
     );
-    if (!path || path.length === 0) {
-      if (!firstFailedUnit) firstFailedUnit = unit;
+    if (landPath && landPath.length > 0) {
+      unit.waypoints = landPath;
+      unit.targetX = clampedX;
+      unit.targetY = clampedY;
+      unit.manualOrder = true;
+      unit.attachedOrderId = null;
+      unit.attachedOrderKind = null;
+      unit.mergeTargetUnitId = null;
+      unit.fireMissionX = null;
+      unit.fireMissionY = null;
+      unit.fireMissionTicksRemaining = 0;
+      updated++;
       continue;
     }
 
-    unit.waypoints = path;
-    unit.targetX = clampedX;
-    unit.targetY = clampedY;
-    unit.manualOrder = true;
-    unit.attachedOrderId = null;
-    unit.attachedOrderKind = null;
-    unit.mergeTargetUnitId = null;
-    unit.fireMissionX = null;
-    unit.fireMissionY = null;
-    unit.fireMissionTicksRemaining = 0;
-    updated++;
-  }
-
-  if (updated === 0 && firstFailedUnit) {
-    const waterConnected =
-      findLandPath(
+    // Check if an owned nearby PORT can embark this ground unit across water to the island/coast
+    const nearbyPort = findNearbyOwnedPort(state, playerId, unit.x, unit.y, 16);
+    if (nearbyPort) {
+      const seaRoute = findWaterPath(
         state,
-        playerId,
-        firstFailedUnit.type,
-        firstFailedUnit.x,
-        firstFailedUnit.y,
+        nearbyPort.waterPoint.x,
+        nearbyPort.waterPoint.y,
         clampedX,
         clampedY,
-        true,
-      ) !== null;
-    pushHumanNotice(
-      state,
-      playerId,
-      waterConnected
+      );
+      if (seaRoute && seaRoute.length > 0) {
+        const cargoType = unit.type as GroundUnitType;
+        const hpFrac = Math.max(0.25, Math.min(1, unit.hp / Math.max(1, unit.maxHp)));
+        const shipMaxHp = unit.count * UNIT_SPECS.TRANSPORT_SHIP.hpPerUnit;
+        unit.type = 'TRANSPORT_SHIP';
+        unit.cargoUnitType = cargoType;
+        unit.x = nearbyPort.waterPoint.x;
+        unit.y = nearbyPort.waterPoint.y;
+        unit.maxHp = shipMaxHp;
+        unit.hp = Math.max(1, shipMaxHp * hpFrac);
+        unit.waypoints = seaRoute;
+        unit.targetX = clampedX;
+        unit.targetY = clampedY;
+        unit.manualOrder = true;
+        unit.attachedOrderId = null;
+        unit.attachedOrderKind = null;
+        unit.mergeTargetUnitId = null;
+        unit.fireMissionX = null;
+        unit.fireMissionY = null;
+        unit.fireMissionTicksRemaining = 0;
+        unit.isEncircled = false;
+        updated++;
+        continue;
+      }
+    }
+
+    if (!firstFailureMsg) {
+      const waterConnected =
+        findLandPath(state, playerId, unit.type, unit.x, unit.y, clampedX, clampedY, true) !== null;
+      firstFailureMsg = waterConnected
         ? 'Soušová cesta je zablokována neutrálním státem.'
-        : 'Přes vodu nelze projít pěšky — k přesunu na ostrov je potřeba přístav/loď.',
-    );
+        : 'Přes vodu nelze projít pěšky — k přesunu na ostrov je potřeba přístav/loď.';
+    }
+  }
+
+  if (updated === 0 && firstFailureMsg) {
+    pushHumanNotice(state, playerId, firstFailureMsg);
     return 0;
   }
 
@@ -995,28 +1256,39 @@ export function issueArtilleryFireMission(
   }
 
   const idSet = new Set(unitIds);
-  const maxRange = UNIT_SPECS.ARTILLERY.attackRange;
   let updated = 0;
 
   for (const unit of state.units) {
     if (
       unit.ownerId !== playerId ||
-      unit.type !== 'ARTILLERY' ||
+      !supportsFireMission(unit.type) ||
       unit.count <= 0 ||
       !idSet.has(unit.id)
     ) {
       continue;
     }
-    if (Math.hypot(clampedX - unit.x, clampedY - unit.y) > maxRange) {
+    const spec = UNIT_SPECS[unit.type];
+    if (unit.type === 'BOMBER') {
+      const airRange = spec.airRange ?? 125;
+      const airfield = findAirfieldCoveringPoint(state, playerId, clampedX, clampedY, airRange);
+      if (!airfield && Math.hypot(clampedX - unit.x, clampedY - unit.y) > spec.attackRange) {
+        continue;
+      }
+      unit.waypoints = [{ x: clampedX, y: clampedY }];
+      unit.targetX = clampedX;
+      unit.targetY = clampedY;
+    } else if (Math.hypot(clampedX - unit.x, clampedY - unit.y) > spec.attackRange) {
       continue;
     }
 
     unit.fireMissionX = clampedX;
     unit.fireMissionY = clampedY;
     unit.fireMissionTicksRemaining = ARTILLERY_FIRE_MISSION_TICKS;
-    unit.targetX = null;
-    unit.targetY = null;
-    unit.waypoints = [];
+    if (unit.type !== 'BOMBER') {
+      unit.targetX = null;
+      unit.targetY = null;
+      unit.waypoints = [];
+    }
     unit.manualOrder = false;
     unit.attachedOrderId = null;
     unit.attachedOrderKind = null;
@@ -1025,7 +1297,7 @@ export function issueArtilleryFireMission(
   }
 
   if (updated === 0) {
-    pushHumanNotice(state, playerId, 'Cíl je mimo dostřel vybraného dělostřelectva.');
+    pushHumanNotice(state, playerId, 'Cíl je mimo dostřel / dolet vybrané jednotky.');
     return 0;
   }
 
@@ -1414,10 +1686,15 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       unit.combatCooldownTicks--;
     }
 
+    const naval = isNavalUnitType(unit.type);
+    const airborne = isAirUnitType(unit.type);
+
     const curIx = Math.max(0, Math.min(width - 1, Math.floor(unit.x)));
     const curIy = Math.max(0, Math.min(height - 1, Math.floor(unit.y)));
     const cellOwner = owners[curIy * width + curIx];
     const onEnemy =
+      !naval &&
+      !airborne &&
       cellOwner >= 0 &&
       cellOwner !== unit.ownerId &&
       getUnitRelation(state, unit.ownerId, cellOwner) !== 'ALLIED';
@@ -1437,71 +1714,106 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
     }
 
     if (unit.fireMissionTicksRemaining > 0) {
-      // Active artillery fire mission holds battery in place until barrage completes or cancels
-      unit.targetX = null;
-      unit.targetY = null;
-      unit.waypoints = [];
-    } else if (unit.stance === 'RANGE' && !unit.manualOrder && !unit.isEncircled) {
-      // RANGE auto-attach ONLY when friendly offensive order or WAR enemy is inside operationRadius
-      let frontPt = getAttachedOrderFrontPoint(state, unit);
-      if (
-        unit.attachedOrderId !== null &&
-        frontPt !== null &&
-        Math.hypot(frontPt.x - unit.x, frontPt.y - unit.y) > unit.operationRadius * 1.35
-      ) {
-        frontPt = null;
-      }
-
-      if (unit.attachedOrderId !== null && frontPt === null) {
-        unit.attachedOrderId = null;
-        unit.attachedOrderKind = null;
+      if (unit.type === 'BOMBER' && unit.fireMissionX !== null && unit.fireMissionY !== null) {
+        // Bomber flies toward strike target until inside bombing release circle
+        const distToTarget = Math.hypot(unit.fireMissionX - unit.x, unit.fireMissionY - unit.y);
+        if (distToTarget > 8) {
+          unit.targetX = unit.fireMissionX;
+          unit.targetY = unit.fireMissionY;
+          unit.waypoints = [{ x: unit.fireMissionX, y: unit.fireMissionY }];
+        } else {
+          unit.targetX = null;
+          unit.targetY = null;
+          unit.waypoints = [];
+        }
+      } else {
+        // Active artillery/cruiser fire mission holds battery in place until barrage completes or cancels
         unit.targetX = null;
         unit.targetY = null;
         unit.waypoints = [];
-      } else if (unit.attachedOrderId === null) {
-        const found = findOrderFrontForAttachment(state, unit);
-        if (found) {
-          unit.attachedOrderId = found.orderId;
-          unit.attachedOrderKind = found.kind;
-          frontPt = found.frontPt;
-        }
       }
+    } else if (unit.stance === 'RANGE' && !unit.manualOrder && !unit.isEncircled) {
+      if (airborne || naval) {
+        // Naval & air units engage enemies in operational radius when on RANGE without active waypoint
+        if (unit.mergeTargetUnitId === null && unit.type !== 'TRANSPORT_SHIP' && unit.type !== 'RECON_PLANE') {
+          const enemyInRange = findEnemyUnitInOperationRadius(state, unit);
+          if (enemyInRange) {
+            if (airborne) {
+              unit.targetX = enemyInRange.x;
+              unit.targetY = enemyInRange.y;
+              unit.waypoints = [{ x: enemyInRange.x, y: enemyInRange.y }];
+            } else if (terrain[Math.floor(enemyInRange.y) * width + Math.floor(enemyInRange.x)] === TerrainType.WATER) {
+              const wPath = findWaterPath(state, unit.x, unit.y, enemyInRange.x, enemyInRange.y);
+              if (wPath) {
+                unit.targetX = enemyInRange.x;
+                unit.targetY = enemyInRange.y;
+                unit.waypoints = wPath;
+              }
+            }
+          }
+        }
+      } else {
+        // RANGE auto-attach ONLY when friendly offensive order or WAR enemy is inside operationRadius
+        let frontPt = getAttachedOrderFrontPoint(state, unit);
+        if (
+          unit.attachedOrderId !== null &&
+          frontPt !== null &&
+          Math.hypot(frontPt.x - unit.x, frontPt.y - unit.y) > unit.operationRadius * 1.35
+        ) {
+          frontPt = null;
+        }
 
-      if (frontPt !== null) {
-        if (unit.type === 'ARTILLERY') {
-          const dx = frontPt.x - unit.x;
-          const dy = frontPt.y - unit.y;
-          const dist = Math.hypot(dx, dy);
-          const standoff = spec.attackRange * 0.68;
-          if (dist > standoff + 1.5 && dist > 1e-4) {
-            const sxGoal = frontPt.x - (dx / dist) * standoff;
-            const syGoal = frontPt.y - (dy / dist) * standoff;
-            if (!assignUnitFollowTarget(state, unit, sxGoal, syGoal)) {
+        if (unit.attachedOrderId !== null && frontPt === null) {
+          unit.attachedOrderId = null;
+          unit.attachedOrderKind = null;
+          unit.targetX = null;
+          unit.targetY = null;
+          unit.waypoints = [];
+        } else if (unit.attachedOrderId === null) {
+          const found = findOrderFrontForAttachment(state, unit);
+          if (found) {
+            unit.attachedOrderId = found.orderId;
+            unit.attachedOrderKind = found.kind;
+            frontPt = found.frontPt;
+          }
+        }
+
+        if (frontPt !== null) {
+          if (unit.type === 'ARTILLERY') {
+            const dx = frontPt.x - unit.x;
+            const dy = frontPt.y - unit.y;
+            const dist = Math.hypot(dx, dy);
+            const standoff = spec.attackRange * 0.68;
+            if (dist > standoff + 1.5 && dist > 1e-4) {
+              const sxGoal = frontPt.x - (dx / dist) * standoff;
+              const syGoal = frontPt.y - (dy / dist) * standoff;
+              if (!assignUnitFollowTarget(state, unit, sxGoal, syGoal)) {
+                unit.targetX = null;
+                unit.targetY = null;
+                unit.waypoints = [];
+                unit.attachedOrderId = null;
+                unit.attachedOrderKind = null;
+              }
+            } else {
               unit.targetX = null;
               unit.targetY = null;
               unit.waypoints = [];
-              unit.attachedOrderId = null;
-              unit.attachedOrderKind = null;
             }
-          } else {
+          } else if (!assignUnitFollowTarget(state, unit, frontPt.x, frontPt.y)) {
+            unit.targetX = null;
+            unit.targetY = null;
+            unit.waypoints = [];
+            unit.attachedOrderId = null;
+            unit.attachedOrderKind = null;
+          }
+        } else if (unit.mergeTargetUnitId === null) {
+          const enemyInRange =
+            unit.type !== 'ARTILLERY' ? findEnemyUnitInOperationRadius(state, unit) : null;
+          if (!enemyInRange || !assignUnitFollowTarget(state, unit, enemyInRange.x, enemyInRange.y)) {
             unit.targetX = null;
             unit.targetY = null;
             unit.waypoints = [];
           }
-        } else if (!assignUnitFollowTarget(state, unit, frontPt.x, frontPt.y)) {
-          unit.targetX = null;
-          unit.targetY = null;
-          unit.waypoints = [];
-          unit.attachedOrderId = null;
-          unit.attachedOrderKind = null;
-        }
-      } else if (unit.mergeTargetUnitId === null) {
-        const enemyInRange =
-          unit.type !== 'ARTILLERY' ? findEnemyUnitInOperationRadius(state, unit) : null;
-        if (!enemyInRange || !assignUnitFollowTarget(state, unit, enemyInRange.x, enemyInRange.y)) {
-          unit.targetX = null;
-          unit.targetY = null;
-          unit.waypoints = [];
         }
       }
     } else if (unit.stance === 'LOCK') {
@@ -1524,7 +1836,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       }
     }
 
-    // Waypoint-guided movement integration along A* smoothed land corridor
+    // Waypoint-guided movement integration across Land, Water, and Air domains
     if (unit.targetX !== null && unit.targetY !== null) {
       while (
         unit.waypoints.length > 0 &&
@@ -1542,133 +1854,252 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       const dy = activePt.y - unit.y;
       const dist = Math.hypot(dx, dy);
 
-      if (finalDist <= 1.15 && unit.waypoints.length === 0) {
-        unit.targetX = null;
-        unit.targetY = null;
-        unit.waypoints = [];
-        unit.manualOrder = false;
-      } else if (dist > 1e-4) {
-        const curTerrain = terrain[curIy * width + curIx];
-        const baseSpeed =
-          curTerrain === TerrainType.MOUNTAINS ? spec.speedMountains : spec.speedPlains;
-        const supplyMul = 0.55 + 0.45 * unit.supplyLevel;
-        const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
-        let stepDist = Math.min(dist, baseSpeed * supplyMul * moraleMul * TICK_DT);
+      if (airborne) {
+        if (finalDist <= 1.35 && unit.waypoints.length === 0) {
+          unit.targetX = null;
+          unit.targetY = null;
+          unit.waypoints = [];
+          unit.manualOrder = false;
+        } else if (dist > 1e-4) {
+          const supplyMul = 0.65 + 0.35 * unit.supplyLevel;
+          const moraleMul = 0.65 + 0.35 * (unit.morale / 100);
+          const stepDist = Math.min(dist, spec.speedPlains * supplyMul * moraleMul * TICK_DT);
+          unit.x = Math.max(0.5, Math.min(width - 0.5, unit.x + (dx / dist) * stepDist));
+          unit.y = Math.max(0.5, Math.min(height - 0.5, unit.y + (dy / dist) * stepDist));
+        }
+      } else if (naval) {
+        const tgtIx = Math.max(0, Math.min(width - 1, Math.floor(unit.targetX)));
+        const tgtIy = Math.max(0, Math.min(height - 1, Math.floor(unit.targetY)));
+        const targetIsLand = terrain[tgtIy * width + tgtIx] !== TerrainType.WATER;
 
-        let ux = dx / dist;
-        let uy = dy / dist;
-        let stepEndX = unit.x + ux * stepDist;
-        let stepEndY = unit.y + uy * stepDist;
-        let probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
-        let probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
-        let canStep = hasDirectPassableLine(
-          state,
-          unit.ownerId,
-          { x: unit.x, y: unit.y },
-          { x: stepEndX, y: stepEndY },
-          false,
-        );
-
-        if (!canStep) {
-          // Recompute fine land path once if map border/relation changed dynamically mid-march
-          const replanned = findLandPath(
-            state,
-            unit.ownerId,
-            unit.type,
-            unit.x,
-            unit.y,
-            unit.targetX,
-            unit.targetY,
-            false,
-          );
-          if (replanned && replanned.length > 0) {
-            unit.waypoints = replanned;
-            const nextPt = replanned[0];
-            const ndx = nextPt.x - unit.x;
-            const ndy = nextPt.y - unit.y;
-            const ndist = Math.hypot(ndx, ndy);
-            if (ndist > 1e-4) {
-              ux = ndx / ndist;
-              uy = ndy / ndist;
-              stepDist = Math.min(ndist, stepDist);
-              stepEndX = unit.x + ux * stepDist;
-              stepEndY = unit.y + uy * stepDist;
-              probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
-              probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
-              canStep = hasDirectPassableLine(
+        if (
+          unit.type === 'TRANSPORT_SHIP' &&
+          targetIsLand &&
+          (finalDist <= 2.6 || unit.waypoints.length === 0)
+        ) {
+          const nearLanding =
+            Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y) <= 3.6
+              ? { x: tgtIx + 0.5, y: tgtIy + 0.5 }
+              : findNearestCoastalLandCell(state, unit.ownerId, unit.x, unit.y, 3);
+          if (nearLanding && Math.hypot(nearLanding.x - unit.x, nearLanding.y - unit.y) <= 3.8) {
+            const cargoType = unit.cargoUnitType ?? 'INFANTRY';
+            if (
+              disembarkTransportShip(
                 state,
-                unit.ownerId,
-                { x: unit.x, y: unit.y },
-                { x: stepEndX, y: stepEndY },
-                false,
-              );
+                unit,
+                nearLanding.x,
+                nearLanding.y,
+                UNIT_SPECS[cargoType].hpPerUnit,
+              )
+            ) {
+              anyMapClaimed = true;
             }
-          } else {
+          }
+        }
+
+        if (unit.type === 'TRANSPORT_SHIP' ? unit.cargoUnitType !== null || false : true) {
+          if (unit.waypoints.length === 0 && finalDist <= 1.35) {
             unit.targetX = null;
             unit.targetY = null;
             unit.waypoints = [];
             unit.manualOrder = false;
-            stepDist = 0;
+          } else if (dist > 1e-4) {
+            const supplyMul = 0.55 + 0.45 * unit.supplyLevel;
+            const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
+            let stepDist = Math.min(dist, spec.speedPlains * supplyMul * moraleMul * TICK_DT);
+            let ux = dx / dist;
+            let uy = dy / dist;
+            let stepEndX = unit.x + ux * stepDist;
+            let stepEndY = unit.y + uy * stepDist;
+            let canStep = hasDirectWaterLine(state, { x: unit.x, y: unit.y }, { x: stepEndX, y: stepEndY });
+
+            if (!canStep) {
+              const replanned = findWaterPath(state, unit.x, unit.y, unit.targetX, unit.targetY);
+              if (replanned && replanned.length > 0) {
+                unit.waypoints = replanned;
+                const nextPt = replanned[0];
+                const ndx = nextPt.x - unit.x;
+                const ndy = nextPt.y - unit.y;
+                const ndist = Math.hypot(ndx, ndy);
+                if (ndist > 1e-4) {
+                  ux = ndx / ndist;
+                  uy = ndy / ndist;
+                  stepDist = Math.min(ndist, stepDist);
+                  stepEndX = unit.x + ux * stepDist;
+                  stepEndY = unit.y + uy * stepDist;
+                  canStep = hasDirectWaterLine(state, { x: unit.x, y: unit.y }, { x: stepEndX, y: stepEndY });
+                }
+              } else {
+                unit.targetX = null;
+                unit.targetY = null;
+                unit.waypoints = [];
+                unit.manualOrder = false;
+                stepDist = 0;
+              }
+            }
+
+            if (canStep && stepDist > 0) {
+              const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + ux * stepDist));
+              const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + uy * stepDist));
+              if (terrain[Math.floor(ny) * width + Math.floor(nx)] === TerrainType.WATER) {
+                unit.x = nx;
+                unit.y = ny;
+              }
+            }
+
+            // Re-check disembark immediately upon pulling alongside the coastal target
+            if (
+              isNavalUnitType(unit.type) &&
+              unit.type === 'TRANSPORT_SHIP' &&
+              targetIsLand &&
+              unit.targetX !== null &&
+              unit.targetY !== null &&
+              Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y) <= 3.6
+            ) {
+              const cargoType = unit.cargoUnitType ?? 'INFANTRY';
+              if (
+                disembarkTransportShip(
+                  state,
+                  unit,
+                  unit.targetX,
+                  unit.targetY,
+                  UNIT_SPECS[cargoType].hpPerUnit,
+                )
+              ) {
+                anyMapClaimed = true;
+              }
+            }
           }
         }
+      } else {
+        if (finalDist <= 1.15 && unit.waypoints.length === 0) {
+          unit.targetX = null;
+          unit.targetY = null;
+          unit.waypoints = [];
+          unit.manualOrder = false;
+        } else if (dist > 1e-4) {
+          const curTerrain = terrain[curIy * width + curIx];
+          const baseSpeed =
+            curTerrain === TerrainType.MOUNTAINS ? spec.speedMountains : spec.speedPlains;
+          const supplyMul = 0.55 + 0.45 * unit.supplyLevel;
+          const moraleMul = 0.6 + 0.4 * (unit.morale / 100);
+          let stepDist = Math.min(dist, baseSpeed * supplyMul * moraleMul * TICK_DT);
 
-        if (!canStep) {
-          stepDist = 0;
-        } else {
-          const probeIdx = probeY * width + probeX;
-          const probeOwner = owners[probeIdx];
+          let ux = dx / dist;
+          let uy = dy / dist;
+          let stepEndX = unit.x + ux * stepDist;
+          let stepEndY = unit.y + uy * stepDist;
+          let probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
+          let probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
+          let canStep = hasDirectPassableLine(
+            state,
+            unit.ownerId,
+            { x: unit.x, y: unit.y },
+            { x: stepEndX, y: stepEndY },
+            false,
+          );
 
-          if (
-            probeOwner >= 0 &&
-            probeOwner !== unit.ownerId &&
-            getUnitRelation(state, unit.ownerId, probeOwner) === 'WAR'
-          ) {
-            const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY);
-            const armorPenalty =
-              unit.type === 'TANK'
-                ? 1 / (1 + def.antiArmorFactor * 1.15)
-                : def.advanceSpeedMultiplier;
-            const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
-
-            if (unit.isEncircled) {
-              stepDist *= 0.08 * defenseMul;
-              unit.breakoutAccum += stepDist;
-              if (unit.breakoutAccum >= 1.2) {
-                unit.breakoutAccum -= 1.2;
-                unit.hp = Math.max(1, unit.hp - 1.2 * def.attackerCostMultiplier);
+          if (!canStep) {
+            // Recompute fine land path once if map border/relation changed dynamically mid-march
+            const replanned = findLandPath(
+              state,
+              unit.ownerId,
+              unit.type,
+              unit.x,
+              unit.y,
+              unit.targetX,
+              unit.targetY,
+              false,
+            );
+            if (replanned && replanned.length > 0) {
+              unit.waypoints = replanned;
+              const nextPt = replanned[0];
+              const ndx = nextPt.x - unit.x;
+              const ndy = nextPt.y - unit.y;
+              const ndist = Math.hypot(ndx, ndy);
+              if (ndist > 1e-4) {
+                ux = ndx / ndist;
+                uy = ndy / ndist;
+                stepDist = Math.min(ndist, stepDist);
+                stepEndX = unit.x + ux * stepDist;
+                stepEndY = unit.y + uy * stepDist;
+                probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
+                probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
+                canStep = hasDirectPassableLine(
+                  state,
+                  unit.ownerId,
+                  { x: unit.x, y: unit.y },
+                  { x: stepEndX, y: stepEndY },
+                  false,
+                );
               }
             } else {
-              stepDist *= 0.42 * defenseMul;
+              unit.targetX = null;
+              unit.targetY = null;
+              unit.waypoints = [];
+              unit.manualOrder = false;
+              stepDist = 0;
             }
-          } else if (
-            unit.isEncircled &&
-            (probeOwner === unit.ownerId || probeOwner === WILDERNESS_OWNER)
-          ) {
-            stepDist *= 0.48;
           }
-        }
 
-        if (stepDist > 0) {
-          const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + ux * stepDist));
-          const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + uy * stepDist));
-          const nIx = Math.floor(nx);
-          const nIy = Math.floor(ny);
-          const nIdx = nIy * width + nIx;
-          if (isPassableUnitCell(state, unit.ownerId, nIx, nIy, false)) {
-            unit.x = nx;
-            unit.y = ny;
+          if (!canStep) {
+            stepDist = 0;
+          } else {
+            const probeIdx = probeY * width + probeX;
+            const probeOwner = owners[probeIdx];
 
-            // Advancing non-encircled tactical units claim entered WAR/WILDERNESS cells along their spearhead
-            const enteredOwner = owners[nIdx];
             if (
-              !unit.isEncircled &&
-              (enteredOwner === WILDERNESS_OWNER ||
-                (enteredOwner >= 0 &&
-                  enteredOwner !== unit.ownerId &&
-                  getUnitRelation(state, unit.ownerId, enteredOwner) === 'WAR'))
+              probeOwner >= 0 &&
+              probeOwner !== unit.ownerId &&
+              getUnitRelation(state, unit.ownerId, probeOwner) === 'WAR'
             ) {
-              owners[nIdx] = unit.ownerId;
-              anyMapClaimed = true;
+              const def = evaluateCellDefense(state.buildings, probeOwner, probeX, probeY);
+              const armorPenalty =
+                unit.type === 'TANK'
+                  ? 1 / (1 + def.antiArmorFactor * 1.15)
+                  : def.advanceSpeedMultiplier;
+              const defenseMul = Math.max(0.18, Math.min(1, armorPenalty));
+
+              if (unit.isEncircled) {
+                stepDist *= 0.08 * defenseMul;
+                unit.breakoutAccum += stepDist;
+                if (unit.breakoutAccum >= 1.2) {
+                  unit.breakoutAccum -= 1.2;
+                  unit.hp = Math.max(1, unit.hp - 1.2 * def.attackerCostMultiplier);
+                }
+              } else {
+                stepDist *= 0.42 * defenseMul;
+              }
+            } else if (
+              unit.isEncircled &&
+              (probeOwner === unit.ownerId || probeOwner === WILDERNESS_OWNER)
+            ) {
+              stepDist *= 0.48;
+            }
+          }
+
+          if (stepDist > 0) {
+            const nx = Math.max(0.5, Math.min(width - 0.5, unit.x + ux * stepDist));
+            const ny = Math.max(0.5, Math.min(height - 0.5, unit.y + uy * stepDist));
+            const nIx = Math.floor(nx);
+            const nIy = Math.floor(ny);
+            const nIdx = nIy * width + nIx;
+            if (isPassableUnitCell(state, unit.ownerId, nIx, nIy, false)) {
+              unit.x = nx;
+              unit.y = ny;
+
+              // Advancing non-encircled tactical units claim entered WAR/WILDERNESS cells along their spearhead
+              const enteredOwner = owners[nIdx];
+              if (
+                !unit.isEncircled &&
+                (enteredOwner === WILDERNESS_OWNER ||
+                  (enteredOwner >= 0 &&
+                    enteredOwner !== unit.ownerId &&
+                    getUnitRelation(state, unit.ownerId, enteredOwner) === 'WAR'))
+              ) {
+                owners[nIdx] = unit.ownerId;
+                anyMapClaimed = true;
+              }
             }
           }
         }
@@ -1697,68 +2128,15 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
 }
 
 /**
- * Local Fog of War filter:
- * Enemy tactical units are ONLY revealed when inside vision radius of viewer's borders,
- * viewer's units, or allied borders/units.
+ * Local Fog of War filter (delegates to server-authoritative visibility module).
  */
 export function isUnitVisibleToPlayer(
   state: GameState,
   viewerPlayerId: number,
   unit: Unit,
+  visibilityGrid?: Uint8Array,
 ): boolean {
-  if (unit.count <= 0 || unit.hp <= 0) {
-    return false;
-  }
-  if (unit.ownerId === viewerPlayerId) {
-    return true;
-  }
-  if (getUnitRelation(state, viewerPlayerId, unit.ownerId) === 'ALLIED') {
-    return true;
-  }
-
-  // 1. Check vision from viewer's units and allied units
-  for (const spotter of state.units) {
-    if (spotter.count <= 0 || spotter.hp <= 0) continue;
-    if (
-      spotter.ownerId !== viewerPlayerId &&
-      getUnitRelation(state, viewerPlayerId, spotter.ownerId) !== 'ALLIED'
-    ) {
-      continue;
-    }
-    const visRadius = UNIT_SPECS[spotter.type].visionRadius;
-    if (Math.hypot(unit.x - spotter.x, unit.y - spotter.y) <= visRadius) {
-      return true;
-    }
-  }
-
-  // 2. Check proximity to viewer's or allied territory borders
-  const ux = Math.floor(unit.x);
-  const uy = Math.floor(unit.y);
-  const r = BORDER_VISION_RADIUS;
-  const rSq = r * r;
-  const minX = Math.max(0, ux - r);
-  const maxX = Math.min(state.width - 1, ux + r);
-  const minY = Math.max(0, uy - r);
-  const maxY = Math.min(state.height - 1, uy + r);
-
-  for (let y = minY; y <= maxY; y++) {
-    const dy = y + 0.5 - unit.y;
-    const row = y * state.width;
-    for (let x = minX; x <= maxX; x++) {
-      const dx = x + 0.5 - unit.x;
-      if (dx * dx + dy * dy > rSq) continue;
-      const cellOwner = state.owners[row + x];
-      if (cellOwner < 0) continue;
-      if (
-        cellOwner === viewerPlayerId ||
-        getUnitRelation(state, viewerPlayerId, cellOwner) === 'ALLIED'
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return isUnitVisibleInternal(state, viewerPlayerId, unit, UNIT_SPECS, visibilityGrid);
 }
 
 /** Sanitizes unit state before sending to client (strips enemy orders/targets). */
@@ -1768,6 +2146,7 @@ export function toPublicUnitInfo(unit: Unit, viewerPlayerId: number): PublicUnit
     id: unit.id,
     ownerId: unit.ownerId,
     type: unit.type,
+    domain: UNIT_SPECS[unit.type].domain,
     x: unit.x,
     y: unit.y,
     count: unit.count,
@@ -1790,6 +2169,7 @@ export function toPublicUnitInfo(unit: Unit, viewerPlayerId: number): PublicUnit
     combatCooldownTicks: unit.combatCooldownTicks,
     lastCombatTargetX: unit.lastCombatTargetX,
     lastCombatTargetY: unit.lastCombatTargetY,
+    cargoUnitType: isOwn ? unit.cargoUnitType : null,
   };
 }
 

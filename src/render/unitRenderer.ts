@@ -287,6 +287,199 @@ function drawUnitSilhouette(
       ctx.stroke();
       break;
     }
+
+    case 'TRANSPORT_SHIP': {
+      // Landing craft hull + bow ramp + water wake line
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(-w * 0.65, h * 0.34);
+      ctx.lineTo(-w * 0.52, -h * 0.08);
+      ctx.lineTo(w * 0.48, -h * 0.08);
+      ctx.lineTo(w * 0.72, h * 0.34);
+      ctx.closePath();
+      ctx.fillStyle = '#9fc5de';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+
+      ctx.fillStyle = '#53778f';
+      ctx.fillRect(-w * 0.42, -h * 0.34, w * 0.34, h * 0.26);
+      ctx.strokeRect(-w * 0.42, -h * 0.34, w * 0.34, h * 0.26);
+      ctx.restore();
+      break;
+    }
+
+    case 'CRUISER': {
+      // Warship hull + superstructure + twin main gun turrets
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(-w * 0.72, h * 0.32);
+      ctx.lineTo(-w * 0.56, 0);
+      ctx.lineTo(w * 0.52, 0);
+      ctx.lineTo(w * 0.78, h * 0.32);
+      ctx.closePath();
+      ctx.fillStyle = '#c4d4e0';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+
+      // Bridge superstructure
+      ctx.fillStyle = '#e2edf5';
+      ctx.fillRect(-w * 0.24, -h * 0.34, w * 0.4, h * 0.34);
+      ctx.strokeRect(-w * 0.24, -h * 0.34, w * 0.4, h * 0.34);
+
+      // Forward gun barrel
+      ctx.strokeStyle = '#f4dfb0';
+      ctx.lineWidth = Math.max(1.5, h * 0.14);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.18, -h * 0.14);
+      ctx.lineTo(w * 0.7, -h * 0.26);
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+
+    case 'SUBMARINE': {
+      // Stealth teardrop hull + conning tower + periscope
+      ctx.save();
+      ctx.scale(dirX, 1);
+      drawRoundedRectPath(ctx, -w * 0.68, h * 0.04, w * 1.36, h * 0.36, h * 0.18);
+      ctx.fillStyle = '#6c8aa3';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+
+      ctx.fillStyle = '#92b6d2';
+      ctx.fillRect(-w * 0.16, -h * 0.28, w * 0.32, h * 0.32);
+      ctx.strokeRect(-w * 0.16, -h * 0.28, w * 0.32, h * 0.32);
+
+      ctx.strokeStyle = '#cde6f7';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(w * 0.04, -h * 0.28);
+      ctx.lineTo(w * 0.04, -h * 0.5);
+      ctx.lineTo(w * 0.22, -h * 0.5);
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+
+    case 'RADAR_SHIP': {
+      // Patrol hull + tall radar mast + emission arcs
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(-w * 0.66, h * 0.32);
+      ctx.lineTo(-w * 0.5, h * 0.04);
+      ctx.lineTo(w * 0.52, h * 0.04);
+      ctx.lineTo(w * 0.72, h * 0.32);
+      ctx.closePath();
+      ctx.fillStyle = '#89c9cb';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+
+      ctx.strokeStyle = '#a4f2ea';
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(0, h * 0.04);
+      ctx.lineTo(0, -h * 0.44);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, -h * 0.24, w * 0.38, -Math.PI * 0.85, -Math.PI * 0.15);
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+
+    case 'FIGHTER': {
+      // Sleek swept-wing interceptor jet silhouette
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.72, 0);
+      ctx.lineTo(w * 0.1, -h * 0.14);
+      ctx.lineTo(-w * 0.26, -h * 0.58);
+      ctx.lineTo(-w * 0.44, -h * 0.58);
+      ctx.lineTo(-w * 0.22, -h * 0.12);
+      ctx.lineTo(-w * 0.64, -h * 0.28);
+      ctx.lineTo(-w * 0.54, 0);
+      ctx.lineTo(-w * 0.64, h * 0.28);
+      ctx.lineTo(-w * 0.22, h * 0.12);
+      ctx.lineTo(-w * 0.44, h * 0.58);
+      ctx.lineTo(-w * 0.26, h * 0.58);
+      ctx.lineTo(w * 0.1, h * 0.14);
+      ctx.closePath();
+      ctx.fillStyle = '#cbe7fa';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+
+    case 'BOMBER': {
+      // Heavy twin-engine strategic wing bomber silhouette
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.68, 0);
+      ctx.lineTo(w * 0.22, -h * 0.16);
+      ctx.lineTo(w * 0.04, -h * 0.68);
+      ctx.lineTo(-w * 0.22, -h * 0.68);
+      ctx.lineTo(-w * 0.16, -h * 0.16);
+      ctx.lineTo(-w * 0.6, -h * 0.34);
+      ctx.lineTo(-w * 0.52, 0);
+      ctx.lineTo(-w * 0.6, h * 0.34);
+      ctx.lineTo(-w * 0.16, h * 0.16);
+      ctx.lineTo(-w * 0.22, h * 0.68);
+      ctx.lineTo(w * 0.04, h * 0.68);
+      ctx.lineTo(w * 0.22, h * 0.16);
+      ctx.closePath();
+      ctx.fillStyle = '#f5ca8a';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.95;
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+
+    case 'RECON_PLANE': {
+      // High-aspect reconnaissance wing + sensor pod
+      ctx.save();
+      ctx.scale(dirX, 1);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.66, 0);
+      ctx.lineTo(w * 0.06, -h * 0.12);
+      ctx.lineTo(-w * 0.08, -h * 0.72);
+      ctx.lineTo(-w * 0.26, -h * 0.72);
+      ctx.lineTo(-w * 0.22, -h * 0.1);
+      ctx.lineTo(-w * 0.6, 0);
+      ctx.lineTo(-w * 0.22, h * 0.1);
+      ctx.lineTo(-w * 0.26, h * 0.72);
+      ctx.lineTo(-w * 0.08, h * 0.72);
+      ctx.lineTo(w * 0.06, h * 0.12);
+      ctx.closePath();
+      ctx.fillStyle = '#9af0dd';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(w * 0.16, 0, Math.max(1.5, h * 0.13), 0, Math.PI * 2);
+      ctx.fillStyle = '#0e242a';
+      ctx.fill();
+      ctx.restore();
+      break;
+    }
   }
 
   ctx.restore();
@@ -883,20 +1076,39 @@ export function drawArtilleryFireMissionOverlay(
   hoverCell: Point | null,
 ): void {
   if (artilleryUnits.length === 0) return;
-  const maxRange = UNIT_SPECS.ARTILLERY.attackRange;
+  const isBomberMode = artilleryUnits.some((u) => u.type === 'BOMBER');
+  const maxRange = Math.max(
+    ...artilleryUnits.map((u) => UNIT_SPECS[u.type].airRange ?? UNIT_SPECS[u.type].attackRange),
+  );
 
   ctx.save();
-  for (const unit of artilleryUnits) {
-    const sc = camera.worldToScreen(unit.x, unit.y);
-    ctx.beginPath();
-    ctx.arc(sc.x, sc.y, maxRange * camera.zoom, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(245, 162, 74, 0.05)';
-    ctx.fill();
-    ctx.setLineDash([6, 4]);
-    ctx.lineWidth = 1.6;
-    ctx.strokeStyle = 'rgba(248, 182, 92, 0.78)';
-    ctx.stroke();
-    ctx.setLineDash([]);
+  if (isBomberMode) {
+    for (const b of state.buildings) {
+      if (b.ownerId !== state.humanPlayerId || b.type !== 'AIRFIELD' || b.stackCount <= 0) continue;
+      const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, (UNIT_SPECS.BOMBER.airRange ?? 125) * camera.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(245, 162, 74, 0.04)';
+      ctx.fill();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(248, 182, 92, 0.72)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  } else {
+    for (const unit of artilleryUnits) {
+      const sc = camera.worldToScreen(unit.x, unit.y);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, UNIT_SPECS[unit.type].attackRange * camera.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(245, 162, 74, 0.05)';
+      ctx.fill();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = 'rgba(248, 182, 92, 0.78)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   if (hoverCell) {
@@ -904,12 +1116,23 @@ export function drawArtilleryFireMissionOverlay(
     const ix = Math.floor(hoverCell.x);
     const iy = Math.floor(hoverCell.y);
     const inBounds = ix >= 0 && ix < state.width && iy >= 0 && iy < state.height;
-    const inRange = artilleryUnits.some(
-      (u) => Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <= maxRange,
-    );
+    const inRange = isBomberMode
+      ? state.buildings.some(
+          (b) =>
+            b.ownerId === state.humanPlayerId &&
+            b.type === 'AIRFIELD' &&
+            b.stackCount > 0 &&
+            Math.hypot(hoverCell.x - (b.x + 0.5), hoverCell.y - (b.y + 0.5)) <= maxRange,
+        ) ||
+        artilleryUnits.some(
+          (u) => Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <= UNIT_SPECS[u.type].attackRange,
+        )
+      : artilleryUnits.some(
+          (u) => Math.hypot(hoverCell.x - u.x, hoverCell.y - u.y) <= UNIT_SPECS[u.type].attackRange,
+        );
 
     let valid = false;
-    let statusLabel = 'Mimo dostřel dělostřelectva';
+    let statusLabel = isBomberMode ? 'Mimo dolet letiště' : 'Mimo dostřel palby';
     if (inBounds) {
       const ownerId = state.owners[iy * state.width + ix];
       const ownerPlayer =
@@ -920,12 +1143,16 @@ export function drawArtilleryFireMissionOverlay(
         ownerPlayer?.relationToHuman !== 'WAR';
 
       if (!inRange) {
-        statusLabel = 'Cíl mimo dostřel vybraného dělostřelectva';
+        statusLabel = isBomberMode
+          ? 'Cíl mimo operační dolet letiště'
+          : 'Cíl mimo dostřel vybrané jednotky';
       } else if (isNonWarForeign) {
-        statusLabel = 'Nelze ostřelovat neutrální stát (nejdřív válka)';
+        statusLabel = 'Nelze útočit na neutrální stát (nejdřív válka)';
       } else {
         valid = true;
-        statusLabel = 'CÍLENÁ PALBA DĚLOSTŘELECTVA (klik LMB)';
+        statusLabel = isBomberMode
+          ? 'CÍLENÝ NÁLET BOMBARDÉRU (klik LMB)'
+          : 'CÍLENÁ PALBA (klik LMB)';
       }
     }
 

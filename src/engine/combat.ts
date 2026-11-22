@@ -1,6 +1,7 @@
-import { evaluateCellDefense } from './defenses';
+import { evaluateCellDefense, getAirDefenseCoverageAt } from './defenses';
 import { syncPlayerActiveManpower } from './economy';
 import { getCombatBlackoutMultiplier } from './energyGrid';
+import { isAirUnitType, isNavalUnitType, supportsFireMission } from './navalAir';
 import {
   Building,
   BuildingType,
@@ -18,11 +19,31 @@ import {
   getAttackOrderFrontPoint,
   getFrontPushCenterPoint,
   getUnitRelation,
+  isUnitVisibleToPlayer,
 } from './units';
 
 export const ARTILLERY_BLAST_RADIUS = 7.5;
 export const BARE_ARROW_FOREIGN_COST_MUL = 1.85;
 export const BARE_ARROW_FOREIGN_SPEED_MUL = 0.52;
+
+/** Applies manpower growth suppression from artillery bombardment or air strikes. */
+export function applyManpowerSuppression(
+  target: PlayerState,
+  addedTicks: number,
+  addedIntensity: number,
+): void {
+  if (!target.alive || target.isEliminated || addedTicks <= 0 || addedIntensity <= 0) {
+    return;
+  }
+  target.manpowerSuppressionTicks = Math.min(
+    300,
+    target.manpowerSuppressionTicks + Math.round(addedTicks),
+  );
+  target.manpowerSuppressionIntensity = Math.min(
+    0.65,
+    Math.max(target.manpowerSuppressionIntensity, 0.12) + addedIntensity,
+  );
+}
 
 export interface FrontUnitSupportModifiers {
   readonly attackerCostMultiplier: number;
@@ -164,7 +185,7 @@ function executeArtilleryFireMissionSalvo(
   lastAttacker: Map<number, number>,
   deadBuildingIds: Set<number>,
 ): void {
-  const attSpec = UNIT_SPECS.ARTILLERY;
+  const attSpec = UNIT_SPECS[attacker.type];
   attacker.combatCooldownTicks = 6;
   attacker.lastCombatTargetX = fx;
   attacker.lastCombatTargetY = fy;
@@ -181,16 +202,19 @@ function executeArtilleryFireMissionSalvo(
   const salvoPower =
     attSpec.attack * countScale * hpEfficiency * supplyMul * moraleMul * blackoutMul;
 
-  // 1. Area splash damage & morale shock to WAR enemy units inside blast circle
+  // 1. Area splash damage & morale shock to WAR enemy units (including naval ships/transports) inside blast circle
   for (const candidate of state.units) {
     if (candidate.count <= 0 || candidate.hp <= 0) continue;
     if (candidate.ownerId === attacker.ownerId) continue;
     if (getUnitRelation(state, attacker.ownerId, candidate.ownerId) !== 'WAR') continue;
+    if (isAirUnitType(candidate.type)) continue;
     const dist = Math.hypot(candidate.x - fx, candidate.y - fy);
     if (dist > ARTILLERY_BLAST_RADIUS) continue;
 
     const falloff = Math.max(0.35, 1 - 0.6 * (dist / ARTILLERY_BLAST_RADIUS));
-    const splashDmg = Math.max(2.5, salvoPower * 0.65 * falloff);
+    const navalBonus =
+      attacker.type === 'BOMBER' && candidate.type === 'TRANSPORT_SHIP' ? 1.45 : 1.0;
+    const splashDmg = Math.max(2.5, salvoPower * 0.65 * falloff * navalBonus);
     incomingDamage.set(candidate.id, (incomingDamage.get(candidate.id) ?? 0) + splashDmg);
     lastAttacker.set(candidate.id, attacker.ownerId);
     candidate.morale = Math.max(0, candidate.morale - 7 * falloff);
@@ -236,7 +260,7 @@ function executeArtilleryFireMissionSalvo(
     }
   }
 
-  // 4. Garrison & activeManpower percentage casualties inside WAR enemy tiles covered by blast radius
+  // 4. Garrison & activeManpower percentage casualties + Manpower Suppression inside WAR enemy tiles
   const impactedCellsByOwner = new Map<number, number>();
   const rCeil = Math.ceil(ARTILLERY_BLAST_RADIUS);
   const rSq = ARTILLERY_BLAST_RADIUS * ARTILLERY_BLAST_RADIUS;
@@ -269,6 +293,9 @@ function executeArtilleryFireMissionSalvo(
     const occupier = state.players.get(enemyId);
     if (!occupier || !occupier.alive || occupier.isEliminated) continue;
     const coverageRatio = Math.min(1, hitCells / refArea);
+    const suppressionAdd = Math.min(0.22, (0.1 + 0.04 * Math.min(3, countScale)) * coverageRatio);
+    applyManpowerSuppression(occupier, 80, suppressionAdd);
+
     const activeMp = Math.max(0, occupier.manpower - occupier.allocatedManpower);
     if (activeMp <= 0) continue;
 
@@ -345,6 +372,7 @@ function shellEnemyDefenseOrFrontline(
 
     const occupier = state.players.get(bestBuilding.ownerId);
     if (occupier && occupier.alive && !occupier.isEliminated) {
+      applyManpowerSuppression(occupier, 10, 0.03 * TICK_DT);
       const mpAttrition = Math.min(20 * TICK_DT, shellPower * TICK_DT * 0.25);
       const protectedFloor = occupier.allocatedManpower;
       if (occupier.manpower > protectedFloor) {
@@ -443,21 +471,57 @@ export function stepUnitsCombat(state: GameState): void {
     }
   }
 
-  // 1. Unit-vs-unit tactical engagements & manual artillery fire missions
+  // 1. Unit-vs-unit tactical engagements, manual artillery/cruiser/bomber fire missions, and AA interception
   for (const attacker of state.units) {
     if (attacker.count <= 0 || attacker.hp <= 0) continue;
     const attSpec = UNIT_SPECS[attacker.type];
     const attOwner = state.players.get(attacker.ownerId);
 
+    // Enemy AA_BATTERY flak fire against aircraft flying over defended sectors
+    if (isAirUnitType(attacker.type)) {
+      const ax = Math.max(0, Math.min(state.width - 1, Math.floor(attacker.x)));
+      const ay = Math.max(0, Math.min(state.height - 1, Math.floor(attacker.y)));
+      let bestAaCoverage = 0;
+      let aaOwnerId = -1;
+      for (const other of state.players.values()) {
+        if (
+          other.id === attacker.ownerId ||
+          !other.alive ||
+          getUnitRelation(state, attacker.ownerId, other.id) !== 'WAR'
+        ) {
+          continue;
+        }
+        const cov = getAirDefenseCoverageAt(state.buildings, other.id, ax, ay);
+        if (cov > bestAaCoverage) {
+          bestAaCoverage = cov;
+          aaOwnerId = other.id;
+        }
+      }
+      if (bestAaCoverage > 0) {
+        const strikeExposure = attacker.fireMissionTicksRemaining > 0 ? 1.85 : 1.0;
+        const aaDmg = bestAaCoverage * 24 * strikeExposure * TICK_DT;
+        incomingDamage.set(attacker.id, (incomingDamage.get(attacker.id) ?? 0) + aaDmg);
+        if (aaOwnerId >= 0) {
+          lastAttacker.set(attacker.id, aaOwnerId);
+        }
+        attacker.combatCooldownTicks = 6;
+      }
+    }
+
     if (
-      attacker.type === 'ARTILLERY' &&
+      supportsFireMission(attacker.type) &&
       attacker.fireMissionTicksRemaining > 0 &&
       attacker.fireMissionX !== null &&
       attacker.fireMissionY !== null
     ) {
       const fx = attacker.fireMissionX;
       const fy = attacker.fireMissionY;
-      if (Math.hypot(fx - attacker.x, fy - attacker.y) <= attSpec.attackRange) {
+      const distToTarget = Math.hypot(fx - attacker.x, fy - attacker.y);
+      const inStrikeProximity =
+        attacker.type === 'BOMBER' ? distToTarget <= 18 : distToTarget <= attSpec.attackRange;
+      if (attacker.type === 'BOMBER' && !inStrikeProximity) {
+        // Bomber is still flying toward strike zone; wait until it enters release radius
+      } else if (inStrikeProximity) {
         attacker.fireMissionTicksRemaining--;
         executeArtilleryFireMissionSalvo(
           state,
@@ -476,21 +540,46 @@ export function stepUnitsCombat(state: GameState): void {
           attacker.fireMissionTicksRemaining = 0;
         }
         continue;
+      } else {
+        attacker.fireMissionX = null;
+        attacker.fireMissionY = null;
+        attacker.fireMissionTicksRemaining = 0;
       }
-      attacker.fireMissionX = null;
-      attacker.fireMissionY = null;
-      attacker.fireMissionTicksRemaining = 0;
+    }
+
+    if (attSpec.attack <= 0 || attSpec.attackRange <= 0) {
+      continue;
     }
 
     let bestTarget: Unit | null = null;
-    let bestDist = attSpec.attackRange;
+    let bestScore = -Infinity;
     for (const candidate of state.units) {
       if (candidate.count <= 0 || candidate.hp <= 0) continue;
       if (candidate.ownerId === attacker.ownerId) continue;
       if (getUnitRelation(state, attacker.ownerId, candidate.ownerId) !== 'WAR') continue;
+
+      if (attacker.type === 'FIGHTER') {
+        if (!isAirUnitType(candidate.type) && candidate.type !== 'PARATROOPERS') continue;
+      } else if (attacker.type === 'SUBMARINE') {
+        if (!isNavalUnitType(candidate.type)) continue;
+      } else if (isAirUnitType(candidate.type)) {
+        // Non-fighters do not dogfight airborne aircraft
+        continue;
+      }
+
       const dist = Math.hypot(candidate.x - attacker.x, candidate.y - attacker.y);
-      if (dist <= bestDist) {
-        bestDist = dist;
+      if (dist > attSpec.attackRange) continue;
+      if (!isUnitVisibleToPlayer(state, attacker.ownerId, candidate)) continue;
+
+      const targetPriority =
+        attacker.type === 'FIGHTER' && candidate.type === 'BOMBER'
+          ? 20
+          : attacker.type === 'SUBMARINE' && candidate.type === 'TRANSPORT_SHIP'
+            ? 15
+            : 0;
+      const score = targetPriority - dist;
+      if (score > bestScore) {
+        bestScore = score;
         bestTarget = candidate;
       }
     }
@@ -513,6 +602,7 @@ export function stepUnitsCombat(state: GameState): void {
     const blackoutMul = getCombatBlackoutMultiplier(attOwner);
     const countScale = Math.pow(attacker.count, 0.88);
     const hpEfficiency = 0.45 + 0.55 * Math.min(1, attacker.hp / Math.max(1, attacker.maxHp));
+    const bestDist = Math.hypot(bestTarget.x - attacker.x, bestTarget.y - attacker.y);
 
     let dmg =
       attSpec.attack *
@@ -540,6 +630,13 @@ export function stepUnitsCombat(state: GameState): void {
       }
     } else if (attacker.type === 'PARATROOPERS' && attacker.dropVulnerabilityTicks > 0) {
       dmg *= 0.65;
+    } else if (attacker.type === 'SUBMARINE') {
+      dmg *= bestTarget.type === 'TRANSPORT_SHIP' ? 2.0 : 1.65;
+    } else if (attacker.type === 'CRUISER') {
+      if (bestTarget.type === 'TRANSPORT_SHIP') dmg *= 1.6;
+      else if (bestTarget.type === 'SUBMARINE') dmg *= 0.85;
+    } else if (attacker.type === 'FIGHTER') {
+      dmg *= 1.6;
     }
 
     if (bestTarget.type === 'ARTILLERY' && bestDist <= 9) {

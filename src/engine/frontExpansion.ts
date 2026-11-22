@@ -30,6 +30,8 @@ const ENEMY_BORDER_BASE_COST = 5.6;
 
 const annexVisited = new Uint8Array(MAP_WIDTH * MAP_HEIGHT);
 const annexQueue = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
+const annexProtectedStamp = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
+let annexStamp = 1;
 const sweepSeen = new Int32Array(MAP_WIDTH * MAP_HEIGHT);
 let sweepStamp = 1;
 
@@ -82,16 +84,34 @@ export function setWarRelation(state: GameState, a: number, b: number): void {
 export function canOrderCaptureCell(
   state: GameState,
   playerId: number,
-  allowedEnemyIds: ReadonlyArray<number>,
+  targetOwner: number | ReadonlyArray<number>,
   cellOwner: number,
+  allowTransitWilderness = false,
 ): boolean {
   if (cellOwner === playerId || cellOwner < WILDERNESS_OWNER) {
     return false;
   }
-  if (cellOwner === WILDERNESS_OWNER) {
-    return true;
+
+  if (typeof targetOwner === 'number') {
+    if (targetOwner === WILDERNESS_OWNER) {
+      return cellOwner === WILDERNESS_OWNER;
+    }
+    if (cellOwner === targetOwner) {
+      return getRelation(state, playerId, targetOwner) === 'WAR';
+    }
+    if (cellOwner === WILDERNESS_OWNER) {
+      return allowTransitWilderness;
+    }
+    return false;
   }
-  if (!allowedEnemyIds.includes(cellOwner)) {
+
+  if (targetOwner.length === 0) {
+    return cellOwner === WILDERNESS_OWNER;
+  }
+  if (cellOwner === WILDERNESS_OWNER) {
+    return allowTransitWilderness;
+  }
+  if (!targetOwner.includes(cellOwner)) {
     return false;
   }
   return getRelation(state, playerId, cellOwner) === 'WAR';
@@ -594,8 +614,9 @@ interface ApplyExpansionResult {
 function applyExpansionCandidates(
   state: GameState,
   order: ExpandableOrder,
-  allowedEnemyIds: ReadonlyArray<number>,
+  targetOwnerId: number,
   candidates: ExpansionCandidate[],
+  allowTransitWilderness = false,
   onClaim?: (claimedIdx: number) => void,
 ): ApplyExpansionResult {
   if (candidates.length === 0) {
@@ -627,7 +648,15 @@ function applyExpansionCandidates(
     if (prevOwner >= 0 && foreignClaimedThisTick >= maxForeignPerTick) {
       continue;
     }
-    if (!canOrderCaptureCell(state, order.playerId, allowedEnemyIds, prevOwner)) {
+    if (
+      !canOrderCaptureCell(
+        state,
+        order.playerId,
+        targetOwnerId,
+        prevOwner,
+        allowTransitWilderness,
+      )
+    ) {
       continue;
     }
 
@@ -843,21 +872,15 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
 
     order.ticksRemaining--;
 
-    // Sync allowed WAR enemies dynamically along the centerline (unless wilderness-only)
-    if (!order.wildernessOnly) {
-      const centerlineWar = collectCenterlineWarEnemies(
-        state,
-        order.playerId,
-        order.waypoints,
-      );
-      if (centerlineWar.length > 0) {
-        const merged = new Set(order.targetOwnerIds);
-        for (const id of centerlineWar) {
-          merged.add(id);
-        }
-        order.targetOwnerIds = Array.from(merged);
-      }
-    }
+    const targetOwnerId = order.wildernessOnly
+      ? WILDERNESS_OWNER
+      : order.targetOwnerId >= 0
+        ? order.targetOwnerId
+        : order.targetOwnerIds.length > 0
+          ? order.targetOwnerIds[0]
+          : WILDERNESS_OWNER;
+    order.targetOwnerId = targetOwnerId;
+    order.targetOwnerIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
 
     const cumDist: number[] = [0];
     for (let i = 1; i < order.waypoints.length; i++) {
@@ -961,10 +984,7 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
           const nIdx = ny * width + nx;
           const nOwner = owners[nIdx];
-          if (
-            terrain[nIdx] === TerrainType.WATER ||
-            !canOrderCaptureCell(state, order.playerId, order.targetOwnerIds, nOwner)
-          ) {
+          if (terrain[nIdx] === TerrainType.WATER) {
             continue;
           }
 
@@ -981,6 +1001,20 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
             nProj.perpDist > (surrounded ? halfCorridor + 2.5 : halfCorridor) ||
             nProj.arcDist < activeMinArc - 2 ||
             nProj.arcDist > totalLen + 6
+          ) {
+            continue;
+          }
+
+          const allowTransitWilderness =
+            targetOwnerId >= 0 && nProj.perpDist <= 3.5;
+          if (
+            !canOrderCaptureCell(
+              state,
+              order.playerId,
+              targetOwnerId,
+              nOwner,
+              allowTransitWilderness,
+            )
           ) {
             continue;
           }
@@ -1025,8 +1059,9 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
     const res = applyExpansionCandidates(
       state,
       order,
-      order.targetOwnerIds,
+      targetOwnerId,
       candidates,
+      targetOwnerId >= 0,
     );
     if (res.claimed) {
       mapChanged = true;
@@ -1275,8 +1310,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
     }
 
     order.ticksRemaining--;
-    const allowedEnemyIds =
-      order.targetOwnerId >= 0 ? [order.targetOwnerId] : [];
+    const targetOwnerId = order.targetOwnerId;
     const activeFrontierSet = new Set<number>(order.frontierCells);
 
     if (order.sweepAllBorders && order.targetOwnerId >= 0) {
@@ -1322,7 +1356,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
         const nOwner = owners[nIdx];
         if (
           terrain[nIdx] === TerrainType.WATER ||
-          !canOrderCaptureCell(state, order.playerId, allowedEnemyIds, nOwner)
+          !canOrderCaptureCell(state, order.playerId, targetOwnerId, nOwner, false)
         ) {
           continue;
         }
@@ -1410,8 +1444,9 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
     const res = applyExpansionCandidates(
       state,
       order,
-      allowedEnemyIds,
+      targetOwnerId,
       candidates,
+      false,
       (claimedIdx) => {
         prunedFrontierSet.add(claimedIdx);
         claimedCells.push(claimedIdx);
@@ -1485,9 +1520,11 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
 }
 
 /**
- * Strictly deterministic pocket annexation (unrolled flat-index BFS):
- * Annexes a connected land component ONLY when 100% enclosed by one single state
- * and NEVER touching water, map edges, wilderness, or any third state.
+ * Strictly deterministic pocket annexation (bounding-box outside-in elimination + interior BFS):
+ * Annexes a 4-connected component of non-encloser land (enemy + residual WILDERNESS_OWNER)
+ * ONLY when 100% enclosed by one single state `encloserId` and NEVER touching water
+ * (in 8-neighborhood), map edges, an allied state, any third foreign state, or any
+ * enemy unit / building inside the pocket.
  */
 export function annexEncircledPockets(state: GameState): boolean {
   const { width, height, terrain, owners } = state;
@@ -1496,222 +1533,213 @@ export function annexEncircledPockets(state: GameState): boolean {
   const maxY = height - 1;
   const visited = total <= annexVisited.length ? annexVisited : new Uint8Array(total);
   const queue = total <= annexQueue.length ? annexQueue : new Int32Array(total);
-  visited.fill(0, 0, total);
-  let anyAnnexed = false;
+  const protectedArr =
+    total <= annexProtectedStamp.length ? annexProtectedStamp : new Int32Array(total);
 
-  const occupiedUnitCells = new Set<number>();
-  for (const u of state.units) {
-    if (u.count > 0 && u.hp > 0) {
-      const ux = Math.max(0, Math.min(width - 1, Math.floor(u.x)));
-      const uy = Math.max(0, Math.min(height - 1, Math.floor(u.y)));
-      occupiedUnitCells.add(uy * width + ux);
+  let maxPlayerId = -1;
+  for (const p of state.players.values()) {
+    if (p.id > maxPlayerId) maxPlayerId = p.id;
+  }
+  if (maxPlayerId < 0) return false;
+
+  const minXByPlayer = new Int32Array(maxPlayerId + 1).fill(width);
+  const maxXByPlayer = new Int32Array(maxPlayerId + 1).fill(-1);
+  const minYByPlayer = new Int32Array(maxPlayerId + 1).fill(height);
+  const maxYByPlayer = new Int32Array(maxPlayerId + 1).fill(-1);
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const o = owners[row + x];
+      if (o >= 0 && o <= maxPlayerId) {
+        if (x < minXByPlayer[o]) minXByPlayer[o] = x;
+        if (x > maxXByPlayer[o]) maxXByPlayer[o] = x;
+        if (y < minYByPlayer[o]) minYByPlayer[o] = y;
+        if (y > maxYByPlayer[o]) maxYByPlayer[o] = y;
+      }
     }
   }
 
-  for (let startIdx = 0; startIdx < total; startIdx++) {
-    if (visited[startIdx] || terrain[startIdx] === TerrainType.WATER) {
+  let anyAnnexed = false;
+
+  for (const encloser of state.players.values()) {
+    if (!encloser.alive || encloser.isEliminated || encloser.territoryCells <= 0) {
+      continue;
+    }
+    const encloserId = encloser.id;
+    const pMinX = minXByPlayer[encloserId];
+    const pMaxX = maxXByPlayer[encloserId];
+    const pMinY = minYByPlayer[encloserId];
+    const pMaxY = maxYByPlayer[encloserId];
+    if (pMaxX - pMinX < 2 || pMaxY - pMinY < 2) {
       continue;
     }
 
-    const regionOwner = owners[startIdx];
+    // Stage 1: scan only encloser's bounding box and flood-fill exterior / coastal non-encloser land.
     let head = 0;
     let tail = 0;
-    queue[tail++] = startIdx;
-    visited[startIdx] = 1;
+    let nonEncloserLand = 0;
 
-    let disqualified = occupiedUnitCells.has(startIdx);
-    let singleEncloser: number | null = null;
+    for (let y = pMinY; y <= pMaxY; y++) {
+      const row = y * width;
+      const isRimY = y === pMinY || y === pMaxY || y === 0 || y === maxY;
+      for (let x = pMinX; x <= pMaxX; x++) {
+        const idx = row + x;
+        if (terrain[idx] === TerrainType.WATER || owners[idx] === encloserId) {
+          visited[idx] = 1;
+          continue;
+        }
+        nonEncloserLand++;
+        const isSeed =
+          isRimY ||
+          x === pMinX ||
+          x === pMaxX ||
+          x === 0 ||
+          x === maxX ||
+          terrain[idx - 1] === TerrainType.WATER ||
+          terrain[idx + 1] === TerrainType.WATER ||
+          terrain[idx - width] === TerrainType.WATER ||
+          terrain[idx + width] === TerrainType.WATER ||
+          terrain[idx - width - 1] === TerrainType.WATER ||
+          terrain[idx - width + 1] === TerrainType.WATER ||
+          terrain[idx + width - 1] === TerrainType.WATER ||
+          terrain[idx + width + 1] === TerrainType.WATER;
+        if (isSeed) {
+          visited[idx] = 1;
+          queue[tail++] = idx;
+        } else {
+          visited[idx] = 0;
+        }
+      }
+    }
+
+    if (nonEncloserLand === 0 || tail === nonEncloserLand) {
+      continue;
+    }
 
     while (head < tail) {
       const idx = queue[head++];
       const x = idx % width;
       const y = (idx - x) / width;
-
-      if (x === 0 || x === maxX || y === 0 || y === maxY || occupiedUnitCells.has(idx)) {
-        disqualified = true;
+      if (x > pMinX && visited[idx - 1] === 0) {
+        visited[idx - 1] = 1;
+        queue[tail++] = idx - 1;
       }
-
-      if (!disqualified) {
-        const left = idx - 1;
-        const right = idx + 1;
-        const up = idx - width;
-        const down = idx + width;
-
-        // 4 cardinal neighbors: validate water/encloser AND push same-owner cells
-        if (terrain[left] === TerrainType.WATER) {
-          disqualified = true;
-        } else {
-          const o = owners[left];
-          if (o === regionOwner) {
-            if (!visited[left]) {
-              visited[left] = 1;
-              queue[tail++] = left;
-            }
-          } else if (o === WILDERNESS_OWNER) {
-            disqualified = true;
-          } else if (singleEncloser === null) {
-            singleEncloser = o;
-          } else if (singleEncloser !== o) {
-            disqualified = true;
-          }
-        }
-
-        if (terrain[right] === TerrainType.WATER) {
-          disqualified = true;
-        } else {
-          const o = owners[right];
-          if (o === regionOwner) {
-            if (!visited[right]) {
-              visited[right] = 1;
-              queue[tail++] = right;
-            }
-          } else if (o === WILDERNESS_OWNER) {
-            disqualified = true;
-          } else if (singleEncloser === null) {
-            singleEncloser = o;
-          } else if (singleEncloser !== o) {
-            disqualified = true;
-          }
-        }
-
-        if (terrain[up] === TerrainType.WATER) {
-          disqualified = true;
-        } else {
-          const o = owners[up];
-          if (o === regionOwner) {
-            if (!visited[up]) {
-              visited[up] = 1;
-              queue[tail++] = up;
-            }
-          } else if (o === WILDERNESS_OWNER) {
-            disqualified = true;
-          } else if (singleEncloser === null) {
-            singleEncloser = o;
-          } else if (singleEncloser !== o) {
-            disqualified = true;
-          }
-        }
-
-        if (terrain[down] === TerrainType.WATER) {
-          disqualified = true;
-        } else {
-          const o = owners[down];
-          if (o === regionOwner) {
-            if (!visited[down]) {
-              visited[down] = 1;
-              queue[tail++] = down;
-            }
-          } else if (o === WILDERNESS_OWNER) {
-            disqualified = true;
-          } else if (singleEncloser === null) {
-            singleEncloser = o;
-          } else if (singleEncloser !== o) {
-            disqualified = true;
-          }
-        }
-
-        // 4 diagonal neighbors (disqualification only)
-        if (!disqualified) {
-          const ul = up - 1;
-          if (terrain[ul] === TerrainType.WATER) {
-            disqualified = true;
-          } else {
-            const o = owners[ul];
-            if (o !== regionOwner) {
-              if (o === WILDERNESS_OWNER) disqualified = true;
-              else if (singleEncloser === null) singleEncloser = o;
-              else if (singleEncloser !== o) disqualified = true;
-            }
-          }
-        }
-        if (!disqualified) {
-          const ur = up + 1;
-          if (terrain[ur] === TerrainType.WATER) {
-            disqualified = true;
-          } else {
-            const o = owners[ur];
-            if (o !== regionOwner) {
-              if (o === WILDERNESS_OWNER) disqualified = true;
-              else if (singleEncloser === null) singleEncloser = o;
-              else if (singleEncloser !== o) disqualified = true;
-            }
-          }
-        }
-        if (!disqualified) {
-          const dl = down - 1;
-          if (terrain[dl] === TerrainType.WATER) {
-            disqualified = true;
-          } else {
-            const o = owners[dl];
-            if (o !== regionOwner) {
-              if (o === WILDERNESS_OWNER) disqualified = true;
-              else if (singleEncloser === null) singleEncloser = o;
-              else if (singleEncloser !== o) disqualified = true;
-            }
-          }
-        }
-        if (!disqualified) {
-          const dr = down + 1;
-          if (terrain[dr] === TerrainType.WATER) {
-            disqualified = true;
-          } else {
-            const o = owners[dr];
-            if (o !== regionOwner) {
-              if (o === WILDERNESS_OWNER) disqualified = true;
-              else if (singleEncloser === null) singleEncloser = o;
-              else if (singleEncloser !== o) disqualified = true;
-            }
-          }
-        }
-      } else {
-        // Fast flood-fill of visited cells once the component is already disqualified
-        if (x > 0) {
-          const left = idx - 1;
-          if (!visited[left] && terrain[left] !== TerrainType.WATER && owners[left] === regionOwner) {
-            visited[left] = 1;
-            queue[tail++] = left;
-          }
-        }
-        if (x < maxX) {
-          const right = idx + 1;
-          if (
-            !visited[right] &&
-            terrain[right] !== TerrainType.WATER &&
-            owners[right] === regionOwner
-          ) {
-            visited[right] = 1;
-            queue[tail++] = right;
-          }
-        }
-        if (y > 0) {
-          const up = idx - width;
-          if (!visited[up] && terrain[up] !== TerrainType.WATER && owners[up] === regionOwner) {
-            visited[up] = 1;
-            queue[tail++] = up;
-          }
-        }
-        if (y < maxY) {
-          const down = idx + width;
-          if (!visited[down] && terrain[down] !== TerrainType.WATER && owners[down] === regionOwner) {
-            visited[down] = 1;
-            queue[tail++] = down;
-          }
-        }
+      if (x < pMaxX && visited[idx + 1] === 0) {
+        visited[idx + 1] = 1;
+        queue[tail++] = idx + 1;
+      }
+      if (y > pMinY && visited[idx - width] === 0) {
+        visited[idx - width] = 1;
+        queue[tail++] = idx - width;
+      }
+      if (y < pMaxY && visited[idx + width] === 0) {
+        visited[idx + width] = 1;
+        queue[tail++] = idx + width;
       }
     }
 
-    if (
-      !disqualified &&
-      singleEncloser !== null &&
-      singleEncloser >= 0 &&
-      singleEncloser !== regionOwner &&
-      (regionOwner === WILDERNESS_OWNER ||
-        getRelation(state, singleEncloser, regionOwner) !== 'ALLIED')
-    ) {
-      for (let i = 0; i < tail; i++) {
-        owners[queue[i]] = singleEncloser;
+    // All non-encloser land inside the bounding box connected to rim/edge/water -> no interior pockets.
+    if (tail >= nonEncloserLand) {
+      continue;
+    }
+
+    // Stage 2: inspect remaining isolated interior components strictly inside the box.
+    annexStamp++;
+    if (annexStamp >= 2_000_000_000) {
+      protectedArr.fill(0);
+      annexStamp = 1;
+    }
+    const stamp = annexStamp;
+    for (const u of state.units) {
+      if (u.count > 0 && u.hp > 0 && u.ownerId !== encloserId) {
+        const ux = Math.max(0, Math.min(maxX, Math.floor(u.x)));
+        const uy = Math.max(0, Math.min(maxY, Math.floor(u.y)));
+        protectedArr[uy * width + ux] = stamp;
       }
-      anyAnnexed = true;
+    }
+    for (const b of state.buildings) {
+      if ((b.stackCount > 0 || b.underConstructionCount > 0) && b.ownerId !== encloserId) {
+        protectedArr[b.y * width + b.x] = stamp;
+      }
+    }
+
+    for (let y = pMinY + 1; y < pMaxY; y++) {
+      const row = y * width;
+      for (let x = pMinX + 1; x < pMaxX; x++) {
+        const startIdx = row + x;
+        if (visited[startIdx] !== 0) continue;
+
+        let pHead = 0;
+        let pTail = 0;
+        queue[pTail++] = startIdx;
+        visited[startIdx] = 1;
+
+        let disqualified = false;
+        let touchesEncloser = false;
+        let pocketForeignOwner = -1;
+
+        while (pHead < pTail) {
+          const idx = queue[pHead++];
+          if (!disqualified) {
+            if (protectedArr[idx] === stamp) {
+              disqualified = true;
+            } else {
+              const cellOwner = owners[idx];
+              if (cellOwner >= 0) {
+                if (getRelation(state, encloserId, cellOwner) === 'ALLIED') {
+                  disqualified = true;
+                } else if (pocketForeignOwner === -1) {
+                  pocketForeignOwner = cellOwner;
+                } else if (pocketForeignOwner !== cellOwner) {
+                  disqualified = true;
+                }
+              }
+            }
+          }
+
+          // Check all 8 neighbors (guaranteed strictly inside map bounds) for third states / allies / encloser
+          const nOffsets = [
+            idx - 1,
+            idx + 1,
+            idx - width,
+            idx + width,
+            idx - width - 1,
+            idx - width + 1,
+            idx + width - 1,
+            idx + width + 1,
+          ];
+          for (let ni = 0; ni < 8; ni++) {
+            const nIdx = nOffsets[ni];
+            const nOwner = owners[nIdx];
+            if (nOwner === encloserId) {
+              touchesEncloser = true;
+              continue;
+            }
+            if (!disqualified && nOwner >= 0) {
+              if (getRelation(state, encloserId, nOwner) === 'ALLIED') {
+                disqualified = true;
+              } else if (pocketForeignOwner === -1) {
+                pocketForeignOwner = nOwner;
+              } else if (pocketForeignOwner !== nOwner) {
+                disqualified = true;
+              }
+            }
+            // Only first 4 offsets are 4-connected neighbors
+            if (ni < 4 && visited[nIdx] === 0) {
+              visited[nIdx] = 1;
+              queue[pTail++] = nIdx;
+            }
+          }
+        }
+
+        if (!disqualified && touchesEncloser) {
+          for (let i = 0; i < pTail; i++) {
+            owners[queue[i]] = encloserId;
+          }
+          anyAnnexed = true;
+        }
+      }
     }
   }
 

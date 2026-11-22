@@ -15,7 +15,11 @@ export const FINISH_OFF_MAX_CELLS = 140;
 export const MAX_UNIT_STACK = 50;
 
 export type BuildBatchSize = 1 | 5 | 10 | 'MAX';
-export type UnitType = 'INFANTRY' | 'TANK' | 'ARTILLERY' | 'PARATROOPERS';
+export type GroundUnitType = 'INFANTRY' | 'TANK' | 'ARTILLERY' | 'PARATROOPERS';
+export type NavalUnitType = 'TRANSPORT_SHIP' | 'CRUISER' | 'SUBMARINE' | 'RADAR_SHIP';
+export type AirUnitType = 'FIGHTER' | 'BOMBER' | 'RECON_PLANE';
+export type UnitType = GroundUnitType | NavalUnitType | AirUnitType;
+export type UnitDomain = 'LAND' | 'NAVAL' | 'AIR';
 export type UnitStance = 'LOCK' | 'RANGE';
 export type EliminationReason = 'TERRITORY_LOST' | 'MANPOWER_DEPLETED';
 
@@ -24,6 +28,13 @@ export const ALL_UNIT_TYPES: ReadonlyArray<UnitType> = [
   'TANK',
   'ARTILLERY',
   'PARATROOPERS',
+  'TRANSPORT_SHIP',
+  'CRUISER',
+  'SUBMARINE',
+  'RADAR_SHIP',
+  'FIGHTER',
+  'BOMBER',
+  'RECON_PLANE',
 ];
 
 export enum TerrainType {
@@ -46,6 +57,7 @@ export type BuildingType =
   | 'BARRACKS'
   | 'PORT'
   | 'AIRFIELD'
+  | 'RADAR_STATION'
   | DefenseBuildingType;
 
 export const DEFENSE_BUILDING_TYPES: ReadonlyArray<DefenseBuildingType> = [
@@ -64,6 +76,7 @@ export const ALL_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'BARRACKS',
   'PORT',
   'AIRFIELD',
+  'RADAR_STATION',
   'TRENCH',
   'BUNKER',
   'AA_BATTERY',
@@ -78,6 +91,7 @@ export const MANPOWER_BUILDING_TYPES: ReadonlyArray<BuildingType> = [
   'BARRACKS',
   'PORT',
   'AIRFIELD',
+  'RADAR_STATION',
   'TRENCH',
   'BUNKER',
   'AA_BATTERY',
@@ -119,10 +133,11 @@ export interface UnitCost {
 
 export interface UnitSpec {
   readonly type: UnitType;
+  readonly domain: UnitDomain;
   readonly nameCs: string;
   readonly shortCode: string;
   readonly descriptionCs: string;
-  readonly producerBuilding: 'BARRACKS' | 'ARMORY' | 'AIRFIELD';
+  readonly producerBuilding: 'BARRACKS' | 'ARMORY' | 'AIRFIELD' | 'PORT';
   readonly cost: UnitCost;
   readonly productionTicks: number;
   readonly speedPlains: number;
@@ -133,6 +148,9 @@ export interface UnitSpec {
   readonly attackRange: number;
   readonly operationRadius: number;
   readonly visionRadius: number;
+  readonly isStealth?: boolean;
+  readonly detectsStealth?: boolean;
+  readonly airRange?: number;
 }
 
 export interface ArtilleryExplosionFx {
@@ -166,7 +184,7 @@ export interface PublicUnitProductionJob {
 export interface Unit {
   readonly id: number;
   readonly ownerId: number;
-  readonly type: UnitType;
+  type: UnitType;
   x: number;
   y: number;
   count: number;
@@ -193,12 +211,15 @@ export interface Unit {
   lastCombatTargetX: number | null;
   lastCombatTargetY: number | null;
   breakoutAccum: number;
+  cargoUnitType: GroundUnitType | null;
+  homeAirfieldId: number | null;
 }
 
 export interface PublicUnitInfo {
   readonly id: number;
   readonly ownerId: number;
   readonly type: UnitType;
+  readonly domain: UnitDomain;
   readonly x: number;
   readonly y: number;
   readonly count: number;
@@ -221,6 +242,7 @@ export interface PublicUnitInfo {
   readonly combatCooldownTicks: number;
   readonly lastCombatTargetX: number | null;
   readonly lastCombatTargetY: number | null;
+  readonly cargoUnitType: GroundUnitType | null;
 }
 
 export interface Building {
@@ -339,6 +361,8 @@ export interface PlayerState {
   freePowerPlantUsed: boolean;
   buildingOccupancyByType: OccupancyByType;
   betrayalDebuffTicks: number;
+  manpowerSuppressionTicks: number;
+  manpowerSuppressionIntensity: number;
   nextBotDecisionTick: number;
   territoryCells: number;
   alive: boolean;
@@ -391,6 +415,8 @@ export interface PublicPlayerInfo {
   readonly blackoutSeverity?: number;
   readonly freePowerPlantUsed?: boolean;
   readonly buildingOccupancyByType?: Readonly<OccupancyByType>;
+  readonly manpowerSuppressionTicks?: number;
+  readonly manpowerSuppressionIntensity?: number;
 }
 
 export interface AttackOrder {
@@ -399,6 +425,7 @@ export interface AttackOrder {
   readonly origin: Point;
   waypoints: Point[];
   frontierArc: number;
+  targetOwnerId: number;
   targetOwnerIds: number[];
   readonly wildernessOnly: boolean;
   currentSegmentIndex: number;
@@ -485,6 +512,9 @@ export interface ClientRenderState {
   readonly attackOrders: ReadonlyArray<Readonly<AttackOrder>>;
   readonly frontPushOrders: ReadonlyArray<Readonly<FrontPushOrder>>;
   readonly publicResourceZones: ReadonlyArray<ResourceZonePublic>;
+  readonly visibilityGrid: Uint8Array;
+  readonly visibilityGridWidth: number;
+  readonly visibilityGridHeight: number;
   readonly stateVersion: number;
 }
 
@@ -527,6 +557,7 @@ export type Action =
       readonly x: number;
       readonly y: number;
       readonly manpowerPercent: number;
+      readonly targetOwnerId?: number;
     }
   | {
       readonly type: 'PLACE_BUILDING';

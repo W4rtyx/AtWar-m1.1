@@ -1,5 +1,6 @@
 import { BUILDING_SPECS } from '../engine/buildings';
 import { getDefenseRadius, isDefenseBuildingType } from '../engine/defenses';
+import { RADAR_STATION_VISION_RADIUS, supportsFireMission } from '../engine/navalAir';
 import {
   BuildingType,
   ClientRenderState,
@@ -14,6 +15,7 @@ import {
   TerrainType,
   WILDERNESS_OWNER,
 } from '../engine/types';
+import { FOG_GRID_HEIGHT, FOG_GRID_WIDTH } from '../engine/visibility';
 import { Camera } from './camera';
 import {
   MoveOrderPing,
@@ -241,11 +243,15 @@ export class CanvasRenderer {
   private readonly selectedTargetCanvas: HTMLCanvasElement;
   private readonly selectedTargetCtx: CanvasRenderingContext2D;
   private readonly selectedTargetImageData: ImageData;
+  private readonly fogCanvas: HTMLCanvasElement;
+  private readonly fogCtx: CanvasRenderingContext2D;
+  private readonly fogImageData: ImageData;
 
   private coastlinePath: Path2D | null = null;
   private stateBorderPath: Path2D = new Path2D();
   private selectedTargetOutlinePath: Path2D | null = null;
   private selectedTargetCacheKey = '';
+  private lastFogStateVersion = -1;
 
   private lastStateVersion = -1;
   private baseBuilt = false;
@@ -282,6 +288,16 @@ export class CanvasRenderer {
     }
     this.selectedTargetCtx = selCtx;
     this.selectedTargetImageData = this.selectedTargetCtx.createImageData(MAP_WIDTH, MAP_HEIGHT);
+
+    this.fogCanvas = document.createElement('canvas');
+    this.fogCanvas.width = FOG_GRID_WIDTH;
+    this.fogCanvas.height = FOG_GRID_HEIGHT;
+    const fCtx = this.fogCanvas.getContext('2d');
+    if (!fCtx) {
+      throw new Error('Could not initialize Fog of War 2D canvas context');
+    }
+    this.fogCtx = fCtx;
+    this.fogImageData = this.fogCtx.createImageData(FOG_GRID_WIDTH, FOG_GRID_HEIGHT);
   }
 
   public resize(viewportWidth: number, viewportHeight: number): void {
@@ -338,6 +354,7 @@ export class CanvasRenderer {
           buf[rgbIdx + 1] = g;
           buf[rgbIdx + 2] = b;
         } else if (t === TerrainType.MOUNTAINS) {
+          // Softened, low-contrast Call of War hillshade relief that blends naturally with state tints
           const depth = mtnDepth[idx];
           const xPrev = Math.max(0, x - 1);
           const xNext = Math.min(width - 1, x + 1);
@@ -347,16 +364,14 @@ export class CanvasRenderer {
           const gradY = mtnDepth[yNext * width + x] - mtnDepth[yPrev * width + x];
           const nwIdx = yPrev * width + xPrev;
           const seIdx = yNext * width + xNext;
-          const slope = (mtnDepth[seIdx] - mtnDepth[nwIdx]) * 0.75 + (gradX + gradY) * 0.45;
-          const ridgeWave = Math.sin(x * 0.42 + y * 0.31) * 4.5 + Math.cos(x * 0.23 - y * 0.38) * 3.5;
-          const elevLift = Math.min(28, depth * 2.1);
-          const alpineSnow = depth >= 6 ? Math.min(22, (depth - 5) * 4.5) : 0;
-          const contour = depth > 1 && depth % 3 === 0 ? -9 : 0;
-          const shade = slope * 9.5;
+          const rawSlope = (mtnDepth[seIdx] - mtnDepth[nwIdx]) * 0.65 + (gradX + gradY) * 0.35;
+          const shade = Math.max(-10, Math.min(10, rawSlope * 3.2));
+          const elevLift = Math.min(12, depth * 1.05);
+          const contour = depth > 2 && depth % 5 === 0 ? -2.5 : 0;
 
-          buf[rgbIdx] = Math.max(52, Math.min(184, 114 + elevLift + alpineSnow - shade + contour + ridgeWave));
-          buf[rgbIdx + 1] = Math.max(48, Math.min(178, 107 + elevLift + alpineSnow - shade + contour + ridgeWave));
-          buf[rgbIdx + 2] = Math.max(44, Math.min(170, 96 + elevLift + alpineSnow - shade + contour + ridgeWave * 0.8));
+          buf[rgbIdx] = Math.max(96, Math.min(182, 152 + elevLift - shade + contour));
+          buf[rgbIdx + 1] = Math.max(92, Math.min(176, 146 + elevLift - shade + contour));
+          buf[rgbIdx + 2] = Math.max(82, Math.min(164, 134 + elevLift - shade + contour));
         } else {
           // Muted cartographic parchment-olive plains with subtle topographic texture
           const grain = Math.sin(x * 0.19 + y * 0.13) * 1.6 + Math.cos(x * 0.09 - y * 0.17) * 1.4;
@@ -442,7 +457,7 @@ export class CanvasRenderer {
 
         const isMountain = terrain[idx] === TerrainType.MOUNTAINS;
         const baseBlend = nearBorder ? 0.78 : 0.46;
-        const blend = isMountain ? Math.max(0.24, baseBlend - 0.18) : baseBlend;
+        const blend = isMountain ? Math.max(0.34, baseBlend - 0.08) : baseBlend;
 
         data[rgbaIdx] = pColor[0] * blend + base[rgbIdx] * (1 - blend);
         data[rgbaIdx + 1] = pColor[1] * blend + base[rgbIdx + 1] * (1 - blend);
@@ -577,6 +592,63 @@ export class CanvasRenderer {
     this.selectedTargetCacheKey = cacheKey;
   }
 
+  private drawFogOfWar(
+    ctx: CanvasRenderingContext2D,
+    camera: Camera,
+    state: ClientRenderState,
+  ): void {
+    if (state.phase !== 'PLAYING' || state.visibilityGrid.length === 0) {
+      return;
+    }
+
+    const gw = state.visibilityGridWidth;
+    const gh = state.visibilityGridHeight;
+    if (state.stateVersion !== this.lastFogStateVersion) {
+      const grid = state.visibilityGrid;
+      const fogData = this.fogImageData.data;
+
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          let visSum = 0;
+          let count = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const ny = gy + dy;
+            if (ny < 0 || ny >= gh) continue;
+            const row = ny * gw;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = gx + dx;
+              if (nx < 0 || nx >= gw) continue;
+              const weight = dx === 0 && dy === 0 ? 3 : 1;
+              visSum += (grid[row + nx] === 1 ? 1 : 0) * weight;
+              count += weight;
+            }
+          }
+          const fogFactor = 1 - visSum / Math.max(1, count);
+          const alpha = Math.round(fogFactor * 118);
+          const o = (gy * gw + gx) * 4;
+          fogData[o] = 10;
+          fogData[o + 1] = 16;
+          fogData[o + 2] = 26;
+          fogData[o + 3] = alpha;
+        }
+      }
+      this.fogCtx.putImageData(this.fogImageData, 0, 0);
+      this.lastFogStateVersion = state.stateVersion;
+    }
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(
+      this.fogCanvas,
+      camera.offsetX,
+      camera.offsetY,
+      state.width * camera.zoom,
+      state.height * camera.zoom,
+    );
+    ctx.restore();
+  }
+
   public render(
     state: ClientRenderState,
     camera: Camera,
@@ -680,28 +752,36 @@ export class CanvasRenderer {
         : null;
 
     this.drawResourceZones(ctx, camera, state.publicResourceZones, highlightZoneType);
+    this.drawFogOfWar(ctx, camera, state);
     this.drawFrontPushOrders(ctx, camera, state);
     this.drawSelectedFrontierCells(ctx, camera, state.width, overlays.selectedFrontierCells);
     this.drawAttackOrders(ctx, camera, state, overlays.activeBendOrderId);
-    this.drawBuildings(ctx, camera, state.buildings, overlays.selectedBuildingId);
+    this.drawBuildings(
+      ctx,
+      camera,
+      state.buildings,
+      overlays.selectedBuildingId,
+      state.humanPlayerId,
+      state.players,
+    );
     this.drawCapitals(ctx, camera, state.players, state.humanPlayerId, state.buildings);
     drawMoveOrderPings(ctx, camera, overlays.moveOrderPings, nowMs);
     drawUnits(ctx, camera, state, overlays.selectedUnitIds, nowMs);
     drawArtilleryExplosions(ctx, camera, state.artilleryExplosions);
 
     if (overlays.artilleryFireMode) {
-      const selectedArtillery = state.units.filter(
+      const selectedFireUnits = state.units.filter(
         (u) =>
           u.ownerId === state.humanPlayerId &&
-          u.type === 'ARTILLERY' &&
+          supportsFireMission(u.type) &&
           overlays.selectedUnitIds.has(u.id),
       );
-      if (selectedArtillery.length > 0) {
+      if (selectedFireUnits.length > 0) {
         drawArtilleryFireMissionOverlay(
           ctx,
           camera,
           state,
-          selectedArtillery,
+          selectedFireUnits,
           overlays.hoverCell,
         );
       }
@@ -1055,6 +1135,8 @@ export class CanvasRenderer {
         return { fill: '#142934', border: '#5caecc' };
       case 'AIRFIELD':
         return { fill: '#1e2730', border: '#9ebad0' };
+      case 'RADAR_STATION':
+        return { fill: '#132a2c', border: '#6edcd0' };
       case 'TRENCH':
         return { fill: '#242a1c', border: '#a3b36d' };
       case 'BUNKER':
@@ -1107,7 +1189,8 @@ export class CanvasRenderer {
       case 'BARRACKS':
       case 'ARMORY':
       case 'PORT':
-      case 'AIRFIELD': {
+      case 'AIRFIELD':
+      case 'RADAR_STATION': {
         // Heraldic military shield
         ctx.moveTo(cx - r * 0.94, cy - r * 0.88);
         ctx.lineTo(cx + r * 0.94, cy - r * 0.88);
@@ -1157,18 +1240,29 @@ export class CanvasRenderer {
     camera: Camera,
     buildings: ReadonlyArray<PublicBuildingInfo>,
     selectedBuildingId: number | null,
+    humanPlayerId: number,
+    players: ReadonlyArray<PublicPlayerInfo>,
   ): void {
     const r = Math.max(5.5, Math.min(9.5, camera.zoom * 2.2));
+    const playerById = new Map<number, PublicPlayerInfo>();
+    for (const p of players) {
+      playerById.set(p.id, p);
+    }
+
     for (const b of buildings) {
       const sc = camera.worldToScreen(b.x + 0.5, b.y + 0.5);
-      const isSelected = selectedBuildingId === b.id;
+      const isOwn = b.ownerId === humanPlayerId;
+      const ownerPlayer = !isOwn ? playerById.get(b.ownerId) : undefined;
+      const isSelected = isOwn && selectedBuildingId === b.id;
       const isBuildingInitial = b.stackCount === 0 && b.underConstructionCount > 0;
       const colors = this.getBuildingCategoryColors(b.type);
 
       ctx.save();
 
-      const defRadius = getDefenseRadius(b.type);
+      const defRadius =
+        b.type === 'RADAR_STATION' ? RADAR_STATION_VISION_RADIUS : getDefenseRadius(b.type);
       if (
+        isOwn &&
         isDefenseBuildingType(b.type) &&
         b.stackCount > 0 &&
         (camera.zoom >= 0.85 || isSelected)
@@ -1192,12 +1286,15 @@ export class CanvasRenderer {
         ctx.strokeStyle = ringColor;
         ctx.stroke();
         ctx.setLineDash([]);
-      } else if (isSelected && b.type === 'BARRACKS' && defRadius > 0) {
+      } else if (isOwn && isSelected && (b.type === 'BARRACKS' || b.type === 'RADAR_STATION') && defRadius > 0) {
         ctx.beginPath();
         ctx.arc(sc.x, sc.y, defRadius * camera.zoom, 0, Math.PI * 2);
-        ctx.setLineDash([4, 4]);
+        ctx.setLineDash([5, 4]);
         ctx.lineWidth = 1.25;
-        ctx.strokeStyle = 'rgba(130, 198, 150, 0.65)';
+        ctx.strokeStyle =
+          b.type === 'RADAR_STATION'
+            ? 'rgba(110, 220, 208, 0.62)'
+            : 'rgba(130, 198, 150, 0.65)';
         ctx.stroke();
         ctx.setLineDash([]);
       }
@@ -1216,17 +1313,21 @@ export class CanvasRenderer {
       ctx.fill();
 
       this.traceBuildingBadgeShape(ctx, b.type, sc.x, sc.y, r);
-      ctx.fillStyle = colors.fill;
+      ctx.fillStyle = isOwn ? colors.fill : '#2b191d';
       ctx.fill();
-      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.85 : 1.45;
+      ctx.lineWidth = isOwn && b.effectiveOccupancyPct > 105 ? 1.85 : 1.45;
       ctx.strokeStyle =
         isSelected
           ? '#f0dca0'
-          : isBuildingInitial
-            ? '#70a8bf'
-            : b.effectiveOccupancyPct > 105
-              ? '#e6a550'
-              : colors.border;
+          : !isOwn
+            ? ownerPlayer?.relationToHuman === 'WAR'
+              ? '#e26a62'
+              : (ownerPlayer?.colorHex ?? '#c97f78')
+            : isBuildingInitial
+              ? '#70a8bf'
+              : b.effectiveOccupancyPct > 105
+                ? '#e6a550'
+                : colors.border;
       ctx.stroke();
 
       this.drawBuildingGlyph(ctx, b.type, sc.x, sc.y, r * 0.64);
@@ -1428,6 +1529,23 @@ export class CanvasRenderer {
         ctx.closePath();
         ctx.fill();
         break;
+      case 'RADAR_STATION':
+        // Radar dish + pulse arcs
+        ctx.strokeStyle = '#6edcd0';
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.44, cy + s * 0.68);
+        ctx.lineTo(cx, cy + s * 0.18);
+        ctx.lineTo(cx + s * 0.44, cy + s * 0.68);
+        ctx.moveTo(cx - s * 0.42, cy + s * 0.68);
+        ctx.lineTo(cx + s * 0.42, cy + s * 0.68);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx - s * 0.12, cy - s * 0.14, s * 0.5, -Math.PI * 0.68, Math.PI * 0.18);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx + s * 0.18, cy - s * 0.28, s * 0.34, -Math.PI * 0.45, Math.PI * 0.15);
+        ctx.stroke();
+        break;
       case 'TRENCH':
         // Zig-zag earthwork parapet + sandbag baseline
         ctx.strokeStyle = '#d5c589';
@@ -1486,7 +1604,10 @@ export class CanvasRenderer {
     const sc = camera.worldToScreen(preview.x + 0.5, preview.y + 0.5);
     const r = Math.max(7, Math.min(11, camera.zoom * 2.4));
     const spacingR = MIN_BUILDING_SPACING * camera.zoom;
-    const defenseR = getDefenseRadius(preview.buildingType) * camera.zoom;
+    const defenseR =
+      (preview.buildingType === 'RADAR_STATION'
+        ? RADAR_STATION_VISION_RADIUS
+        : getDefenseRadius(preview.buildingType)) * camera.zoom;
 
     ctx.save();
 

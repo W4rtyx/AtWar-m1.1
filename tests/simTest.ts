@@ -22,6 +22,10 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  WATER_NAV_STEP,
+  findWaterPath,
+} from '../src/engine/navalAir';
+import {
   BOT_COUNT,
   createClientRenderState,
   createEngineController,
@@ -29,6 +33,10 @@ import {
   dispatchAction,
   planSimulationTicks,
 } from '../src/engine/simulation';
+import {
+  FOG_GRID_STEP,
+  isWorldPointVisibleInGrid,
+} from '../src/engine/visibility';
 import {
   BETRAYAL_DEBUFF_TICKS,
   DEMOLISH_REFUND_RATIO,
@@ -2976,6 +2984,7 @@ function testManualArtilleryFireMissionBarrage(): void {
       { x: ax - 10, y: ay },
     ],
     frontierArc: 0,
+    targetOwnerId: humanId,
     targetOwnerIds: [humanId],
     wildernessOnly: false,
     currentSegmentIndex: 0,
@@ -3358,6 +3367,471 @@ function testFiveStatesOnEuropeMap(): void {
   console.log(`PASS [zb]: 5-state Europe map density verified (min capital spacing ${minPairDist.toFixed(1)}).`);
 }
 
+function testMixedEnemyAndWildernessPocketAnnexation(): void {
+  const state = createInitialGameState(9904);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  setWarRelation(state, humanId, enemyId);
+
+  const arena = findInlandPlainsCenter(state, 26, 20);
+  const cx = arena.x;
+  const cy = arena.y;
+
+  // 1. Completely landlocked pocket containing BOTH enemyId and residual WILDERNESS_OWNER
+  paintBlock(state, cx - 14, cy - 12, cx + 14, cy + 12, humanId);
+  const enemyCells = paintBlock(state, cx - 3, cy - 2, cx, cy + 2, enemyId);
+  const wildCells = paintBlock(state, cx + 1, cy - 2, cx + 3, cy + 2, WILDERNESS_OWNER);
+
+  // 2. Mixed pocket touching WATER -> MUST NOT annex
+  let coastX = -1;
+  let coastY = -1;
+  for (let y = 120; y < 380 && coastX === -1; y++) {
+    for (let x = 120; x < 620; x++) {
+      if (
+        state.terrain[y * state.width + x] === TerrainType.WATER &&
+        state.terrain[y * state.width + (x + 1)] !== TerrainType.WATER &&
+        state.terrain[y * state.width + (x + 7)] !== TerrainType.WATER &&
+        state.terrain[(y - 2) * state.width + (x + 2)] !== TerrainType.WATER &&
+        state.terrain[(y + 2) * state.width + (x + 2)] !== TerrainType.WATER
+      ) {
+        coastX = x + 1;
+        coastY = y;
+        break;
+      }
+    }
+  }
+  assert(coastX !== -1, 'Expected coastal reference point for negative pocket check');
+  paintBlock(state, coastX, coastY - 3, coastX + 7, coastY + 3, humanId);
+  const coastalEnemy = paintBlock(state, coastX, coastY - 1, coastX + 1, coastY + 1, enemyId);
+  const coastalWild = paintBlock(state, coastX + 2, coastY - 1, coastX + 2, coastY + 1, WILDERNESS_OWNER);
+
+  const annexed = annexEncircledPockets(state);
+  assert(annexed, 'Mixed enemy + wilderness landlocked pocket must annex');
+
+  for (const idx of [...enemyCells, ...wildCells]) {
+    assert(
+      state.owners[idx] === humanId,
+      `Mixed enclosed pocket cell ${idx} (enemy or wilderness) must be annexed to humanId`,
+    );
+  }
+  for (const idx of [...coastalEnemy, ...coastalWild]) {
+    assert(
+      state.owners[idx] !== humanId,
+      `Coastal mixed pocket cell ${idx} touching WATER must NOT be annexed`,
+    );
+  }
+  console.log('PASS [zc]: Mixed enemy + residual wilderness pocket annexation verified.');
+}
+
+function testStrictWildernessExpansionAndDoubleTapInWar(): void {
+  const state = createInitialGameState(9905);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 28, 22);
+  const cx = arena.x;
+  const cy = arena.y;
+  paintBlock(state, cx - 26, cy - 22, cx + 26, cy + 16, WILDERNESS_OWNER);
+  paintBlock(state, cx - 12, cy - 6, cx - 2, cy + 6, humanId);
+  const enemyCells = paintBlock(state, cx - 2, cy - 21, cx + 24, cy - 7, enemyId);
+  setWarRelation(state, humanId, enemyId);
+
+  const enemyBefore = enemyCells.filter((idx) => state.owners[idx] === enemyId).length;
+  human.maxManpower = 1500;
+  human.manpower = 1200;
+
+  // 1. Wilderness attack arrow running right next to WAR enemy border
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: cx - 3, y: cy - 4 },
+      { x: cx + 12, y: cy - 4 },
+    ],
+    manpowerPercent: 35,
+    targetOwnerId: WILDERNESS_OWNER,
+  });
+
+  // 2. Double-tap (BORDER_SURGE_PUSH) onto wilderness 2 cells from WAR enemy
+  dispatchAction(state, {
+    type: 'BORDER_SURGE_PUSH',
+    playerId: humanId,
+    x: cx + 4,
+    y: cy - 5,
+    manpowerPercent: 45,
+    targetOwnerId: WILDERNESS_OWNER,
+  });
+
+  for (let t = 0; t < 20; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  const enemyAfter = enemyCells.filter((idx) => state.owners[idx] === enemyId).length;
+  assert(
+    enemyAfter === enemyBefore,
+    `Wilderness arrow & double-tap must capture 0 cells of WAR neighbor (lost ${enemyBefore - enemyAfter})`,
+  );
+  assert(
+    state.owners[cy * state.width + (cx + 6)] === humanId ||
+      state.owners[(cy - 4) * state.width + (cx + 6)] === humanId,
+    'Wilderness expansion should still advance into unclaimed wilderness',
+  );
+  console.log('PASS [zd]: Strict wilderness vs. WAR neighbor separation verified.');
+}
+
+function testArtilleryManpowerSuppression(): void {
+  const createControlledArena = (): {
+    state: GameState;
+    humanId: number;
+    enemyId: number;
+    ax: number;
+    ay: number;
+  } => {
+    const state = createInitialGameState(9906);
+    const start = findPlainsLandSpot(state, 360, 260);
+    dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+    const humanId = state.humanPlayerId;
+    const enemyId = 2;
+    for (const p of state.players.values()) {
+      if (p.isBot) p.nextBotDecisionTick = 999999;
+    }
+    setWarRelation(state, humanId, enemyId);
+
+    const ax = 440;
+    const ay = 230;
+    for (let y = ay - 18; y <= ay + 18; y++) {
+      for (let x = ax - 20; x <= ax + 24; x++) {
+        const idx = y * state.width + x;
+        state.terrain[idx] = TerrainType.PLAINS;
+        state.owners[idx] = x >= ax ? enemyId : humanId;
+      }
+    }
+    const enemy = state.players.get(enemyId)!;
+    enemy.money = 5000;
+    enemy.buildingMaterial = 5000;
+    const pp = placeBuilding(state, enemyId, 'POWER_PLANT', ax + 15, ay + 12, 5);
+    if (pp) {
+      pp.stackCount = 5;
+      pp.underConstructionCount = 0;
+      pp.constructionTicksRemaining = 0;
+    }
+    dispatchAction(state, { type: 'TICK' });
+    enemy.energyReserve = enemy.energyReserveMax;
+    enemy.manpower = Math.round(enemy.maxManpower * 0.48);
+    return { state, humanId, enemyId, ax, ay };
+  };
+
+  const control = createControlledArena();
+  const shelled = createControlledArena();
+
+  const arty = spawnUnitStack(shelled.state, shelled.humanId, 'ARTILLERY', shelled.ax - 4, shelled.ay, 4, {
+    stance: 'LOCK',
+  });
+  dispatchAction(shelled.state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: shelled.humanId,
+    unitIds: [arty.id],
+    targetX: shelled.ax + 10,
+    targetY: shelled.ay,
+  });
+
+  for (let t = 0; t < 25; t++) {
+    dispatchAction(control.state, { type: 'TICK' });
+    dispatchAction(shelled.state, { type: 'TICK' });
+  }
+
+  const ctrlEnemy = control.state.players.get(control.enemyId)!;
+  const shEnemy = shelled.state.players.get(shelled.enemyId)!;
+  assert(
+    shEnemy.manpowerSuppressionTicks > 0 && shEnemy.manpowerSuppressionIntensity > 0,
+    `Repeated artillery fire must apply manpower suppression (ticks=${shEnemy.manpowerSuppressionTicks}, intensity=${shEnemy.manpowerSuppressionIntensity.toFixed(2)})`,
+  );
+  assert(
+    shEnemy.manpowerIncomePerSec < ctrlEnemy.manpowerIncomePerSec * 0.9,
+    `Suppressed enemy MP income (${shEnemy.manpowerIncomePerSec.toFixed(2)}/s) must be significantly lower than unsuppressed (${ctrlEnemy.manpowerIncomePerSec.toFixed(2)}/s)`,
+  );
+  console.log(
+    `PASS [ze]: Artillery Manpower Suppression verified (−${Math.round(shEnemy.manpowerSuppressionIntensity * 100)}%, income ${shEnemy.manpowerIncomePerSec.toFixed(1)}/s vs ${ctrlEnemy.manpowerIncomePerSec.toFixed(1)}/s).`,
+  );
+}
+
+function testNavalWaterPathfindingTransportLandingAndIslandEnergy(): void {
+  assert(WATER_NAV_STEP === 3, `Expected WATER_NAV_STEP === 3, got ${WATER_NAV_STEP}`);
+  const state = createInitialGameState(9907);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  // Carve an isolated sea theater with a peninsula separating two coasts + an island
+  const sx = 430;
+  const sy = 220;
+  for (let y = sy - 30; y <= sy + 30; y++) {
+    for (let x = sx - 30; x <= sx + 40; x++) {
+      state.terrain[y * state.width + x] = TerrainType.WATER;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+  // Mainland western coast
+  for (let y = sy - 20; y <= sy + 20; y++) {
+    for (let x = sx - 28; x <= sx - 16; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = humanId;
+    }
+  }
+  // Central peninsula jutting southward into sea (forces water A* to route around tip)
+  for (let y = sy - 28; y <= sy + 8; y++) {
+    for (let x = sx - 2; x <= sx + 4; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+  // Distant wilderness island on eastern side
+  for (let y = sy - 8; y <= sy + 8; y++) {
+    for (let x = sx + 22; x <= sx + 34; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+
+  // Verify water path around peninsula never crosses land
+  const seaRoute = findWaterPath(state, sx - 10, sy - 6, sx + 14, sy - 6);
+  assert(seaRoute !== null && seaRoute.length >= 2, 'Water A* must route around land peninsula');
+  for (const wp of seaRoute!) {
+    assert(
+      state.terrain[Math.floor(wp.y) * state.width + Math.floor(wp.x)] === TerrainType.WATER,
+      'Water path waypoint must stay strictly on WATER',
+    );
+  }
+
+  human.money = 10000;
+  human.buildingMaterial = 10000;
+  human.industry = 10000;
+  human.maxManpower = 2000;
+  human.manpower = 1500;
+
+  // Build mainland POWER_PLANT + coastal PORT
+  const pp = placeBuilding(state, humanId, 'POWER_PLANT', sx - 25, sy - 10, 5)!;
+  const port = placeBuilding(state, humanId, 'PORT', sx - 17, sy, 1)!;
+  assert(pp !== null && port !== null, 'Mainland power plant and coastal PORT must place');
+  for (let t = 0; t < BUILDING_SPECS.PORT.constructionTicks + 2; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  // Produce a TRANSPORT_SHIP at PORT and sail it around the peninsula to the wilderness island
+  dispatchAction(state, {
+    type: 'PRODUCE_UNIT',
+    playerId: humanId,
+    buildingId: port.id,
+    unitType: 'TRANSPORT_SHIP',
+  });
+  for (let t = 0; t < UNIT_SPECS.TRANSPORT_SHIP.productionTicks + 2; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const transport = state.units.find((u) => u.ownerId === humanId && u.type === 'TRANSPORT_SHIP')!;
+  assert(transport !== undefined, 'PORT must produce TRANSPORT_SHIP onto adjacent water');
+
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [transport.id],
+    targetX: sx + 23,
+    targetY: sy,
+  });
+  assert(transport.waypoints.length > 0, 'Transport must receive valid A* water route');
+
+  for (let t = 0; t < 160; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    if (transport.type === 'INFANTRY') break;
+  }
+
+  assert(
+    transport.type === 'INFANTRY' && state.owners[sy * state.width + (sx + 23)] === humanId,
+    `TRANSPORT_SHIP must sail around peninsula and disembark INFANTRY claiming island (type=${transport.type})`,
+  );
+
+  // Build an energy-consuming MINE on the captured island (zero power plants on the island!)
+  const islandMine = placeBuilding(state, humanId, 'MINE', sx + 24, sy, 1);
+  assert(islandMine !== null, 'MINE must place on captured island beachhead');
+  for (let t = 0; t < BUILDING_SPECS.MINE.constructionTicks + 3; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(
+    human.energySupplyRatio === 1 && islandMine!.effectiveOutputPct > 0,
+    `Island MINE must share mainland POWER_PLANT energy grid (supply=${human.energySupplyRatio}, out=${islandMine!.effectiveOutputPct}%)`,
+  );
+  console.log('PASS [zf]: Water A* around peninsula, PORT transport landing & shared island energy verified.');
+}
+
+function testBomberAirstrikeAaFighterInterceptAndRadarSubmarineFogOfWar(): void {
+  const state = createInitialGameState(9908);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  // Find distant deep-fog arena with zero pre-existing buildings or human presence
+  let fx = 540;
+  let fy = 150;
+  outerArena: for (let y = 90; y <= state.height - 90; y += 20) {
+    for (let x = 140; x <= state.width - 140; x += 20) {
+      const hasBuilding = state.buildings.some(
+        (b) => Math.abs(b.x - x) <= 62 && Math.abs(b.y - y) <= 52,
+      );
+      if (hasBuilding) continue;
+      let nearHuman = false;
+      for (let py = y - 50; py <= y + 50 && !nearHuman; py += 10) {
+        for (let px = x - 60; px <= x + 60; px += 10) {
+          if (state.owners[py * state.width + px] === humanId) {
+            nearHuman = true;
+            break;
+          }
+        }
+      }
+      if (!nearHuman) {
+        fx = x;
+        fy = y;
+        break outerArena;
+      }
+    }
+  }
+  for (let y = fy - 45; y <= fy + 45; y++) {
+    for (let x = fx - 55; x <= fx + 55; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+  // Carve deep sea pocket inside fog for stealth enemy submarine
+  for (let y = fy - 12; y <= fy + 12; y++) {
+    for (let x = fx + 15; x <= fx + 35; x++) {
+      state.terrain[y * state.width + x] = TerrainType.WATER;
+    }
+  }
+  // Claim western airfield base for human (distance ~65 from target, > BORDER_VISION_RADIUS)
+  paintBlock(state, fx - 54, fy - 12, fx - 44, fy + 12, humanId);
+  // Claim distant eastern enemy sector
+  paintBlock(state, fx - 6, fy - 12, fx + 12, fy + 12, enemyId);
+
+  human.money = 10000;
+  human.buildingMaterial = 10000;
+  human.industry = 10000;
+  human.energyReserve = human.energyReserveMax;
+  enemy.money = 10000;
+  enemy.buildingMaterial = 10000;
+  enemy.industry = 10000;
+  enemy.energyReserve = enemy.energyReserveMax;
+
+  const humanPp = placeBuilding(state, humanId, 'POWER_PLANT', fx - 52, fy - 8, 5)!;
+  assert(humanPp !== null, 'Human POWER_PLANT must place cleanly');
+  humanPp.stackCount = 5;
+  humanPp.underConstructionCount = 0;
+  humanPp.constructionTicksRemaining = 0;
+
+  const enemyBunker = placeBuilding(state, enemyId, 'BUNKER', fx, fy, 1)!;
+  const enemyAa = placeBuilding(state, enemyId, 'AA_BATTERY', fx + 9, fy + 6, 1)!;
+  assert(
+    enemyBunker !== null && enemyAa !== null,
+    'Enemy BUNKER and AA_BATTERY must place with >= MIN_BUILDING_SPACING',
+  );
+  enemyBunker.stackCount = 2;
+  enemyBunker.underConstructionCount = 0;
+  enemyAa.stackCount = 2;
+  enemyAa.underConstructionCount = 0;
+  enemyAa.effectiveOutputPct = 100;
+
+  const enemySub = spawnUnitStack(state, enemyId, 'SUBMARINE', fx + 24, fy, 2, { stance: 'LOCK' });
+
+  // 1. Before radar/recon: enemy BUNKER, AA_BATTERY & SUBMARINE must be hidden from ClientRenderState
+  const foggedClient = createClientRenderState(state);
+  const subGx = Math.floor(enemySub.x / FOG_GRID_STEP);
+  const subGy = Math.floor(enemySub.y / FOG_GRID_STEP);
+  assert(
+    foggedClient.visibilityGrid[subGy * foggedClient.visibilityGridWidth + subGx] === 0,
+    'Distant sea sector must start in Fog of War (visibilityGrid === 0)',
+  );
+  assert(
+    !foggedClient.units.some((u) => u.id === enemySub.id),
+    'Stealth SUBMARINE outside radar/recon must NOT appear in ClientRenderState',
+  );
+  assert(
+    !foggedClient.buildings.some((b) => b.id === enemyBunker.id || b.id === enemyAa.id),
+    'Enemy buildings in Fog of War must NOT leak into ClientRenderState',
+  );
+
+  // 2. Build RADAR_STATION within range (radius 80) -> reveals visibilityGrid, buildings AND stealth submarine!
+  const radar = placeBuilding(state, humanId, 'RADAR_STATION', fx - 46, fy, 1)!;
+  assert(radar !== null, 'RADAR_STATION must build on owned territory');
+  for (let t = 0; t < BUILDING_SPECS.RADAR_STATION.constructionTicks + 2; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  const revealedClient = createClientRenderState(state);
+  assert(
+    isWorldPointVisibleInGrid(state, revealedClient.visibilityGrid, enemySub.x, enemySub.y),
+    'RADAR_STATION must illuminate visibilityGrid at target coordinates',
+  );
+  assert(
+    revealedClient.buildings.some((b) => b.id === enemyBunker.id),
+    'RADAR_STATION must reveal enemy BUNKER in ClientRenderState',
+  );
+  assert(
+    revealedClient.units.some((u) => u.id === enemySub.id),
+    'RADAR_STATION must reveal stealth enemy SUBMARINE in ClientRenderState',
+  );
+
+  // 3. Bomber air strike within AIRFIELD range + AA_BATTERY / FIGHTER interception
+  const airfield = placeBuilding(state, humanId, 'AIRFIELD', fx - 46, fy + 10, 1)!;
+  airfield.stackCount = 1;
+  airfield.underConstructionCount = 0;
+
+  const bomber = spawnUnitStack(state, humanId, 'BOMBER', airfield.x + 0.5, airfield.y + 0.5, 2);
+  const enemyFighter = spawnUnitStack(state, enemyId, 'FIGHTER', fx + 2, fy - 2, 1, {
+    stance: 'RANGE',
+  });
+  const bomberHpBefore = bomber.hp;
+  const enemyMpBefore = enemy.manpower;
+
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [bomber.id],
+    targetX: fx,
+    targetY: fy,
+  });
+  assert(bomber.fireMissionTicksRemaining > 0, 'BOMBER strike inside AIRFIELD range must activate');
+
+  for (let t = 0; t < 40; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  assert(
+    bomber.hp < bomberHpBefore,
+    `Enemy AA_BATTERY & FIGHTER must intercept and damage attacking BOMBER (${bomber.hp.toFixed(1)} < ${bomberHpBefore})`,
+  );
+  assert(
+    enemyBunker.stackCount < 2 || enemy.manpower < enemyMpBefore || enemy.manpowerSuppressionTicks > 0,
+    'BOMBER air strike must degrade enemy defenses/manpower and trigger suppression',
+  );
+  void enemyFighter;
+  console.log('PASS [zg]: BOMBER airstrike, AA/FIGHTER intercept & RADAR submarine/building Fog of War verified.');
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -3387,7 +3861,12 @@ function main(): void {
   testCoastalCellsCapturableAndFinePathfinding();
   testTrenchDestroyedOnCapture();
   testFiveStatesOnEuropeMap();
-  console.log('ALL 28 SIMULATION TESTS PASSED.');
+  testMixedEnemyAndWildernessPocketAnnexation();
+  testStrictWildernessExpansionAndDoubleTapInWar();
+  testArtilleryManpowerSuppression();
+  testNavalWaterPathfindingTransportLandingAndIslandEnergy();
+  testBomberAirstrikeAaFighterInterceptAndRadarSubmarineFogOfWar();
+  console.log('ALL 33 SIMULATION TESTS PASSED.');
 }
 
 main();

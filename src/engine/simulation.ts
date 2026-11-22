@@ -27,7 +27,6 @@ import {
   canOrderCaptureCell,
   claimInitialTerritory,
   clampPolylineLength,
-  collectCenterlineWarEnemies,
   computePolylineLength,
   estimateFinishOffManpower,
   getRelation,
@@ -75,6 +74,13 @@ import {
   stepUnitsMovementAndSupply,
   toPublicUnitInfo,
 } from './units';
+import {
+  FOG_GRID_HEIGHT,
+  FOG_GRID_WIDTH,
+  computePlayerVisibilityGrid,
+  isBuildingVisibleToPlayer,
+  isWorldPointVisibleInGrid,
+} from './visibility';
 
 const HUMAN_PLAYER_ID = 1;
 const HUMAN_START_RADIUS = 14;
@@ -478,20 +484,59 @@ function handleCreateAttackOrder(
     return;
   }
 
-  const wildernessOnly = explicitTargetOwnerId === WILDERNESS_OWNER;
-  let targetOwnerIds: number[];
-  if (wildernessOnly) {
-    targetOwnerIds = [];
-  } else if (
-    explicitTargetOwnerId !== undefined &&
-    explicitTargetOwnerId >= 0 &&
-    explicitTargetOwnerId !== playerId &&
-    getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
-  ) {
-    targetOwnerIds = [explicitTargetOwnerId];
+  let targetOwnerId: number;
+  if (explicitTargetOwnerId !== undefined) {
+    if (explicitTargetOwnerId === WILDERNESS_OWNER) {
+      targetOwnerId = WILDERNESS_OWNER;
+    } else if (
+      explicitTargetOwnerId >= 0 &&
+      explicitTargetOwnerId !== playerId &&
+      getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
+    ) {
+      targetOwnerId = explicitTargetOwnerId;
+    } else {
+      targetOwnerId = WILDERNESS_OWNER;
+    }
   } else {
-    targetOwnerIds = collectCenterlineWarEnemies(state, playerId, waypoints);
+    const tip = waypoints[waypoints.length - 1];
+    const tipX = Math.max(0, Math.min(state.width - 1, Math.floor(tip.x)));
+    const tipY = Math.max(0, Math.min(state.height - 1, Math.floor(tip.y)));
+    const tipOwner = state.owners[tipY * state.width + tipX];
+    if (
+      tipOwner >= 0 &&
+      tipOwner !== playerId &&
+      getRelation(state, playerId, tipOwner) === 'WAR'
+    ) {
+      targetOwnerId = tipOwner;
+    } else {
+      let spineWarOwner = WILDERNESS_OWNER;
+      for (let i = 0; i < waypoints.length - 1 && spineWarOwner === WILDERNESS_OWNER; i++) {
+        const a = waypoints[i];
+        const b = waypoints[i + 1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 1.5));
+        for (let s = 0; s <= steps; s++) {
+          const segFrac = (i + s / steps) / Math.max(1, waypoints.length - 1);
+          if (segFrac < 0.2) continue;
+          const t = s / steps;
+          const px = Math.max(0, Math.min(state.width - 1, Math.floor(a.x + (b.x - a.x) * t)));
+          const py = Math.max(0, Math.min(state.height - 1, Math.floor(a.y + (b.y - a.y) * t)));
+          const cellOwner = state.owners[py * state.width + px];
+          if (
+            cellOwner >= 0 &&
+            cellOwner !== playerId &&
+            getRelation(state, playerId, cellOwner) === 'WAR'
+          ) {
+            spineWarOwner = cellOwner;
+            break;
+          }
+        }
+      }
+      targetOwnerId = spineWarOwner;
+    }
   }
+
+  const wildernessOnly = targetOwnerId === WILDERNESS_OWNER;
+  const targetOwnerIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
 
   const clampedPct = Math.max(10, Math.min(100, manpowerPercent));
   const activeMp = Math.max(0, player.manpower - player.allocatedManpower);
@@ -509,6 +554,7 @@ function handleCreateAttackOrder(
     origin: anchoredOrigin,
     waypoints,
     frontierArc: 0,
+    targetOwnerId,
     targetOwnerIds,
     wildernessOnly,
     currentSegmentIndex: 0,
@@ -932,6 +978,7 @@ function handleBorderSurgePush(
   x: number,
   y: number,
   manpowerPercent: number,
+  explicitTargetOwnerId?: number,
 ): void {
   if (state.phase !== 'PLAYING') return;
   const player = state.players.get(playerId);
@@ -943,32 +990,55 @@ function handleBorderSurgePush(
   const clickedOwner = owners[iy * width + ix];
 
   let targetOwnerId = WILDERNESS_OWNER;
-  if (
+  if (explicitTargetOwnerId !== undefined) {
+    if (
+      explicitTargetOwnerId >= 0 &&
+      explicitTargetOwnerId !== playerId &&
+      getRelation(state, playerId, explicitTargetOwnerId) === 'WAR'
+    ) {
+      targetOwnerId = explicitTargetOwnerId;
+    } else {
+      targetOwnerId = WILDERNESS_OWNER;
+    }
+  } else if (clickedOwner === WILDERNESS_OWNER) {
+    // Strict separation: double-clicking wilderness NEVER spills into WAR enemy territory
+    targetOwnerId = WILDERNESS_OWNER;
+  } else if (
     clickedOwner >= 0 &&
     clickedOwner !== playerId &&
     getRelation(state, playerId, clickedOwner) === 'WAR'
   ) {
     targetOwnerId = clickedOwner;
   } else {
-    let bestDistSq = Infinity;
-    for (let dy = -6; dy <= 6; dy++) {
+    // Clicked on own territory: check 1-cell border neighborhood, preferring wilderness if present
+    let hasAdjacentWilderness = false;
+    let adjacentWarOwner = WILDERNESS_OWNER;
+    for (let dy = -1; dy <= 1 && !hasAdjacentWilderness; dy++) {
       const ny = iy + dy;
       if (ny < 0 || ny >= height) continue;
-      for (let dx = -6; dx <= 6; dx++) {
-        const dSq = dx * dx + dy * dy;
-        if (dSq > 36 || dSq >= bestDistSq) continue;
+      for (let dx = -1; dx <= 1; dx++) {
         const nx = ix + dx;
         if (nx < 0 || nx >= width) continue;
-        const o = owners[ny * width + nx];
-        if (o >= 0 && o !== playerId && getRelation(state, playerId, o) === 'WAR') {
-          bestDistSq = dSq;
-          targetOwnerId = o;
+        const nIdx = ny * width + nx;
+        if (terrain[nIdx] === TerrainType.WATER) continue;
+        const o = owners[nIdx];
+        if (o === WILDERNESS_OWNER) {
+          hasAdjacentWilderness = true;
+          break;
+        }
+        if (
+          adjacentWarOwner === WILDERNESS_OWNER &&
+          o >= 0 &&
+          o !== playerId &&
+          getRelation(state, playerId, o) === 'WAR'
+        ) {
+          adjacentWarOwner = o;
         }
       }
     }
+    targetOwnerId = hasAdjacentWilderness ? WILDERNESS_OWNER : adjacentWarOwner;
   }
 
-  const allowedEnemyIds = targetOwnerId >= 0 ? [targetOwnerId] : [];
   const radius = 18;
   const rSq = radius * radius;
   const frontierCells: number[] = [];
@@ -995,7 +1065,7 @@ function handleBorderSurgePush(
           if (nx < 0 || nx >= width) continue;
           const nIdx = ny * width + nx;
           if (terrain[nIdx] === TerrainType.WATER) continue;
-          if (canOrderCaptureCell(state, playerId, allowedEnemyIds, owners[nIdx])) {
+          if (canOrderCaptureCell(state, playerId, targetOwnerId, owners[nIdx], false)) {
             cellHasTarget = true;
             sumDirX += dx;
             sumDirY += dy;
@@ -1197,6 +1267,7 @@ export function dispatchAction(state: GameState, action: Action): void {
         action.x,
         action.y,
         action.manpowerPercent,
+        action.targetOwnerId,
       );
       break;
     case 'PLACE_BUILDING': {
@@ -1385,7 +1456,7 @@ export function dispatchAction(state: GameState, action: Action): void {
   }
 }
 
-function toPublicBuilding(b: Building): PublicBuildingInfo {
+function toPublicBuilding(b: Building, isOwn: boolean): PublicBuildingInfo {
   return {
     id: b.id,
     type: b.type,
@@ -1394,33 +1465,35 @@ function toPublicBuilding(b: Building): PublicBuildingInfo {
     y: b.y,
     isCapital: b.isCapital,
     level: b.level,
-    revealedEfficiencyPct: b.revealedEfficiencyPct,
+    revealedEfficiencyPct: isOwn ? b.revealedEfficiencyPct : null,
     stackCount: b.stackCount,
-    underConstructionCount: b.underConstructionCount,
-    constructionTicksRemaining: b.constructionTicksRemaining,
+    underConstructionCount: isOwn ? b.underConstructionCount : 0,
+    constructionTicksRemaining: isOwn ? b.constructionTicksRemaining : 0,
     constructionTicksTotal: b.constructionTicksTotal,
-    totalInvestedMoney: b.totalInvestedMoney,
-    totalInvestedMaterial: b.totalInvestedMaterial,
-    totalInvestedIndustry: b.totalInvestedIndustry,
-    occupancyOverride: b.occupancyOverride,
-    effectiveOccupancyPct: b.effectiveOccupancyPct,
-    effectiveOutputPct: b.effectiveOutputPct,
-    allocatedManpower: b.allocatedManpower,
-    currentEnergyUse: b.currentEnergyUse,
-    currentEnergyProd: b.currentEnergyProd,
-    unitQueue: b.unitQueue.map((j) => ({
-      unitType: j.unitType,
-      ticksRemaining: j.ticksRemaining,
-      ticksTotal: j.ticksTotal,
-    })),
-    paradropCooldownTicks: b.paradropCooldownTicks,
+    totalInvestedMoney: isOwn ? b.totalInvestedMoney : 0,
+    totalInvestedMaterial: isOwn ? b.totalInvestedMaterial : 0,
+    totalInvestedIndustry: isOwn ? b.totalInvestedIndustry : 0,
+    occupancyOverride: isOwn ? b.occupancyOverride : null,
+    effectiveOccupancyPct: isOwn ? b.effectiveOccupancyPct : 100,
+    effectiveOutputPct: isOwn ? b.effectiveOutputPct : 100,
+    allocatedManpower: isOwn ? b.allocatedManpower : 0,
+    currentEnergyUse: isOwn ? b.currentEnergyUse : 0,
+    currentEnergyProd: isOwn ? b.currentEnergyProd : 0,
+    unitQueue: isOwn
+      ? b.unitQueue.map((j) => ({
+          unitType: j.unitType,
+          ticksRemaining: j.ticksRemaining,
+          ticksTotal: j.ticksTotal,
+        }))
+      : [],
+    paradropCooldownTicks: isOwn ? b.paradropCooldownTicks : 0,
   };
 }
 
 /**
  * Produces a strictly sanitized client state snapshot:
  * - Secret resource optimum coordinates are never exposed.
- * - Opponent manpower, buildings, and internal economy stats are omitted.
+ * - Opponent manpower, buildings outside Fog of War, and internal economy stats are omitted.
  */
 export function createClientRenderState(state: GameState): ClientRenderState {
   const players: PublicPlayerInfo[] = [];
@@ -1481,6 +1554,8 @@ export function createClientRenderState(state: GameState): ClientRenderState {
         blackoutSeverity: p.blackoutSeverity,
         freePowerPlantUsed: p.freePowerPlantUsed,
         buildingOccupancyByType: { ...p.buildingOccupancyByType },
+        manpowerSuppressionTicks: p.manpowerSuppressionTicks,
+        manpowerSuppressionIntensity: p.manpowerSuppressionIntensity,
       });
     } else {
       const finishOffRequiredManpower = isNeighborOfHuman
@@ -1514,22 +1589,30 @@ export function createClientRenderState(state: GameState): ClientRenderState {
     relationsObj[key] = rel;
   }
 
+  const visibilityGrid = computePlayerVisibilityGrid(state, state.humanPlayerId, UNIT_SPECS);
+
   const buildings: PublicBuildingInfo[] = [];
   for (const b of state.buildings) {
     if (b.ownerId === state.humanPlayerId) {
-      buildings.push(toPublicBuilding(b));
+      buildings.push(toPublicBuilding(b, true));
+    } else if (isBuildingVisibleToPlayer(state, state.humanPlayerId, b, visibilityGrid)) {
+      buildings.push(toPublicBuilding(b, false));
     }
   }
 
   const units: PublicUnitInfo[] = [];
   for (const u of state.units) {
-    if (isUnitVisibleToPlayer(state, state.humanPlayerId, u)) {
+    if (isUnitVisibleToPlayer(state, state.humanPlayerId, u, visibilityGrid)) {
       units.push(toPublicUnitInfo(u, state.humanPlayerId));
     }
   }
 
   const visibleExplosions: ArtilleryExplosionFx[] = [];
   for (const fx of state.artilleryExplosions) {
+    if (isWorldPointVisibleInGrid(state, visibilityGrid, fx.x, fx.y)) {
+      visibleExplosions.push({ ...fx });
+      continue;
+    }
     let visible = false;
     for (const u of state.units) {
       if (u.count <= 0 || u.hp <= 0) continue;
@@ -1604,6 +1687,9 @@ export function createClientRenderState(state: GameState): ClientRenderState {
       frontierCells: [...o.frontierCells],
     })),
     publicResourceZones: state.publicResourceZones,
+    visibilityGrid,
+    visibilityGridWidth: FOG_GRID_WIDTH,
+    visibilityGridHeight: FOG_GRID_HEIGHT,
     stateVersion: state.stateVersion,
   };
 }

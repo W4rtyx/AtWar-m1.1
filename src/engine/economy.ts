@@ -261,6 +261,8 @@ export function createInitialPlayerState(params: {
     freePowerPlantUsed: false,
     buildingOccupancyByType: createDefaultOccupancyByType(),
     betrayalDebuffTicks: 0,
+    manpowerSuppressionTicks: 0,
+    manpowerSuppressionIntensity: 0,
     nextBotDecisionTick: params.nextBotDecisionTick,
     territoryCells: params.territoryCells,
     alive: true,
@@ -635,6 +637,17 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
       cityManpowerIncomeBonus +
       barracksIncomeBonus;
 
+    if (applyTickGrowth) {
+      if (player.manpowerSuppressionTicks > 0) {
+        player.manpowerSuppressionTicks--;
+      } else if (player.manpowerSuppressionIntensity > 0) {
+        player.manpowerSuppressionIntensity = Math.max(
+          0,
+          player.manpowerSuppressionIntensity - 0.18 * TICK_DT,
+        );
+      }
+    }
+
     let manpowerIncome =
       peakManpowerIncome *
       growthEfficiency *
@@ -643,6 +656,9 @@ export function updateAllPlayersEconomy(state: GameState, applyTickGrowth: boole
     if (!grid.blackoutActive && activeBeforeGrowth / Math.max(1, maxManpower) < 0.18) {
       manpowerIncome = Math.max(manpowerIncome, 12 + maxManpower * 0.022);
     }
+    const suppressionScale =
+      1 - Math.max(0, Math.min(0.65, player.manpowerSuppressionIntensity));
+    manpowerIncome *= suppressionScale;
     const blackoutDrain = grid.blackoutActive
       ? baseMaxManpower * BLACKOUT_MP_DRAIN_RATIO_PER_SEC * grid.blackoutSeverity
       : 0;
