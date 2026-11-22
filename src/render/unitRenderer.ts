@@ -685,7 +685,11 @@ export function drawUnits(
             ? [...unit.waypoints]
             : [{ x: unit.targetX, y: unit.targetY }];
         const routeScreen = [sc, ...routeWorld.map((wp) => camera.worldToScreen(wp.x, wp.y))];
-        const routeColor = unit.attachedOrderId !== null ? '#9cd6f0' : '#f4de8c';
+        const routeColor = unit.inAirTransit
+          ? '#6ad6f8'
+          : unit.attachedOrderId !== null
+            ? '#9cd6f0'
+            : '#f4de8c';
         const dst = routeScreen[routeScreen.length - 1];
 
         ctx.save();
@@ -867,14 +871,27 @@ export function drawUnits(
     ctx.lineWidth = isSelected ? 1.8 : 1.5;
     ctx.strokeStyle = isSelected
       ? '#f5df96'
-      : unit.isEncircled
-        ? '#eb766c'
-        : isOwn
-          ? ownerHex
-          : owner?.relationToHuman === 'WAR'
-            ? '#eb7268'
-            : ownerHex;
+      : unit.inAirTransit
+        ? '#68dafc'
+        : unit.isEncircled
+          ? '#eb766c'
+          : isOwn
+            ? ownerHex
+            : owner?.relationToHuman === 'WAR'
+              ? '#eb7268'
+              : ownerHex;
     ctx.stroke();
+
+    if (unit.inAirTransit) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, Math.max(plaqueW, plaqueH) * 0.68 + pulse * 1.8, 0, Math.PI * 2);
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1.25;
+      ctx.strokeStyle = 'rgba(104, 218, 252, 0.85)';
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Clean, sharp silhouette centered on plaque
     drawUnitSilhouette(

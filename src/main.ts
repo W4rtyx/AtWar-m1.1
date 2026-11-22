@@ -55,6 +55,7 @@ function bootstrap(): void {
   let buildBatchSize: BuildBatchSize = 1;
   let selectedBuildType: BuildingType | null = null;
   let selectedBuildingId: number | null = null;
+  let hoveredBuildingId: number | null = null;
   let selectedTarget: SelectedTarget | null = null;
   let selectedUnitIds: number[] = [];
   let unitSelectRect: UnitSelectionRect | null = null;
@@ -141,6 +142,7 @@ function bootstrap(): void {
       lastFrameMs = performance.now();
       selectedBuildType = null;
       selectedBuildingId = null;
+      hoveredBuildingId = null;
       selectedTarget = null;
       selectedUnitIds = [];
       paradropUnitId = null;
@@ -806,6 +808,19 @@ function bootstrap(): void {
 
     const worldPt = camera.screenToWorld(e.clientX, e.clientY);
     hoverCell = worldPt;
+    if (
+      !activeBendDrag &&
+      !unitSelectRect &&
+      !frontPushStart &&
+      frontLassoPoints.length === 0 &&
+      rawArrowPoints.length === 0
+    ) {
+      const state = engine.getRenderState();
+      hoveredBuildingId =
+        state.phase === 'PLAYING'
+          ? (findHumanBuildingAtScreen(state, e.clientX, e.clientY)?.id ?? null)
+          : null;
+    }
 
     if (activeBendDrag) {
       const state = engine.getRenderState();
@@ -1472,6 +1487,7 @@ function bootstrap(): void {
       ambush: ambushOverlay,
       buildPreview,
       selectedBuildingId,
+      hoveredBuildingId,
       selectedTarget,
       selectedUnitIds: new Set(selectedUnitIds),
       unitSelectRect,

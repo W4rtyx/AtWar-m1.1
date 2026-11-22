@@ -13,8 +13,23 @@ import {
 } from './types';
 
 export const WATER_NAV_STEP = 3;
+export const NAVAL_COAST_CLEARANCE = 2;
 export const RADAR_STATION_VISION_RADIUS = 80;
+export const AIRFIELD_OPERATION_RANGE = 130;
 export const CLOSE_SONAR_RADIUS = 16;
+
+export function getFireMissionSalvoIndustryCost(unitType: UnitType, count: number): number {
+  const baseCost =
+    unitType === 'ARTILLERY'
+      ? 18
+      : unitType === 'CRUISER'
+        ? 28
+        : unitType === 'BOMBER'
+          ? 45
+          : 0;
+  if (baseCost <= 0) return 0;
+  return Math.round(baseCost * Math.pow(Math.max(1, count), 0.7));
+}
 
 export function isNavalUnitType(type: UnitType): type is NavalUnitType {
   return (
@@ -126,10 +141,37 @@ export function findNearestCoastalLandCell(
   return best;
 }
 
+export function hasWaterClearance(
+  state: GameState,
+  ix: number,
+  iy: number,
+  clearance = NAVAL_COAST_CLEARANCE,
+): boolean {
+  if (
+    ix - clearance < 0 ||
+    ix + clearance >= state.width ||
+    iy - clearance < 0 ||
+    iy + clearance >= state.height
+  ) {
+    return false;
+  }
+  const { width, terrain } = state;
+  for (let dy = -clearance; dy <= clearance; dy++) {
+    const row = (iy + dy) * width;
+    for (let dx = -clearance; dx <= clearance; dx++) {
+      if (terrain[row + ix + dx] !== TerrainType.WATER) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function hasDirectWaterLine(
   state: GameState,
   a: Point,
   b: Point,
+  clearance = 0,
 ): boolean {
   const dist = Math.hypot(b.x - a.x, b.y - a.y);
   const steps = Math.max(1, Math.ceil(dist / 0.4));
@@ -139,10 +181,13 @@ export function hasDirectWaterLine(
     return false;
   }
 
+  const endpointExemption = clearance + 1.5;
   for (let s = 1; s <= steps; s++) {
     const t = s / steps;
-    const px = Math.max(0, Math.min(state.width - 1, Math.floor(a.x + (b.x - a.x) * t)));
-    const py = Math.max(0, Math.min(state.height - 1, Math.floor(a.y + (b.y - a.y) * t)));
+    const sx = a.x + (b.x - a.x) * t;
+    const sy = a.y + (b.y - a.y) * t;
+    const px = Math.max(0, Math.min(state.width - 1, Math.floor(sx)));
+    const py = Math.max(0, Math.min(state.height - 1, Math.floor(sy)));
     if (!isPassableWaterCell(state, px, py)) {
       return false;
     }
@@ -155,6 +200,14 @@ export function hasDirectWaterLine(
         return false;
       }
     }
+    if (
+      clearance > 0 &&
+      Math.hypot(sx - a.x, sy - a.y) > endpointExemption &&
+      Math.hypot(b.x - sx, b.y - sy) > endpointExemption &&
+      !hasWaterClearance(state, px, py, clearance)
+    ) {
+      return false;
+    }
     prevX = px;
     prevY = py;
   }
@@ -165,6 +218,7 @@ function findWaterBlockAnchor(
   state: GameState,
   gx: number,
   gy: number,
+  requireClearance: boolean,
 ): Point | null {
   const x0 = gx * WATER_NAV_STEP;
   const y0 = gy * WATER_NAV_STEP;
@@ -181,6 +235,10 @@ function findWaterBlockAnchor(
       if (x >= state.width) continue;
       if (!isPassableWaterCell(state, x, y)) continue;
 
+      const clear2 = hasWaterClearance(state, x, y, NAVAL_COAST_CLEARANCE);
+      if (requireClearance && !clear2) continue;
+      const clear1 = clear2 || hasWaterClearance(state, x, y, 1);
+
       let waterNeighbors = 0;
       if (isPassableWaterCell(state, x + 1, y)) waterNeighbors++;
       if (isPassableWaterCell(state, x - 1, y)) waterNeighbors++;
@@ -188,7 +246,8 @@ function findWaterBlockAnchor(
       if (isPassableWaterCell(state, x, y - 1)) waterNeighbors++;
 
       const dSq = (x + 0.5 - cx) * (x + 0.5 - cx) + (y + 0.5 - cy) * (y + 0.5 - cy);
-      const score = waterNeighbors * 10 - dSq;
+      const clearanceBonus = clear2 ? 1000 : clear1 ? 300 : 0;
+      const score = clearanceBonus + waterNeighbors * 10 - dSq;
       if (score > bestScore) {
         bestScore = score;
         best = { x: x + 0.5, y: y + 0.5 };
@@ -203,30 +262,12 @@ interface WaterHeapNode {
   readonly f: number;
 }
 
-/**
- * Coarse-grid (3x3 cell) A* water pathfinder with line-of-sight edge checks and greedy
- * string-pulling smoothing. Reliably navigates naval units around peninsulas and coastlines.
- */
-export function findWaterPath(
+function runWaterAStar(
   state: GameState,
-  startX: number,
-  startY: number,
-  goalX: number,
-  goalY: number,
+  startWater: Point,
+  goalWater: Point,
+  requireClearance: boolean,
 ): Point[] | null {
-  const startWater = findNearestWaterCell(state, startX, startY, 4);
-  if (!startWater) {
-    return null;
-  }
-  const goalWater = findNearestWaterCell(state, goalX, goalY, 3);
-  if (!goalWater) {
-    return null;
-  }
-
-  if (hasDirectWaterLine(state, startWater, goalWater)) {
-    return [goalWater];
-  }
-
   const gw = Math.ceil(state.width / WATER_NAV_STEP);
   const gh = Math.ceil(state.height / WATER_NAV_STEP);
   const total = gw * gh;
@@ -248,7 +289,7 @@ export function findWaterPath(
     if (cached !== undefined) return cached;
     const gx = nIdx % gw;
     const gy = (nIdx - gx) / gw;
-    const found = findWaterBlockAnchor(state, gx, gy);
+    const found = findWaterBlockAnchor(state, gx, gy, requireClearance);
     anchorCache.set(nIdx, found);
     return found;
   };
@@ -344,11 +385,23 @@ export function findWaterPath(
 
       const vAnchor = getAnchor(v);
       if (!vAnchor) continue;
-      if (!hasDirectWaterLine(state, uAnchor, vAnchor)) {
+      const edgeClearance = requireClearance && u !== startNode && v !== goalNode ? 1 : 0;
+      if (!hasDirectWaterLine(state, uAnchor, vAnchor, edgeClearance)) {
         continue;
       }
 
-      const stepCost = Math.hypot(vAnchor.x - uAnchor.x, vAnchor.y - uAnchor.y);
+      const vIx = Math.floor(vAnchor.x);
+      const vIy = Math.floor(vAnchor.y);
+      const coastalPenalty =
+        !requireClearance && u !== startNode && v !== goalNode
+          ? hasWaterClearance(state, vIx, vIy, NAVAL_COAST_CLEARANCE)
+            ? 1.0
+            : hasWaterClearance(state, vIx, vIy, 1)
+              ? 1.5
+              : 2.8
+          : 1.0;
+
+      const stepCost = Math.hypot(vAnchor.x - uAnchor.x, vAnchor.y - uAnchor.y) * coastalPenalty;
       const tentativeG = gScore[u] + stepCost;
       if (tentativeG < gScore[v]) {
         cameFrom[v] = u;
@@ -378,12 +431,13 @@ export function findWaterPath(
   rawPts[0] = startWater;
   rawPts[rawPts.length - 1] = goalWater;
 
+  const smoothClearance = 1;
   const smoothed: Point[] = [];
   let i = 0;
   while (i < rawPts.length - 1) {
     let nextIdx = i + 1;
     for (let j = rawPts.length - 1; j > i + 1; j--) {
-      if (hasDirectWaterLine(state, rawPts[i], rawPts[j])) {
+      if (hasDirectWaterLine(state, rawPts[i], rawPts[j], smoothClearance)) {
         nextIdx = j;
         break;
       }
@@ -393,6 +447,37 @@ export function findWaterPath(
   }
 
   return smoothed.length > 0 ? smoothed : [goalWater];
+}
+
+/**
+ * Coarse-grid (3x3 cell) A* water pathfinder with 2-cell coastal clearance preference,
+ * strict 0.4-step line-of-sight edge checks, and greedy smoothing. Reliably navigates
+ * naval ships around jagged peninsulas and coastlines without scraping shore.
+ */
+export function findWaterPath(
+  state: GameState,
+  startX: number,
+  startY: number,
+  goalX: number,
+  goalY: number,
+): Point[] | null {
+  const startWater = findNearestWaterCell(state, startX, startY, 4);
+  if (!startWater) {
+    return null;
+  }
+  const goalWater = findNearestWaterCell(state, goalX, goalY, 3);
+  if (!goalWater) {
+    return null;
+  }
+
+  if (hasDirectWaterLine(state, startWater, goalWater, NAVAL_COAST_CLEARANCE)) {
+    return [goalWater];
+  }
+
+  return (
+    runWaterAStar(state, startWater, goalWater, true) ??
+    runWaterAStar(state, startWater, goalWater, false)
+  );
 }
 
 export function findAirfieldCoveringPoint(

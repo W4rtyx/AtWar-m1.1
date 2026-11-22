@@ -1,5 +1,6 @@
 import { BUILDING_SPECS } from '../engine/buildings';
 import { computeOccupancyCurve } from '../engine/economy';
+import { AIRFIELD_OPERATION_RANGE, RADAR_STATION_VISION_RADIUS } from '../engine/navalAir';
 import {
   BuildBatchSize,
   BuildingType,
@@ -402,7 +403,12 @@ export class ManpowerPanelController {
     const spec = BUILDING_SPECS[selectedBuilding.type];
     const titleSuffix = selectedBuilding.isCapital ? ' (Hl. město)' : '';
     this.inspectorTitleEl.textContent = `${spec.nameCs}${titleSuffix}`;
-    this.inspectorCoordsEl.textContent = `[${selectedBuilding.x}, ${selectedBuilding.y}]`;
+    this.inspectorCoordsEl.textContent =
+      selectedBuilding.type === 'AIRFIELD'
+        ? `[${selectedBuilding.x}, ${selectedBuilding.y}] · Dolet ${AIRFIELD_OPERATION_RANGE} b.`
+        : selectedBuilding.type === 'RADAR_STATION'
+          ? `[${selectedBuilding.x}, ${selectedBuilding.y}] · Dosah ${RADAR_STATION_VISION_RADIUS} b.`
+          : `[${selectedBuilding.x}, ${selectedBuilding.y}]`;
 
     const qText =
       selectedBuilding.underConstructionCount > 0

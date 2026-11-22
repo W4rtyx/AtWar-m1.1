@@ -1,12 +1,14 @@
 import { getAirDefenseCoverageAt, evaluateCellDefense } from './defenses';
 import { syncPlayerActiveManpower, updateAllPlayersEconomy } from './economy';
 import {
+  AIRFIELD_OPERATION_RANGE,
   disembarkTransportShip,
   findAirfieldCoveringPoint,
   findNearbyOwnedPort,
   findNearestCoastalLandCell,
   findNearestWaterCell,
   findWaterPath,
+  getFireMissionSalvoIndustryCost,
   hasDirectWaterLine,
   isAirUnitType,
   isNavalUnitType,
@@ -44,6 +46,9 @@ export const BORDER_VISION_RADIUS = VIS_BORDER_RADIUS;
 export const AIRFIELD_PARADROP_RANGE = 120;
 export const PARADROP_COOLDOWN_TICKS = 100;
 export const PARADROP_VULNERABILITY_TICKS = 50;
+export const PARADROP_FLIGHT_SPEED = 24.0;
+export const PARADROP_BEACHHEAD_RADIUS = 2;
+export { AIRFIELD_OPERATION_RANGE };
 export const REPAIR_BASE_RADIUS = 16;
 export const FIELD_REPAIR_RATE_PER_SEC = 0.018;
 export const BASE_REPAIR_RATE_PER_SEC = 0.068;
@@ -406,6 +411,7 @@ export function spawnUnitStack(
     isEncircled: false,
     supplyLevel: 1,
     canParadrop: opts?.canParadrop ?? type === 'PARATROOPERS',
+    inAirTransit: false,
     dropVulnerabilityTicks: opts?.dropVulnerabilityTicks ?? 0,
     combatCooldownTicks: 0,
     lastCombatTargetX: null,
@@ -613,7 +619,7 @@ export function autoMergeNearbyUnits(state: GameState): boolean {
 
     for (let j = i + 1; j < state.units.length; j++) {
       const b = state.units[j];
-      if (b.count <= 0 || b.hp <= 0) continue;
+      if (b.count <= 0 || b.hp <= 0 || a.inAirTransit || b.inAirTransit) continue;
       if (a.ownerId !== b.ownerId || a.type !== b.type) continue;
       if (a.count + b.count > MAX_UNIT_STACK) continue;
 
@@ -1074,7 +1080,14 @@ export function issueUnitMoveOrder(
   let firstFailureMsg: string | null = null;
 
   for (const unit of state.units) {
-    if (unit.ownerId !== playerId || unit.count <= 0 || !idSet.has(unit.id)) continue;
+    if (
+      unit.ownerId !== playerId ||
+      unit.count <= 0 ||
+      unit.inAirTransit ||
+      !idSet.has(unit.id)
+    ) {
+      continue;
+    }
     const spec = UNIT_SPECS[unit.type];
 
     // 1. Air units: move freely over land & water within AIRFIELD operational range
@@ -1256,7 +1269,9 @@ export function issueArtilleryFireMission(
   }
 
   const idSet = new Set(unitIds);
+  const owner = state.players.get(playerId);
   let updated = 0;
+  let insufficientIndustry = false;
 
   for (const unit of state.units) {
     if (
@@ -1265,6 +1280,11 @@ export function issueArtilleryFireMission(
       unit.count <= 0 ||
       !idSet.has(unit.id)
     ) {
+      continue;
+    }
+    const ammoCost = getFireMissionSalvoIndustryCost(unit.type, unit.count);
+    if (!owner || owner.industry < ammoCost) {
+      insufficientIndustry = true;
       continue;
     }
     const spec = UNIT_SPECS[unit.type];
@@ -1297,7 +1317,13 @@ export function issueArtilleryFireMission(
   }
 
   if (updated === 0) {
-    pushHumanNotice(state, playerId, 'Cíl je mimo dostřel / dolet vybrané jednotky.');
+    pushHumanNotice(
+      state,
+      playerId,
+      insufficientIndustry
+        ? 'Nedostatek Průmyslu pro munici'
+        : 'Cíl je mimo dostřel / dolet vybrané jednotky.',
+    );
     return 0;
   }
 
@@ -1393,7 +1419,13 @@ export function executeParadrop(
     return false;
   }
   const unit = state.units.find((u) => u.id === unitId && u.ownerId === playerId);
-  if (!unit || unit.type !== 'PARATROOPERS' || !unit.canParadrop || unit.count <= 0) {
+  if (
+    !unit ||
+    unit.type !== 'PARATROOPERS' ||
+    !unit.canParadrop ||
+    unit.inAirTransit ||
+    unit.count <= 0
+  ) {
     return false;
   }
 
@@ -1423,25 +1455,112 @@ export function executeParadrop(
     Math.round(PARADROP_COOLDOWN_TICKS / (1 + 0.25 * Math.log2(airfield.stackCount))),
   );
 
-  unit.x = ix + 0.5;
-  unit.y = iy + 0.5;
+  // Launch straight-line airlift transit: never claim any cells along the flight corridor.
   unit.canParadrop = false;
-  unit.dropVulnerabilityTicks = PARADROP_VULNERABILITY_TICKS;
-  unit.targetX = null;
-  unit.targetY = null;
-  unit.manualOrder = false;
+  unit.inAirTransit = true;
+  unit.targetX = ix + 0.5;
+  unit.targetY = iy + 0.5;
+  unit.waypoints = [{ x: ix + 0.5, y: iy + 0.5 }];
+  unit.manualOrder = true;
   unit.attachedOrderId = null;
   unit.attachedOrderKind = null;
   unit.mergeTargetUnitId = null;
+  unit.isEncircled = false;
+
+  state.stateVersion++;
+  return true;
+}
+
+function isIsolatedBeachhead(
+  state: GameState,
+  playerId: number,
+  startX: number,
+  startY: number,
+): boolean {
+  const { width, height, owners } = state;
+  const startIdx = startY * width + startX;
+  if (owners[startIdx] !== playerId) {
+    return true;
+  }
+  const visited = new Set<number>([startIdx]);
+  const queue: number[] = [startIdx];
+  let head = 0;
+  const maxConnectedThreshold = 36;
+
+  while (head < queue.length && visited.size < maxConnectedThreshold) {
+    const idx = queue[head++];
+    const x = idx % width;
+    const y = (idx - x) / width;
+    if (x > 0) {
+      const n = idx - 1;
+      if (owners[n] === playerId && !visited.has(n)) {
+        visited.add(n);
+        queue.push(n);
+      }
+    }
+    if (x + 1 < width) {
+      const n = idx + 1;
+      if (owners[n] === playerId && !visited.has(n)) {
+        visited.add(n);
+        queue.push(n);
+      }
+    }
+    if (y > 0) {
+      const n = idx - width;
+      if (owners[n] === playerId && !visited.has(n)) {
+        visited.add(n);
+        queue.push(n);
+      }
+    }
+    if (y + 1 < height) {
+      const n = idx + width;
+      if (owners[n] === playerId && !visited.has(n)) {
+        visited.add(n);
+        queue.push(n);
+      }
+    }
+  }
+
+  if (visited.size >= maxConnectedThreshold) {
+    return false;
+  }
+
+  for (const b of state.buildings) {
+    if (
+      b.ownerId === playerId &&
+      b.stackCount > 0 &&
+      (b.type === 'CITY' || b.type === 'PORT' || b.type === 'AIRFIELD' || b.type === 'BARRACKS') &&
+      visited.has(b.y * width + b.x)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function completeParadropLanding(state: GameState, unit: Unit): boolean {
+  const ix = Math.max(0, Math.min(state.width - 1, Math.floor(unit.targetX ?? unit.x)));
+  const iy = Math.max(0, Math.min(state.height - 1, Math.floor(unit.targetY ?? unit.y)));
+  const targetIdx = iy * state.width + ix;
+
+  unit.x = ix + 0.5;
+  unit.y = iy + 0.5;
+  unit.inAirTransit = false;
+  unit.targetX = null;
+  unit.targetY = null;
+  unit.waypoints = [];
+  unit.manualOrder = false;
+  unit.dropVulnerabilityTicks = PARADROP_VULNERABILITY_TICKS;
 
   // Check enemy AA_BATTERY interception at landing zone
   let bestAaCoverage = 0;
   let aaOwnerId = -1;
   for (const other of state.players.values()) {
     if (
-      other.id === playerId ||
+      other.id === unit.ownerId ||
       !other.alive ||
-      getUnitRelation(state, playerId, other.id) !== 'WAR'
+      getUnitRelation(state, unit.ownerId, other.id) !== 'WAR'
     ) {
       continue;
     }
@@ -1474,9 +1593,7 @@ export function executeParadrop(
     if (newCount <= 0 || unit.hp <= 0) {
       unit.count = 0;
       unit.hp = 0;
-      state.units = state.units.filter((u) => u.count > 0 && u.hp > 0);
-      state.stateVersion++;
-      return true;
+      return false;
     }
 
     unit.count = newCount;
@@ -1484,31 +1601,52 @@ export function executeParadrop(
     unit.hp = Math.min(unit.hp, unit.maxHp);
   }
 
-  // Claim a small landing perimeter if dropped on unclaimed wilderness
-  if (state.owners[targetIdx] === WILDERNESS_OWNER) {
-    for (let dy = -2; dy <= 2; dy++) {
-      const ny = iy + dy;
-      if (ny < 0 || ny >= state.height) continue;
-      for (let dx = -2; dx <= 2; dx++) {
-        if (dx * dx + dy * dy > 5) continue;
-        const nx = ix + dx;
-        if (nx < 0 || nx >= state.width) continue;
-        const nIdx = ny * state.width + nx;
-        if (state.terrain[nIdx] !== TerrainType.WATER && state.owners[nIdx] === WILDERNESS_OWNER) {
-          state.owners[nIdx] = playerId;
+  // Claim ONLY a small local landing beachhead (radius <= 2 cells, no mass annexation or flight trail)
+  let claimedAny = false;
+  if (state.terrain[targetIdx] !== TerrainType.WATER) {
+    const landingOwner = state.owners[targetIdx];
+    const rel =
+      landingOwner >= 0 && landingOwner !== unit.ownerId
+        ? getUnitRelation(state, unit.ownerId, landingOwner)
+        : 'NEUTRAL';
+    if (
+      landingOwner === unit.ownerId ||
+      landingOwner === WILDERNESS_OWNER ||
+      (landingOwner >= 0 && (rel === 'WAR' || rel === 'ALLIED'))
+    ) {
+      for (let dy = -PARADROP_BEACHHEAD_RADIUS; dy <= PARADROP_BEACHHEAD_RADIUS; dy++) {
+        const ny = iy + dy;
+        if (ny < 0 || ny >= state.height) continue;
+        for (let dx = -PARADROP_BEACHHEAD_RADIUS; dx <= PARADROP_BEACHHEAD_RADIUS; dx++) {
+          if (dx * dx + dy * dy > 5) continue;
+          const nx = ix + dx;
+          if (nx < 0 || nx >= state.width) continue;
+          const nIdx = ny * state.width + nx;
+          if (state.terrain[nIdx] === TerrainType.WATER) continue;
+          const nOwner = state.owners[nIdx];
+          if (nOwner === WILDERNESS_OWNER) {
+            state.owners[nIdx] = unit.ownerId;
+            claimedAny = true;
+          } else if (
+            nOwner >= 0 &&
+            nOwner !== unit.ownerId &&
+            getUnitRelation(state, unit.ownerId, nOwner) === 'WAR'
+          ) {
+            const hasCapital = state.buildings.some(
+              (b) => b.isCapital && b.ownerId === nOwner && b.x === nx && b.y === ny,
+            );
+            if (!hasCapital) {
+              state.owners[nIdx] = unit.ownerId;
+              claimedAny = true;
+            }
+          }
         }
       }
     }
-    unit.isEncircled = false;
-  } else {
-    unit.isEncircled =
-      cellOwner >= 0 &&
-      cellOwner !== playerId &&
-      getUnitRelation(state, playerId, cellOwner) !== 'ALLIED';
   }
 
-  state.stateVersion++;
-  return true;
+  unit.isEncircled = isIsolatedBeachhead(state, unit.ownerId, ix, iy);
+  return claimedAny;
 }
 
 function getFrontPushPointForUnit(
@@ -1687,7 +1825,8 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
     }
 
     const naval = isNavalUnitType(unit.type);
-    const airborne = isAirUnitType(unit.type);
+    const inFlightParadrop = unit.inAirTransit;
+    const airborne = isAirUnitType(unit.type) || inFlightParadrop;
 
     const curIx = Math.max(0, Math.min(width - 1, Math.floor(unit.x)));
     const curIy = Math.max(0, Math.min(height - 1, Math.floor(unit.y)));
@@ -1698,9 +1837,17 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       cellOwner >= 0 &&
       cellOwner !== unit.ownerId &&
       getUnitRelation(state, unit.ownerId, cellOwner) !== 'ALLIED';
-    unit.isEncircled = onEnemy;
+    const onIsolatedParaDrop =
+      !inFlightParadrop &&
+      unit.type === 'PARATROOPERS' &&
+      !unit.canParadrop &&
+      cellOwner === unit.ownerId &&
+      isIsolatedBeachhead(state, unit.ownerId, curIx, curIy);
+    unit.isEncircled = inFlightParadrop ? false : onEnemy || onIsolatedParaDrop;
 
-    if (unit.isEncircled) {
+    if (inFlightParadrop) {
+      unit.supplyLevel = 1;
+    } else if (unit.isEncircled) {
       unit.supplyLevel = Math.max(0, unit.supplyLevel - 0.55 * TICK_DT);
       unit.morale = Math.max(0, unit.morale - 4.5 * TICK_DT);
     } else {
@@ -1713,7 +1860,9 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       unit.morale = Math.min(100, unit.morale + 6.0 * TICK_DT * Math.max(0.25, ownerSupply));
     }
 
-    if (unit.fireMissionTicksRemaining > 0) {
+    if (inFlightParadrop) {
+      // Airborne paratrooper lift skips order attachment and merging until landing
+    } else if (unit.fireMissionTicksRemaining > 0) {
       if (unit.type === 'BOMBER' && unit.fireMissionX !== null && unit.fireMissionY !== null) {
         // Bomber flies toward strike target until inside bombing release circle
         const distToTarget = Math.hypot(unit.fireMissionX - unit.x, unit.fireMissionY - unit.y);
@@ -1826,7 +1975,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       }
     }
 
-    if (unit.mergeTargetUnitId !== null) {
+    if (unit.mergeTargetUnitId !== null && !inFlightParadrop) {
       const anchor = unitById.get(unit.mergeTargetUnitId);
       if (anchor && anchor.count > 0 && anchor.ownerId === unit.ownerId) {
         unit.targetX = anchor.x;
@@ -1855,7 +2004,23 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
       const dist = Math.hypot(dx, dy);
 
       if (airborne) {
-        if (finalDist <= 1.35 && unit.waypoints.length === 0) {
+        if (inFlightParadrop) {
+          if (finalDist <= 1.5 && unit.waypoints.length === 0) {
+            if (completeParadropLanding(state, unit)) {
+              anyMapClaimed = true;
+            }
+          } else if (dist > 1e-4) {
+            const stepDist = Math.min(dist, PARADROP_FLIGHT_SPEED * TICK_DT);
+            unit.x = Math.max(0.5, Math.min(width - 0.5, unit.x + (dx / dist) * stepDist));
+            unit.y = Math.max(0.5, Math.min(height - 0.5, unit.y + (dy / dist) * stepDist));
+            const postDist = Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y);
+            if (postDist <= 1.25) {
+              if (completeParadropLanding(state, unit)) {
+                anyMapClaimed = true;
+              }
+            }
+          }
+        } else if (finalDist <= 1.35 && unit.waypoints.length === 0) {
           unit.targetX = null;
           unit.targetY = null;
           unit.waypoints = [];
@@ -1897,7 +2062,7 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
           }
         }
 
-        if (unit.type === 'TRANSPORT_SHIP' ? unit.cargoUnitType !== null || false : true) {
+        if (isNavalUnitType(unit.type)) {
           if (unit.waypoints.length === 0 && finalDist <= 1.35) {
             unit.targetX = null;
             unit.targetY = null;
@@ -2124,6 +2289,10 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
   if (anyMapClaimed) {
     state.stateVersion++;
   }
+  if (state.units.some((u) => u.count <= 0 || u.hp <= 0)) {
+    state.units = state.units.filter((u) => u.count > 0 && u.hp > 0);
+    state.stateVersion++;
+  }
   autoMergeNearbyUnits(state);
 }
 
@@ -2165,6 +2334,7 @@ export function toPublicUnitInfo(unit: Unit, viewerPlayerId: number): PublicUnit
     isEncircled: unit.isEncircled,
     supplyLevel: isOwn ? unit.supplyLevel : 1,
     canParadrop: isOwn ? unit.canParadrop : false,
+    inAirTransit: unit.inAirTransit,
     dropVulnerabilityTicks: unit.dropVulnerabilityTicks,
     combatCooldownTicks: unit.combatCooldownTicks,
     lastCombatTargetX: unit.lastCombatTargetX,

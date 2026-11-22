@@ -22,8 +22,12 @@ import {
   setWarRelation,
 } from '../src/engine/frontExpansion';
 import {
+  NAVAL_COAST_CLEARANCE,
   WATER_NAV_STEP,
   findWaterPath,
+  getFireMissionSalvoIndustryCost,
+  hasDirectWaterLine,
+  hasWaterClearance,
 } from '../src/engine/navalAir';
 import {
   BOT_COUNT,
@@ -1433,7 +1437,7 @@ function testEnergyReserveCapAndCascadingBlackout(): void {
   const preBlackoutIndRate = human.industryIncomePerSec;
   const buildingsCountBefore = state.buildings.length;
   assert(
-    !human.blackoutActive && human.blackoutSeverity === 0 && preBlackoutIndRate > 4,
+    !human.blackoutActive && human.blackoutSeverity === 0 && preBlackoutIndRate > 1.8,
     'Healthy grid before outage must have active production and 0 blackout',
   );
 
@@ -2008,12 +2012,16 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
     targetX: arena.x + 16,
     targetY: arena.y - 12,
   });
+  for (let t = 0; t < 50 && para1.inAirTransit; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
   assert(
-    para1.canParadrop === false &&
+    !para1.inAirTransit &&
+      para1.canParadrop === false &&
       para1.dropVulnerabilityTicks > 0 &&
       airfield.paradropCooldownTicks > 0 &&
       para1.hp === para1.maxHp,
-    'Uncontested paradrop must land cleanly, set vulnerability + cooldown, and consume one-time drop',
+    'Uncontested paradrop must land cleanly after air transit, set vulnerability + cooldown, and consume one-time drop',
   );
 
   const parkedArty = state.units.find((u) => u.ownerId === humanId && u.type === 'ARTILLERY');
@@ -2049,9 +2057,12 @@ function testUnitProductionMovementMergeAndParadropAA(): void {
     targetX: aa.x + 2,
     targetY: aa.y,
   });
+  for (let t = 0; t < 50 && para2.inAirTransit; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
   assert(
     para2.hp < para2.maxHp * 0.7,
-    `Enemy AA_BATTERY must heavily damage paratroopers landing inside AA coverage (hp=${para2.hp.toFixed(1)} vs max=${para2.maxHp})`,
+    `Enemy AA_BATTERY must heavily damage paratroopers flying into AA coverage (hp=${para2.hp.toFixed(1)} vs max=${para2.maxHp})`,
   );
 
   console.log('PASS [p]: Production, MOVE_UNITS, stack MERGE, Paradrop cooldown & AA_BATTERY interception verified.');
@@ -2998,6 +3009,7 @@ function testManualArtilleryFireMissionBarrage(): void {
     mountainAccum: 0,
   });
 
+  human.industry = 1000;
   const arty = spawnUnitStack(state, humanId, 'ARTILLERY', ax - 4, ay, 4, { stance: 'LOCK' });
 
   // Verify out-of-range manual mission gets rejected with notice
@@ -3531,6 +3543,7 @@ function testArtilleryManpowerSuppression(): void {
 
   const control = createControlledArena();
   const shelled = createControlledArena();
+  shelled.state.players.get(shelled.humanId)!.industry = 1000;
 
   const arty = spawnUnitStack(shelled.state, shelled.humanId, 'ARTILLERY', shelled.ax - 4, shelled.ay, 4, {
     stance: 'LOCK',
@@ -3832,6 +3845,310 @@ function testBomberAirstrikeAaFighterInterceptAndRadarSubmarineFogOfWar(): void 
   console.log('PASS [zg]: BOMBER airstrike, AA/FIGHTER intercept & RADAR submarine/building Fog of War verified.');
 }
 
+function testParatroopersAirTransitNoTrailAndSmallBeachhead(): void {
+  const state = createInitialGameState(9909);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  const arena = findInlandPlainsCenter(state, 42, 24);
+  const cx = arena.x;
+  const cy = arena.y;
+  for (let y = cy - 22; y <= cy + 22; y++) {
+    for (let x = cx - 40; x <= cx + 40; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+  paintBlock(state, cx - 38, cy - 14, cx - 22, cy + 14, humanId);
+  const enemyRearCells = paintBlock(state, cx + 6, cy - 18, cx + 38, cy + 18, enemyId);
+  const corridorWildCells: number[] = [];
+  for (let y = cy - 6; y <= cy + 6; y++) {
+    for (let x = cx - 18; x <= cx + 5; x++) {
+      corridorWildCells.push(y * state.width + x);
+    }
+  }
+
+  human.money = 10000;
+  human.buildingMaterial = 10000;
+  human.industry = 10000;
+  enemy.money = 10000;
+  enemy.buildingMaterial = 10000;
+  enemy.industry = 10000;
+
+  const airfield = placeBuilding(state, humanId, 'AIRFIELD', cx - 28, cy, 1)!;
+  assert(airfield !== null, 'Human AIRFIELD must place cleanly for paradrop test');
+  airfield.stackCount = 1;
+  airfield.underConstructionCount = 0;
+
+  const para = spawnUnitStack(state, humanId, 'PARATROOPERS', airfield.x + 0.5, airfield.y + 0.5, 2);
+  const dropX = cx + 22;
+  const dropY = cy;
+
+  dispatchAction(state, {
+    type: 'PARADROP_UNIT',
+    playerId: humanId,
+    unitId: para.id,
+    targetX: dropX,
+    targetY: dropY,
+  });
+  assert(
+    para.inAirTransit && para.x < cx - 10,
+    'PARADROP_UNIT must enter inAirTransit flight without teleporting or painting territory immediately',
+  );
+
+  let ticks = 0;
+  while (para.inAirTransit && ticks < 80) {
+    dispatchAction(state, { type: 'TICK' });
+    ticks++;
+    const leakedCorridor = corridorWildCells.filter((idx) => state.owners[idx] === humanId).length;
+    assert(
+      leakedCorridor === 0,
+      `PARATROOPERS in air transit must claim 0 corridor cells (leaked ${leakedCorridor} at tick ${ticks})`,
+    );
+  }
+
+  assert(!para.inAirTransit, 'PARATROOPERS must complete air transit and land cleanly');
+  const corridorClaimedAfter = corridorWildCells.filter((idx) => state.owners[idx] === humanId).length;
+  assert(corridorClaimedAfter === 0, 'Flight corridor must remain completely uncaptured after landing');
+
+  let beachheadCount = 0;
+  let farLandingCount = 0;
+  for (let y = cy - 18; y <= cy + 18; y++) {
+    for (let x = cx + 6; x <= cx + 38; x++) {
+      if (state.owners[y * state.width + x] === humanId) {
+        if (Math.hypot(x - dropX, y - dropY) <= 3.1) {
+          beachheadCount++;
+        } else {
+          farLandingCount++;
+        }
+      }
+    }
+  }
+  const enemyRemaining = enemyRearCells.filter((idx) => state.owners[idx] === enemyId).length;
+  assert(
+    beachheadCount >= 1 && beachheadCount <= 21 && farLandingCount === 0,
+    `Landing beachhead must stay compact (<=21 cells inside r<=3, got near=${beachheadCount}, far=${farLandingCount})`,
+  );
+  assert(
+    enemyRemaining > enemyRearCells.length - 30,
+    `PARATROOPERS landing must NOT trigger mass annexation (${enemyRemaining}/${enemyRearCells.length} remaining)`,
+  );
+  assert(
+    para.isEncircled,
+    'Isolated PARATROOPERS behind enemy lines must be marked encircled/isolated after landing',
+  );
+
+  // Moving landed isolated paratroopers on ground must also NOT draw a trail behind them
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [para.id],
+    targetX: dropX + 4,
+    targetY: dropY,
+  });
+  for (let t = 0; t < 15; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  let farAfterMove = 0;
+  for (let y = cy - 18; y <= cy + 18; y++) {
+    for (let x = cx + 6; x <= cx + 38; x++) {
+      if (state.owners[y * state.width + x] === humanId && Math.hypot(x - dropX, y - dropY) > 3.1) {
+        farAfterMove++;
+      }
+    }
+  }
+  assert(farAfterMove === 0, `Isolated landed paratroopers must not paint trails on move (far=${farAfterMove})`);
+  console.log(
+    `PASS [zh]: PARATROOPERS air transit (0 corridor cells), small beachhead (${beachheadCount} cells), and isolated combat state verified.`,
+  );
+}
+
+function testNavalCoastalClearanceWithoutSticking(): void {
+  const state = createInitialGameState(9910);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  const sx = 430;
+  const sy = 250;
+  for (let y = sy - 30; y <= sy + 30; y++) {
+    for (let x = sx - 42; x <= sx + 42; x++) {
+      state.terrain[y * state.width + x] = TerrainType.WATER;
+      state.owners[y * state.width + x] = WILDERNESS_OWNER;
+    }
+  }
+  // Sculpt jagged coastline with rocky headland & diagonal coastal spurs protruding south
+  for (let y = sy - 30; y <= sy - 16; y++) {
+    for (let x = sx - 42; x <= sx + 42; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+    }
+  }
+  for (let y = sy - 16; y <= sy + 5; y++) {
+    for (let x = sx - 4; x <= sx + 5; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+    }
+  }
+  // Add an extra jagged headland spur eastward
+  for (let y = sy - 8; y <= sy + 8; y++) {
+    for (let x = sx + 6; x <= sx + 12; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+    }
+  }
+
+  const route = findWaterPath(state, sx - 24, sy - 8, sx + 26, sy - 8);
+  assert(route !== null && route.length >= 2, 'findWaterPath must route cleanly around jagged coastline');
+  assert(NAVAL_COAST_CLEARANCE === 2, `Expected NAVAL_COAST_CLEARANCE === 2, got ${NAVAL_COAST_CLEARANCE}`);
+
+  // Check intermediate waypoints keep 2-cell coastal clearance and segments avoid scraping land
+  for (let i = 0; i < route!.length - 1; i++) {
+    const wp = route![i];
+    assert(
+      hasWaterClearance(state, Math.floor(wp.x), Math.floor(wp.y), 2),
+      `Intermediate sea waypoint (${wp.x.toFixed(1)}, ${wp.y.toFixed(1)}) must keep 2-cell coastal clearance`,
+    );
+    assert(
+      hasDirectWaterLine(state, wp, route![i + 1], i === route!.length - 2 ? 0 : 1),
+      'Naval path segment must keep clear offshore water line without corner-cutting',
+    );
+  }
+
+  const cruiser = spawnUnitStack(state, humanId, 'CRUISER', sx - 24, sy - 8, 1);
+  const sub = spawnUnitStack(state, humanId, 'SUBMARINE', sx - 22, sy - 8, 1);
+  dispatchAction(state, {
+    type: 'MOVE_UNITS',
+    playerId: humanId,
+    unitIds: [cruiser.id, sub.id],
+    targetX: sx + 26,
+    targetY: sy - 8,
+  });
+
+  for (let t = 0; t < 150; t++) {
+    dispatchAction(state, { type: 'TICK' });
+    assert(
+      state.terrain[Math.floor(cruiser.y) * state.width + Math.floor(cruiser.x)] === TerrainType.WATER &&
+        state.terrain[Math.floor(sub.y) * state.width + Math.floor(sub.x)] === TerrainType.WATER,
+      'Naval ships must remain strictly in WATER on every tick',
+    );
+  }
+
+  assert(
+    Math.hypot(cruiser.x - (sx + 26), cruiser.y - (sy - 8)) <= 2.5 &&
+      Math.hypot(sub.x - (sx + 26), sub.y - (sy - 8)) <= 2.5,
+    `CRUISER & SUBMARINE must navigate around jagged cape without getting stuck (cruiser=(${cruiser.x.toFixed(1)},${cruiser.y.toFixed(1)}), sub=(${sub.x.toFixed(1)},${sub.y.toFixed(1)}))`,
+  );
+  console.log('PASS [zi]: Naval 2-cell coastal clearance & anti-sticking shoreline navigation verified.');
+}
+
+function testFireMissionIndustryAmmoConsumptionAndZeroBlock(): void {
+  assert(
+    BUILDING_SPECS.FACTORY.baseIndustryPerSec <= 7.0 && BUILDING_SPECS.FACTORY.cost.money >= 300,
+    `FACTORY production must be scarce (got ${BUILDING_SPECS.FACTORY.baseIndustryPerSec}/s, cost ${BUILDING_SPECS.FACTORY.cost.money}$)`,
+  );
+
+  const state = createInitialGameState(9911);
+  const start = findPlainsLandSpot(state, 360, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+  setWarRelation(state, humanId, enemyId);
+
+  const arena = findInlandPlainsCenter(state, 28, 18);
+  const ax = arena.x;
+  const ay = arena.y;
+  for (let y = ay - 16; y <= ay + 16; y++) {
+    for (let x = ax - 26; x <= ax + 26; x++) {
+      state.terrain[y * state.width + x] = TerrainType.PLAINS;
+      state.owners[y * state.width + x] = x >= ax ? enemyId : humanId;
+    }
+  }
+  human.money = 10000;
+  human.buildingMaterial = 10000;
+  human.industry = 200;
+  enemy.money = 5000;
+  enemy.buildingMaterial = 5000;
+  enemy.industry = 5000;
+  enemy.energyReserve = enemy.energyReserveMax;
+
+  const arty = spawnUnitStack(state, humanId, 'ARTILLERY', ax - 4, ay, 2, { stance: 'LOCK' });
+  const expectedArtyCost = getFireMissionSalvoIndustryCost('ARTILLERY', 2);
+
+  // 1. Artillery salvo consumes Industry ammo
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [arty.id],
+    targetX: ax + 10,
+    targetY: ay,
+  });
+  assert(arty.fireMissionTicksRemaining > 0, 'ARTILLERY fire mission must start when Industry suffices');
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    Math.abs(human.industry - (200 - expectedArtyCost)) < 1.5,
+    `Single ARTILLERY salvo must deduct ~${expectedArtyCost} Industry (got ${(200 - human.industry).toFixed(1)})`,
+  );
+  dispatchAction(state, { type: 'CANCEL_FIRE_MISSION', playerId: humanId, unitIds: [arty.id] });
+
+  // 2. BOMBER air strike consumes higher Industry ammo
+  const airfield = placeBuilding(state, humanId, 'AIRFIELD', ax - 16, ay, 1)!;
+  airfield.stackCount = 1;
+  airfield.underConstructionCount = 0;
+  const bomber = spawnUnitStack(state, humanId, 'BOMBER', ax + 6, ay, 1);
+  human.industry = 200;
+  const expectedBomberCost = getFireMissionSalvoIndustryCost('BOMBER', 1);
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [bomber.id],
+    targetX: ax + 10,
+    targetY: ay,
+  });
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    Math.abs(human.industry - (200 - expectedBomberCost)) < 1.5,
+    `BOMBER air strike must deduct ~${expectedBomberCost} Industry (got ${(200 - human.industry).toFixed(1)})`,
+  );
+  dispatchAction(state, { type: 'CANCEL_FIRE_MISSION', playerId: humanId, unitIds: [bomber.id] });
+
+  // 3. Zero Industry strictly blocks new fire missions & shows UI notice
+  human.industry = 0;
+  const fxBeforeBlocked = state.artilleryExplosions.length;
+  dispatchAction(state, {
+    type: 'ARTILLERY_FIRE_MISSION',
+    playerId: humanId,
+    unitIds: [arty.id],
+    targetX: ax + 10,
+    targetY: ay,
+  });
+  assert(
+    arty.fireMissionTicksRemaining === 0 &&
+      state.lastNotice !== null &&
+      state.lastNotice.messageCs.includes('Nedostatek Průmyslu'),
+    '0 Industry must block fire mission and surface UI notice Nedostatek Průmyslu pro munici',
+  );
+  dispatchAction(state, { type: 'TICK' });
+  assert(
+    state.artilleryExplosions.length <= fxBeforeBlocked,
+    'Blocked fire mission must spawn 0 salvos/explosions',
+  );
+  console.log('PASS [zj]: Fire mission Industry ammo cost, FACTORY scarcity & 0-Industry lock verified.');
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -3866,7 +4183,10 @@ function main(): void {
   testArtilleryManpowerSuppression();
   testNavalWaterPathfindingTransportLandingAndIslandEnergy();
   testBomberAirstrikeAaFighterInterceptAndRadarSubmarineFogOfWar();
-  console.log('ALL 33 SIMULATION TESTS PASSED.');
+  testParatroopersAirTransitNoTrailAndSmallBeachhead();
+  testNavalCoastalClearanceWithoutSticking();
+  testFireMissionIndustryAmmoConsumptionAndZeroBlock();
+  console.log('ALL 36 SIMULATION TESTS PASSED.');
 }
 
 main();

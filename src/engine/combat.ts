@@ -1,7 +1,12 @@
 import { evaluateCellDefense, getAirDefenseCoverageAt } from './defenses';
 import { syncPlayerActiveManpower } from './economy';
 import { getCombatBlackoutMultiplier } from './energyGrid';
-import { isAirUnitType, isNavalUnitType, supportsFireMission } from './navalAir';
+import {
+  getFireMissionSalvoIndustryCost,
+  isAirUnitType,
+  isNavalUnitType,
+  supportsFireMission,
+} from './navalAir';
 import {
   Building,
   BuildingType,
@@ -193,6 +198,23 @@ function executeArtilleryFireMissionSalvo(
   if (remainingAfterDec % 10 !== 9) {
     return;
   }
+
+  const ammoCost = getFireMissionSalvoIndustryCost(attacker.type, attacker.count);
+  if (!attOwner || attOwner.industry < ammoCost) {
+    attacker.fireMissionX = null;
+    attacker.fireMissionY = null;
+    attacker.fireMissionTicksRemaining = 0;
+    if (attacker.ownerId === state.humanPlayerId) {
+      state.lastNotice = {
+        id: state.nextNoticeId++,
+        messageCs: 'Nedostatek Průmyslu pro munici',
+        tick: state.tick,
+      };
+    }
+    state.stateVersion++;
+    return;
+  }
+  attOwner.industry = Math.max(0, attOwner.industry - ammoCost);
 
   const supplyMul = 0.45 + 0.55 * attacker.supplyLevel;
   const moraleMul = 0.5 + 0.5 * (attacker.morale / 100);
@@ -477,8 +499,8 @@ export function stepUnitsCombat(state: GameState): void {
     const attSpec = UNIT_SPECS[attacker.type];
     const attOwner = state.players.get(attacker.ownerId);
 
-    // Enemy AA_BATTERY flak fire against aircraft flying over defended sectors
-    if (isAirUnitType(attacker.type)) {
+    // Enemy AA_BATTERY flak fire against aircraft and airborne paratroopers flying over defended sectors
+    if (isAirUnitType(attacker.type) || attacker.inAirTransit) {
       const ax = Math.max(0, Math.min(state.width - 1, Math.floor(attacker.x)));
       const ay = Math.max(0, Math.min(state.height - 1, Math.floor(attacker.y)));
       let bestAaCoverage = 0;
@@ -498,7 +520,8 @@ export function stepUnitsCombat(state: GameState): void {
         }
       }
       if (bestAaCoverage > 0) {
-        const strikeExposure = attacker.fireMissionTicksRemaining > 0 ? 1.85 : 1.0;
+        const strikeExposure =
+          attacker.fireMissionTicksRemaining > 0 || attacker.inAirTransit ? 1.85 : 1.0;
         const aaDmg = bestAaCoverage * 24 * strikeExposure * TICK_DT;
         incomingDamage.set(attacker.id, (incomingDamage.get(attacker.id) ?? 0) + aaDmg);
         if (aaOwnerId >= 0) {
@@ -506,6 +529,10 @@ export function stepUnitsCombat(state: GameState): void {
         }
         attacker.combatCooldownTicks = 6;
       }
+    }
+
+    if (attacker.inAirTransit) {
+      continue;
     }
 
     if (
@@ -562,8 +589,8 @@ export function stepUnitsCombat(state: GameState): void {
         if (!isAirUnitType(candidate.type) && candidate.type !== 'PARATROOPERS') continue;
       } else if (attacker.type === 'SUBMARINE') {
         if (!isNavalUnitType(candidate.type)) continue;
-      } else if (isAirUnitType(candidate.type)) {
-        // Non-fighters do not dogfight airborne aircraft
+      } else if (isAirUnitType(candidate.type) || candidate.inAirTransit) {
+        // Non-fighters do not dogfight airborne aircraft or paratroopers in flight
         continue;
       }
 

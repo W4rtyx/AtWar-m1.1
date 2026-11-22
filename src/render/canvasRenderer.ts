@@ -1,6 +1,10 @@
 import { BUILDING_SPECS } from '../engine/buildings';
 import { getDefenseRadius, isDefenseBuildingType } from '../engine/defenses';
-import { RADAR_STATION_VISION_RADIUS, supportsFireMission } from '../engine/navalAir';
+import {
+  AIRFIELD_OPERATION_RANGE,
+  RADAR_STATION_VISION_RADIUS,
+  supportsFireMission,
+} from '../engine/navalAir';
 import {
   BuildingType,
   ClientRenderState,
@@ -85,6 +89,7 @@ export interface RenderOverlayState {
   readonly ambush: AmbushOverlay | null;
   readonly buildPreview: BuildPlacementPreview | null;
   readonly selectedBuildingId: number | null;
+  readonly hoveredBuildingId?: number | null;
   readonly selectedTarget: SelectedTarget | null;
   readonly selectedUnitIds: ReadonlySet<number>;
   readonly unitSelectRect: UnitSelectionRect | null;
@@ -761,6 +766,7 @@ export class CanvasRenderer {
       camera,
       state.buildings,
       overlays.selectedBuildingId,
+      overlays.hoveredBuildingId ?? null,
       state.humanPlayerId,
       state.players,
     );
@@ -1240,6 +1246,7 @@ export class CanvasRenderer {
     camera: Camera,
     buildings: ReadonlyArray<PublicBuildingInfo>,
     selectedBuildingId: number | null,
+    hoveredBuildingId: number | null,
     humanPlayerId: number,
     players: ReadonlyArray<PublicPlayerInfo>,
   ): void {
@@ -1254,13 +1261,18 @@ export class CanvasRenderer {
       const isOwn = b.ownerId === humanPlayerId;
       const ownerPlayer = !isOwn ? playerById.get(b.ownerId) : undefined;
       const isSelected = isOwn && selectedBuildingId === b.id;
+      const isHovered = isOwn && hoveredBuildingId === b.id;
       const isBuildingInitial = b.stackCount === 0 && b.underConstructionCount > 0;
       const colors = this.getBuildingCategoryColors(b.type);
 
       ctx.save();
 
       const defRadius =
-        b.type === 'RADAR_STATION' ? RADAR_STATION_VISION_RADIUS : getDefenseRadius(b.type);
+        b.type === 'RADAR_STATION'
+          ? RADAR_STATION_VISION_RADIUS
+          : b.type === 'AIRFIELD'
+            ? AIRFIELD_OPERATION_RANGE
+            : getDefenseRadius(b.type);
       if (
         isOwn &&
         isDefenseBuildingType(b.type) &&
@@ -1286,17 +1298,41 @@ export class CanvasRenderer {
         ctx.strokeStyle = ringColor;
         ctx.stroke();
         ctx.setLineDash([]);
-      } else if (isOwn && isSelected && (b.type === 'BARRACKS' || b.type === 'RADAR_STATION') && defRadius > 0) {
+      } else if (
+        isOwn &&
+        ((b.type === 'AIRFIELD' && (isSelected || isHovered)) ||
+          (isSelected && (b.type === 'BARRACKS' || b.type === 'RADAR_STATION'))) &&
+        defRadius > 0
+      ) {
+        const rangePx = defRadius * camera.zoom;
         ctx.beginPath();
-        ctx.arc(sc.x, sc.y, defRadius * camera.zoom, 0, Math.PI * 2);
-        ctx.setLineDash([5, 4]);
-        ctx.lineWidth = 1.25;
+        ctx.arc(sc.x, sc.y, rangePx, 0, Math.PI * 2);
+        if (b.type === 'AIRFIELD') {
+          ctx.fillStyle = 'rgba(92, 198, 240, 0.05)';
+          ctx.fill();
+        }
+        ctx.setLineDash(b.type === 'AIRFIELD' ? [7, 5] : [5, 4]);
+        ctx.lineWidth = b.type === 'AIRFIELD' ? 1.5 : 1.25;
         ctx.strokeStyle =
-          b.type === 'RADAR_STATION'
-            ? 'rgba(110, 220, 208, 0.62)'
-            : 'rgba(130, 198, 150, 0.65)';
+          b.type === 'AIRFIELD'
+            ? 'rgba(92, 198, 240, 0.72)'
+            : b.type === 'RADAR_STATION'
+              ? 'rgba(110, 220, 208, 0.62)'
+              : 'rgba(130, 198, 150, 0.65)';
         ctx.stroke();
         ctx.setLineDash([]);
+
+        if (b.type === 'AIRFIELD' || b.type === 'RADAR_STATION') {
+          const badge =
+            b.type === 'AIRFIELD'
+              ? `Dolet letiště · ${defRadius} b.`
+              : `Radar · ${defRadius} b.`;
+          ctx.font = '600 10px "Segoe UI", system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = b.type === 'AIRFIELD' ? 'rgba(154, 228, 250, 0.92)' : 'rgba(148, 232, 220, 0.88)';
+          ctx.fillText(badge, sc.x, sc.y - rangePx - 4);
+        }
       }
 
       if (isSelected) {
@@ -1607,7 +1643,9 @@ export class CanvasRenderer {
     const defenseR =
       (preview.buildingType === 'RADAR_STATION'
         ? RADAR_STATION_VISION_RADIUS
-        : getDefenseRadius(preview.buildingType)) * camera.zoom;
+        : preview.buildingType === 'AIRFIELD'
+          ? AIRFIELD_OPERATION_RANGE
+          : getDefenseRadius(preview.buildingType)) * camera.zoom;
 
     ctx.save();
 

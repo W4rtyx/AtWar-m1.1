@@ -206,6 +206,7 @@ export interface Unit {
   isEncircled: boolean;
   supplyLevel: number;
   canParadrop: boolean;
+  inAirTransit: boolean;
   dropVulnerabilityTicks: number;
   combatCooldownTicks: number;
   lastCombatTargetX: number | null;
@@ -238,6 +239,7 @@ export interface PublicUnitInfo {
   readonly isEncircled: boolean;
   readonly supplyLevel: number;
   readonly canParadrop: boolean;
+  readonly inAirTransit: boolean;
   readonly dropVulnerabilityTicks: number;
   readonly combatCooldownTicks: number;
   readonly lastCombatTargetX: number | null;

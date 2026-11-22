@@ -1,4 +1,4 @@
-import { supportsFireMission } from '../engine/navalAir';
+import { getFireMissionSalvoIndustryCost, supportsFireMission } from '../engine/navalAir';
 import {
   ALL_UNIT_TYPES,
   ClientRenderState,
@@ -444,12 +444,23 @@ export class UnitPanelController {
     this.cancelFireBtn.classList.toggle('hidden', !anyFiring);
     if (fireSupportSelected.length > 0) {
       const onlyBomber = fireSupportSelected.every((u) => u.type === 'BOMBER');
+      const totalAmmoCost = fireSupportSelected.reduce(
+        (sum, u) => sum + getFireMissionSalvoIndustryCost(u.type, u.count),
+        0,
+      );
+      const hasEnoughAmmo = ind >= totalAmmoCost;
       this.fireMissionBtn.classList.toggle('active', artilleryFireMode);
+      this.fireMissionBtn.classList.toggle('hud-btn-danger', !hasEnoughAmmo && !artilleryFireMode);
+      this.fireMissionBtn.title = hasEnoughAmmo
+        ? `${onlyBomber ? 'Cíl leteckého náletu' : 'Cíl dělostřelecké / námořní palby'} (F) — cena munice: ${totalAmmoCost} Průmyslu za salvu/nálet`
+        : `Nedostatek Průmyslu pro munici (potřeba ${totalAmmoCost} P, k dispozici ${Math.floor(ind)} P)`;
       this.fireMissionBtn.textContent = artilleryFireMode
         ? 'Vyberte cíl palby / náletu...'
-        : onlyBomber
-          ? 'Nálet (F)'
-          : 'Ostřelovat cíl (F)';
+        : hasEnoughAmmo
+          ? onlyBomber
+            ? `Nálet (F · ${totalAmmoCost}P)`
+            : `Ostřelovat (F · ${totalAmmoCost}P)`
+          : `Nedostatek Průmyslu (${totalAmmoCost}P)`;
     }
   }
 }
