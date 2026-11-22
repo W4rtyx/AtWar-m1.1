@@ -335,7 +335,7 @@ export function isBorderCell(
   if (owners[idx] !== playerId) {
     return false;
   }
-  for (const [dx, dy] of CARDINAL_OFFSETS) {
+  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
     const nx = x + dx;
     const ny = y + dy;
     if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
@@ -347,6 +347,44 @@ export function isBorderCell(
     }
   }
   return false;
+}
+
+export function isCoastalOrPocketSurrounded(
+  state: GameState,
+  x: number,
+  y: number,
+  playerId: number,
+): boolean {
+  const { width, height, owners, terrain } = state;
+  let friendly4 = 0;
+  let land4 = 0;
+  for (const [dx, dy] of CARDINAL_OFFSETS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+    const nIdx = ny * width + nx;
+    if (terrain[nIdx] === TerrainType.WATER) continue;
+    land4++;
+    if (owners[nIdx] === playerId) friendly4++;
+  }
+
+  let friendly8 = 0;
+  let land8 = 0;
+  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+    const nIdx = ny * width + nx;
+    if (terrain[nIdx] === TerrainType.WATER) continue;
+    land8++;
+    if (owners[nIdx] === playerId) friendly8++;
+  }
+
+  return (
+    friendly4 >= 3 ||
+    (land4 > 0 && friendly4 === land4) ||
+    (land8 > 0 && friendly8 >= 2 && friendly8 >= land8 - 1)
+  );
 }
 
 export function countFriendlyNeighbors(
@@ -531,9 +569,9 @@ function computeCellCaptureCost(
   }
 
   const advanceSpeedMultiplier = Math.max(
-    0.15,
+    0.12,
     Math.min(
-      1.45,
+      1.65,
       effectiveFortSpeedMul *
         support.attackerSpeedMultiplier *
         support.defenderResistanceSpeedMultiplier,
@@ -930,6 +968,7 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
             continue;
           }
 
+          const surrounded = isCoastalOrPocketSurrounded(state, nx, ny, order.playerId);
           const nProj = projectPointOntoWaypointsWindow(
             nx + 0.5,
             ny + 0.5,
@@ -939,7 +978,7 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
             Math.min(totalLen + 6, activeMaxArc + 6),
           );
           if (
-            nProj.perpDist > halfCorridor ||
+            nProj.perpDist > (surrounded ? halfCorridor + 2.5 : halfCorridor) ||
             nProj.arcDist < activeMinArc - 2 ||
             nProj.arcDist > totalLen + 6
           ) {
@@ -949,13 +988,13 @@ function stepAttackOrders(state: GameState): ExpansionStepResult {
           const stepLen = Math.hypot(dx, dy);
           const dot = (dx * nProj.tanX + dy * nProj.tanY) / stepLen;
           const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
-          if (dot < 0.35 && friendly < 3) {
+          if (dot < 0.35 && !surrounded) {
             continue;
           }
 
           const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
           const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.2;
-          const cleanupBonus = friendly >= 3 ? 1.8 : 0;
+          const cleanupBonus = surrounded ? 2.2 : 0;
           const arcLeadBonus = Math.min(
             1.5,
             Math.max(-0.5, (nProj.arcDist - order.frontierArc) * 0.06),
@@ -1291,9 +1330,10 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
         hasTarget = true;
         const stepLen = Math.hypot(dx, dy);
         const friendly = countFriendlyNeighbors(state, nx, ny, order.playerId);
+        const surrounded = isCoastalOrPocketSurrounded(state, nx, ny, order.playerId);
         const terrainBonus = terrain[nIdx] === TerrainType.MOUNTAINS ? -0.55 : 0;
         const wildernessBonus = nOwner === WILDERNESS_OWNER ? 0.35 : -0.15;
-        const cleanupBonus = friendly >= 3 ? 2.0 : 0;
+        const cleanupBonus = surrounded ? 2.2 : 0;
         const edgeNoise = organicCellNoise(nx, ny, order.id);
 
         let score: number;
@@ -1311,7 +1351,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
           const localDirX = focalLen > 3 ? toFocalX / focalLen : order.dirX;
           const localDirY = focalLen > 3 ? toFocalY / focalLen : order.dirY;
           const localDot = (dx * localDirX + dy * localDirY) / stepLen;
-          if (!order.sweepAllBorders && localDot < -0.15 && friendly < 3) {
+          if (!order.sweepAllBorders && localDot < -0.15 && !surrounded) {
             continue;
           }
 
@@ -1334,7 +1374,7 @@ function stepFrontPushOrders(state: GameState): ExpansionStepResult {
             edgeNoise;
         } else {
           const dot = (dx * order.dirX + dy * order.dirY) / stepLen;
-          if (dot < 0.2 && friendly < 3) {
+          if (dot < 0.2 && !surrounded) {
             continue;
           }
           const relX = nx + 0.5 - order.originCenter.x;

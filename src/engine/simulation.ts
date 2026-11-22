@@ -78,7 +78,7 @@ import {
 
 const HUMAN_PLAYER_ID = 1;
 const HUMAN_START_RADIUS = 14;
-export const BOT_COUNT = 11;
+export const BOT_COUNT = 4;
 
 export interface SpeedStepPlan {
   readonly ticksToRun: number;
@@ -416,8 +416,8 @@ function handleSelectStart(state: GameState, x: number, y: number): void {
     id: HUMAN_PLAYER_ID,
     name: 'Republika (Vy)',
     isBot: false,
-    colorHex: '#3b6e8c',
-    colorRgb: [59, 110, 140],
+    colorHex: '#3d647c',
+    colorRgb: [61, 100, 124],
     capitalX: ix,
     capitalY: iy,
     territoryCells: claimed,

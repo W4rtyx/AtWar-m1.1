@@ -238,9 +238,14 @@ export class CanvasRenderer {
   private readonly offscreenCtx: CanvasRenderingContext2D;
   private readonly imageData: ImageData;
   private readonly baseTerrainRgb: Uint8ClampedArray;
+  private readonly selectedTargetCanvas: HTMLCanvasElement;
+  private readonly selectedTargetCtx: CanvasRenderingContext2D;
+  private readonly selectedTargetImageData: ImageData;
 
   private coastlinePath: Path2D | null = null;
   private stateBorderPath: Path2D = new Path2D();
+  private selectedTargetOutlinePath: Path2D | null = null;
+  private selectedTargetCacheKey = '';
 
   private lastStateVersion = -1;
   private baseBuilt = false;
@@ -267,6 +272,16 @@ export class CanvasRenderer {
 
     this.imageData = this.offscreenCtx.createImageData(MAP_WIDTH, MAP_HEIGHT);
     this.baseTerrainRgb = new Uint8ClampedArray(MAP_WIDTH * MAP_HEIGHT * 3);
+
+    this.selectedTargetCanvas = document.createElement('canvas');
+    this.selectedTargetCanvas.width = MAP_WIDTH;
+    this.selectedTargetCanvas.height = MAP_HEIGHT;
+    const selCtx = this.selectedTargetCanvas.getContext('2d');
+    if (!selCtx) {
+      throw new Error('Could not initialize selection highlight 2D canvas context');
+    }
+    this.selectedTargetCtx = selCtx;
+    this.selectedTargetImageData = this.selectedTargetCtx.createImageData(MAP_WIDTH, MAP_HEIGHT);
   }
 
   public resize(viewportWidth: number, viewportHeight: number): void {
@@ -305,34 +320,49 @@ export class CanvasRenderer {
 
         if (t === TerrainType.WATER) {
           const d = waterDist[idx];
-          const shelfRatio = Math.min(1, d / 18);
-          let r = 45 - shelfRatio * 22;
-          let g = 67 - shelfRatio * 31;
-          let b = 86 - shelfRatio * 39;
-          if (d === 5 || d === 11) {
-            r += 3;
-            g += 4;
-            b += 5;
+          const shelfRatio = Math.min(1, d / 19);
+          // Call of War bathymetric navy-slate ocean with crisp coastal drop-off
+          let r = 42 - shelfRatio * 22;
+          let g = 65 - shelfRatio * 30;
+          let b = 82 - shelfRatio * 34;
+          if (d <= 2) {
+            r -= 4;
+            g -= 5;
+            b -= 5;
+          } else if (d === 6 || d === 13) {
+            r += 2;
+            g += 3;
+            b += 4;
           }
           buf[rgbIdx] = r;
           buf[rgbIdx + 1] = g;
           buf[rgbIdx + 2] = b;
         } else if (t === TerrainType.MOUNTAINS) {
           const depth = mtnDepth[idx];
-          const nwIdx = Math.max(0, y - 1) * width + Math.max(0, x - 1);
-          const seIdx = Math.min(height - 1, y + 1) * width + Math.min(width - 1, x + 1);
-          const slope = mtnDepth[seIdx] - mtnDepth[nwIdx];
-          const elevLift = Math.min(18, depth * 1.4);
-          const contour = depth > 1 && depth % 4 === 0 ? -5 : 0;
-          const shade = slope * 6.5;
+          const xPrev = Math.max(0, x - 1);
+          const xNext = Math.min(width - 1, x + 1);
+          const yPrev = Math.max(0, y - 1);
+          const yNext = Math.min(height - 1, y + 1);
+          const gradX = mtnDepth[y * width + xNext] - mtnDepth[y * width + xPrev];
+          const gradY = mtnDepth[yNext * width + x] - mtnDepth[yPrev * width + x];
+          const nwIdx = yPrev * width + xPrev;
+          const seIdx = yNext * width + xNext;
+          const slope = (mtnDepth[seIdx] - mtnDepth[nwIdx]) * 0.75 + (gradX + gradY) * 0.45;
+          const ridgeWave = Math.sin(x * 0.42 + y * 0.31) * 4.5 + Math.cos(x * 0.23 - y * 0.38) * 3.5;
+          const elevLift = Math.min(28, depth * 2.1);
+          const alpineSnow = depth >= 6 ? Math.min(22, (depth - 5) * 4.5) : 0;
+          const contour = depth > 1 && depth % 3 === 0 ? -9 : 0;
+          const shade = slope * 9.5;
 
-          buf[rgbIdx] = Math.max(68, Math.min(176, 130 + elevLift - shade + contour));
-          buf[rgbIdx + 1] = Math.max(62, Math.min(166, 120 + elevLift - shade + contour));
-          buf[rgbIdx + 2] = Math.max(54, Math.min(152, 105 + elevLift - shade + contour));
+          buf[rgbIdx] = Math.max(52, Math.min(184, 114 + elevLift + alpineSnow - shade + contour + ridgeWave));
+          buf[rgbIdx + 1] = Math.max(48, Math.min(178, 107 + elevLift + alpineSnow - shade + contour + ridgeWave));
+          buf[rgbIdx + 2] = Math.max(44, Math.min(170, 96 + elevLift + alpineSnow - shade + contour + ridgeWave * 0.8));
         } else {
-          buf[rgbIdx] = 198;
-          buf[rgbIdx + 1] = 192;
-          buf[rgbIdx + 2] = 177;
+          // Muted cartographic parchment-olive plains with subtle topographic texture
+          const grain = Math.sin(x * 0.19 + y * 0.13) * 1.6 + Math.cos(x * 0.09 - y * 0.17) * 1.4;
+          buf[rgbIdx] = 182 + grain;
+          buf[rgbIdx + 1] = 177 + grain;
+          buf[rgbIdx + 2] = 158 + grain * 0.7;
         }
       }
     }
@@ -411,8 +441,8 @@ export class CanvasRenderer {
         }
 
         const isMountain = terrain[idx] === TerrainType.MOUNTAINS;
-        const baseBlend = nearBorder ? 0.72 : 0.56;
-        const blend = isMountain ? baseBlend - 0.14 : baseBlend;
+        const baseBlend = nearBorder ? 0.78 : 0.46;
+        const blend = isMountain ? Math.max(0.24, baseBlend - 0.18) : baseBlend;
 
         data[rgbaIdx] = pColor[0] * blend + base[rgbIdx] * (1 - blend);
         data[rgbaIdx + 1] = pColor[1] * blend + base[rgbIdx + 1] * (1 - blend);
@@ -454,6 +484,99 @@ export class CanvasRenderer {
     this.lastStateVersion = state.stateVersion;
   }
 
+  private getTargetAccentColor(
+    state: ClientRenderState,
+    target: SelectedTarget,
+  ): { readonly rgba: readonly [number, number, number, number]; readonly stroke: string } {
+    if (target.kind === 'WILDERNESS') {
+      return { rgba: [235, 198, 108, 66], stroke: '#f0d88b' };
+    }
+    const player = state.players.find((p) => p.id === target.ownerId);
+    if (player?.relationToHuman === 'WAR') {
+      return { rgba: [235, 92, 84, 86], stroke: '#f07870' };
+    }
+    if (player?.relationToHuman === 'ALLIED') {
+      return { rgba: [96, 198, 132, 78], stroke: '#7ad89a' };
+    }
+    return { rgba: [238, 206, 116, 82], stroke: '#f2d684' };
+  }
+
+  private rebuildSelectedTargetCache(
+    state: ClientRenderState,
+    target: SelectedTarget,
+  ): void {
+    const cacheKey =
+      target.kind === 'STATE'
+        ? `${state.stateVersion}:S:${target.ownerId}`
+        : `${state.stateVersion}:W:${Math.floor(target.anchorX)}:${Math.floor(target.anchorY)}`;
+
+    if (cacheKey === this.selectedTargetCacheKey) {
+      return;
+    }
+
+    const { width, height, terrain, owners } = state;
+    const total = width * height;
+    const mask = new Uint8Array(total);
+    const { rgba } = this.getTargetAccentColor(state, target);
+    const outData = this.selectedTargetImageData.data;
+    outData.fill(0);
+
+    if (target.kind === 'STATE') {
+      for (let i = 0; i < total; i++) {
+        if (terrain[i] !== TerrainType.WATER && owners[i] === target.ownerId) {
+          mask[i] = 1;
+          const o = i * 4;
+          outData[o] = rgba[0];
+          outData[o + 1] = rgba[1];
+          outData[o + 2] = rgba[2];
+          outData[o + 3] = rgba[3];
+        }
+      }
+    } else {
+      const cx = Math.floor(target.anchorX);
+      const cy = Math.floor(target.anchorY);
+      const rad = 36;
+      const rSq = rad * rad;
+      const minX = Math.max(0, cx - rad);
+      const maxX = Math.min(width - 1, cx + rad);
+      const minY = Math.max(0, cy - rad);
+      const maxY = Math.min(height - 1, cy + rad);
+      for (let y = minY; y <= maxY; y++) {
+        const dy = y - cy;
+        const row = y * width;
+        for (let x = minX; x <= maxX; x++) {
+          const dx = x - cx;
+          if (dx * dx + dy * dy > rSq) continue;
+          const idx = row + x;
+          if (terrain[idx] !== TerrainType.WATER && owners[idx] === WILDERNESS_OWNER) {
+            mask[idx] = 1;
+            const o = idx * 4;
+            outData[o] = rgba[0];
+            outData[o + 1] = rgba[1];
+            outData[o + 2] = rgba[2];
+            outData[o + 3] = rgba[3];
+          }
+        }
+      }
+    }
+
+    this.selectedTargetCtx.putImageData(this.selectedTargetImageData, 0, 0);
+
+    const outline = new Path2D();
+    for (let vy = 1; vy < height; vy++) {
+      for (let vx = 1; vx < width; vx++) {
+        const tl = mask[(vy - 1) * width + (vx - 1)] === 1;
+        const tr = mask[(vy - 1) * width + vx] === 1;
+        const bl = mask[vy * width + (vx - 1)] === 1;
+        const br = mask[vy * width + vx] === 1;
+        addChamferedVertexEdges(outline, vx, vy, tl !== tr, tr !== br, bl !== br, tl !== bl);
+      }
+    }
+
+    this.selectedTargetOutlinePath = outline;
+    this.selectedTargetCacheKey = cacheKey;
+  }
+
   public render(
     state: ClientRenderState,
     camera: Camera,
@@ -463,11 +586,14 @@ export class CanvasRenderer {
       this.updateMapImageData(state);
     }
 
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : 0;
+    const pulse = nowMs > 0 ? 0.5 + 0.5 * Math.sin(nowMs * 0.0055) : 0.7;
+
     const ctx = this.ctx;
     ctx.save();
     ctx.scale(this.dpr, this.dpr);
 
-    ctx.fillStyle = '#151e27';
+    ctx.fillStyle = '#121b23';
     ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
 
     // Smooth terrain & interior fills (no blocky pixel squares)
@@ -491,15 +617,53 @@ export class CanvasRenderer {
     ctx.lineCap = 'round';
 
     if (this.coastlinePath) {
-      ctx.strokeStyle = 'rgba(18, 28, 38, 0.85)';
-      ctx.lineWidth = Math.max(0.55, 1.05 / camera.zoom);
+      ctx.strokeStyle = 'rgba(14, 22, 30, 0.92)';
+      ctx.lineWidth = Math.max(0.65, 1.2 / camera.zoom);
       ctx.stroke(this.coastlinePath);
     }
 
-    ctx.strokeStyle = 'rgba(16, 20, 26, 0.90)';
-    ctx.lineWidth = Math.max(0.7, 1.55 / camera.zoom);
+    ctx.strokeStyle = 'rgba(12, 16, 20, 0.94)';
+    ctx.lineWidth = Math.max(0.85, 1.8 / camera.zoom);
     ctx.stroke(this.stateBorderPath);
     ctx.restore();
+
+    // Full-territory highlight & pulsing perimeter outline for selected state / wilderness zone
+    if (overlays.selectedTarget) {
+      this.rebuildSelectedTargetCache(state, overlays.selectedTarget);
+      const { stroke } = this.getTargetAccentColor(state, overlays.selectedTarget);
+
+      ctx.save();
+      ctx.globalAlpha = 0.55 + pulse * 0.32;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(
+        this.selectedTargetCanvas,
+        camera.offsetX,
+        camera.offsetY,
+        state.width * camera.zoom,
+        state.height * camera.zoom,
+      );
+      ctx.restore();
+
+      if (this.selectedTargetOutlinePath) {
+        ctx.save();
+        ctx.translate(camera.offsetX, camera.offsetY);
+        ctx.scale(camera.zoom, camera.zoom);
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        ctx.globalAlpha = 0.32 + pulse * 0.25;
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = Math.max(2.2, 4.6 / camera.zoom);
+        ctx.stroke(this.selectedTargetOutlinePath);
+
+        ctx.globalAlpha = 0.85 + pulse * 0.15;
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = Math.max(1.05, 2.0 / camera.zoom);
+        ctx.stroke(this.selectedTargetOutlinePath);
+        ctx.restore();
+      }
+    }
 
     ctx.strokeStyle = '#33414f';
     ctx.lineWidth = 1;
@@ -521,7 +685,6 @@ export class CanvasRenderer {
     this.drawAttackOrders(ctx, camera, state, overlays.activeBendOrderId);
     this.drawBuildings(ctx, camera, state.buildings, overlays.selectedBuildingId);
     this.drawCapitals(ctx, camera, state.players, state.humanPlayerId, state.buildings);
-    const nowMs = typeof performance !== 'undefined' ? performance.now() : 0;
     drawMoveOrderPings(ctx, camera, overlays.moveOrderPings, nowMs);
     drawUnits(ctx, camera, state, overlays.selectedUnitIds, nowMs);
     drawArtilleryExplosions(ctx, camera, state.artilleryExplosions);
@@ -875,29 +1038,29 @@ export class CanvasRenderer {
   ): { readonly fill: string; readonly border: string } {
     switch (type) {
       case 'CITY':
-        return { fill: '#1b3045', border: '#eaf4ff' };
+        return { fill: '#1a2736', border: '#dfd9ca' };
       case 'LAB':
-        return { fill: '#192442', border: '#7eb7fa' };
+        return { fill: '#1a2338', border: '#75a6dd' };
       case 'MINE':
-        return { fill: '#2b2112', border: '#f0ad4e' };
+        return { fill: '#282015', border: '#d89b4a' };
       case 'POWER_PLANT':
-        return { fill: '#142b33', border: '#5cd2f5' };
+        return { fill: '#16272e', border: '#5fb9d4' };
       case 'FACTORY':
-        return { fill: '#311d13', border: '#eb8d4d' };
+        return { fill: '#2c1e16', border: '#d6824d' };
       case 'BARRACKS':
-        return { fill: '#162a3d', border: '#6ab4ec' };
+        return { fill: '#172734', border: '#6ea8d6' };
       case 'ARMORY':
-        return { fill: '#3a181e', border: '#e36d65' };
+        return { fill: '#30191d', border: '#cf6b65' };
       case 'PORT':
-        return { fill: '#122f3e', border: '#5cc4df' };
+        return { fill: '#142934', border: '#5caecc' };
       case 'AIRFIELD':
-        return { fill: '#1c2b3a', border: '#a8cce6' };
+        return { fill: '#1e2730', border: '#9ebad0' };
       case 'TRENCH':
-        return { fill: '#242d1c', border: '#a9be72' };
+        return { fill: '#242a1c', border: '#a3b36d' };
       case 'BUNKER':
-        return { fill: '#2b2f35', border: '#c8d2da' };
+        return { fill: '#26292e', border: '#bcc5ce' };
       case 'AA_BATTERY':
-        return { fill: '#1b2e33', border: '#7ad2c4' };
+        return { fill: '#1a2a2d', border: '#74bfb4' };
     }
   }
 
@@ -1047,10 +1210,15 @@ export class CanvasRenderer {
       }
 
       ctx.globalAlpha = isBuildingInitial ? 0.68 : 1;
+      // Subtle military map marker drop shadow
+      this.traceBuildingBadgeShape(ctx, b.type, sc.x + 1.1, sc.y + 1.5, r);
+      ctx.fillStyle = 'rgba(8, 11, 15, 0.58)';
+      ctx.fill();
+
       this.traceBuildingBadgeShape(ctx, b.type, sc.x, sc.y, r);
       ctx.fillStyle = colors.fill;
       ctx.fill();
-      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.8 : 1.35;
+      ctx.lineWidth = b.effectiveOccupancyPct > 105 ? 1.85 : 1.45;
       ctx.strokeStyle =
         isSelected
           ? '#f0dca0'
@@ -1138,148 +1306,168 @@ export class CanvasRenderer {
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = Math.max(1.1, s * 0.28);
+    ctx.lineWidth = Math.max(1.15, s * 0.24);
 
     switch (type) {
       case 'CITY':
+        // Canonical skyline silhouette with center tower & crown
         ctx.fillStyle = '#e7dfd1';
-        ctx.fillRect(cx - s * 0.72, cy - s * 0.1, s * 0.38, s * 0.72);
-        ctx.fillRect(cx - s * 0.22, cy - s * 0.68, s * 0.44, s * 1.3);
-        ctx.fillRect(cx + s * 0.34, cy + s * 0.06, s * 0.38, s * 0.56);
+        ctx.fillRect(cx - s * 0.72, cy - s * 0.08, s * 0.36, s * 0.72);
+        ctx.fillRect(cx - s * 0.24, cy - s * 0.66, s * 0.48, s * 1.3);
+        ctx.fillRect(cx + s * 0.36, cy + s * 0.06, s * 0.36, s * 0.58);
+        ctx.fillRect(cx - s * 0.08, cy - s * 0.84, s * 0.16, s * 0.2);
         break;
       case 'MINE':
+        // Crisp pickaxe + ore mound
         ctx.strokeStyle = '#e2ac5c';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.65, cy - s * 0.45);
-        ctx.lineTo(cx + s * 0.65, cy - s * 0.45);
-        ctx.moveTo(cx, cy - s * 0.45);
-        ctx.lineTo(cx, cy + s * 0.7);
+        ctx.moveTo(cx - s * 0.64, cy - s * 0.32);
+        ctx.quadraticCurveTo(cx, cy - s * 0.68, cx + s * 0.64, cy - s * 0.32);
+        ctx.moveTo(cx, cy - s * 0.48);
+        ctx.lineTo(cx, cy + s * 0.72);
         ctx.stroke();
         break;
       case 'POWER_PLANT':
+        // High-contrast lightning bolt
         ctx.fillStyle = '#75cce0';
         ctx.beginPath();
-        ctx.moveTo(cx + s * 0.16, cy - s * 0.78);
-        ctx.lineTo(cx - s * 0.48, cy + s * 0.08);
-        ctx.lineTo(cx + s * 0.05, cy + s * 0.08);
-        ctx.lineTo(cx - s * 0.18, cy + s * 0.78);
-        ctx.lineTo(cx + s * 0.48, cy - s * 0.08);
-        ctx.lineTo(cx - s * 0.04, cy - s * 0.08);
+        ctx.moveTo(cx + s * 0.18, cy - s * 0.8);
+        ctx.lineTo(cx - s * 0.52, cy + s * 0.06);
+        ctx.lineTo(cx + s * 0.02, cy + s * 0.06);
+        ctx.lineTo(cx - s * 0.2, cy + s * 0.8);
+        ctx.lineTo(cx + s * 0.52, cy - s * 0.06);
+        ctx.lineTo(cx - s * 0.02, cy - s * 0.06);
         ctx.closePath();
         ctx.fill();
         break;
       case 'FACTORY':
+        // Sawtooth industrial roof & twin smokestacks
         ctx.fillStyle = '#efa16b';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.75, cy + s * 0.62);
-        ctx.lineTo(cx - s * 0.75, cy - s * 0.25);
-        ctx.lineTo(cx - s * 0.15, cy + s * 0.15);
-        ctx.lineTo(cx - s * 0.15, cy - s * 0.25);
-        ctx.lineTo(cx + s * 0.45, cy + s * 0.15);
-        ctx.lineTo(cx + s * 0.45, cy - s * 0.55);
-        ctx.lineTo(cx + s * 0.75, cy - s * 0.55);
-        ctx.lineTo(cx + s * 0.75, cy + s * 0.62);
+        ctx.moveTo(cx - s * 0.76, cy + s * 0.64);
+        ctx.lineTo(cx - s * 0.76, cy - s * 0.24);
+        ctx.lineTo(cx - s * 0.18, cy + s * 0.14);
+        ctx.lineTo(cx - s * 0.18, cy - s * 0.24);
+        ctx.lineTo(cx + s * 0.38, cy + s * 0.14);
+        ctx.lineTo(cx + s * 0.38, cy - s * 0.58);
+        ctx.lineTo(cx + s * 0.74, cy - s * 0.58);
+        ctx.lineTo(cx + s * 0.74, cy + s * 0.64);
         ctx.closePath();
         ctx.fill();
         break;
       case 'ARMORY':
-        // Crossed cannons / ordnance crest inside crimson shield
+        // Crossed heavy ordnance barrels + central hub
         ctx.strokeStyle = '#f28c85';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.58, cy + s * 0.52);
-        ctx.lineTo(cx + s * 0.58, cy - s * 0.52);
-        ctx.moveTo(cx - s * 0.58, cy - s * 0.52);
-        ctx.lineTo(cx + s * 0.58, cy + s * 0.52);
+        ctx.moveTo(cx - s * 0.6, cy + s * 0.54);
+        ctx.lineTo(cx + s * 0.6, cy - s * 0.54);
+        ctx.moveTo(cx - s * 0.6, cy - s * 0.54);
+        ctx.lineTo(cx + s * 0.6, cy + s * 0.54);
         ctx.stroke();
         ctx.fillStyle = '#f7c5be';
         ctx.beginPath();
-        ctx.arc(cx, cy, Math.max(1.6, s * 0.28), 0, Math.PI * 2);
+        ctx.arc(cx, cy, Math.max(1.7, s * 0.28), 0, Math.PI * 2);
         ctx.fill();
         break;
       case 'LAB':
+        // Clean Erlenmeyer research flask
         ctx.strokeStyle = '#8ec0eb';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.24, cy - s * 0.7);
-        ctx.lineTo(cx + s * 0.24, cy - s * 0.7);
-        ctx.moveTo(cx - s * 0.18, cy - s * 0.7);
-        ctx.lineTo(cx - s * 0.6, cy + s * 0.62);
-        ctx.lineTo(cx + s * 0.6, cy + s * 0.62);
-        ctx.lineTo(cx + s * 0.18, cy - s * 0.7);
+        ctx.moveTo(cx - s * 0.26, cy - s * 0.72);
+        ctx.lineTo(cx + s * 0.26, cy - s * 0.72);
+        ctx.moveTo(cx - s * 0.18, cy - s * 0.72);
+        ctx.lineTo(cx - s * 0.18, cy - s * 0.22);
+        ctx.lineTo(cx - s * 0.62, cy + s * 0.64);
+        ctx.lineTo(cx + s * 0.62, cy + s * 0.64);
+        ctx.lineTo(cx + s * 0.18, cy - s * 0.22);
+        ctx.lineTo(cx + s * 0.18, cy - s * 0.72);
         ctx.stroke();
         break;
       case 'BARRACKS':
+        // Crisp double military chevron (clearly distinct from badge border)
         ctx.strokeStyle = '#8ec79b';
         ctx.beginPath();
-        ctx.moveTo(cx, cy - s * 0.72);
-        ctx.lineTo(cx + s * 0.6, cy - s * 0.35);
-        ctx.lineTo(cx + s * 0.45, cy + s * 0.32);
-        ctx.lineTo(cx, cy + s * 0.75);
-        ctx.lineTo(cx - s * 0.45, cy + s * 0.32);
-        ctx.lineTo(cx - s * 0.6, cy - s * 0.35);
-        ctx.closePath();
+        ctx.moveTo(cx - s * 0.62, cy + s * 0.14);
+        ctx.lineTo(cx, cy - s * 0.46);
+        ctx.lineTo(cx + s * 0.62, cy + s * 0.14);
+        ctx.moveTo(cx - s * 0.62, cy + s * 0.58);
+        ctx.lineTo(cx, cy - s * 0.02);
+        ctx.lineTo(cx + s * 0.62, cy + s * 0.58);
         ctx.stroke();
         break;
       case 'PORT':
+        // Clean naval anchor silhouette
         ctx.strokeStyle = '#75b5de';
         ctx.beginPath();
-        ctx.arc(cx, cy - s * 0.46, s * 0.22, 0, Math.PI * 2);
-        ctx.moveTo(cx, cy - s * 0.24);
+        ctx.arc(cx, cy - s * 0.48, s * 0.22, 0, Math.PI * 2);
+        ctx.moveTo(cx, cy - s * 0.26);
         ctx.lineTo(cx, cy + s * 0.68);
-        ctx.moveTo(cx - s * 0.45, cy);
-        ctx.lineTo(cx + s * 0.45, cy);
-        ctx.moveTo(cx - s * 0.58, cy + s * 0.35);
-        ctx.quadraticCurveTo(cx, cy + s * 0.9, cx + s * 0.58, cy + s * 0.35);
+        ctx.moveTo(cx - s * 0.46, cy);
+        ctx.lineTo(cx + s * 0.46, cy);
+        ctx.moveTo(cx - s * 0.58, cy + s * 0.34);
+        ctx.quadraticCurveTo(cx, cy + s * 0.92, cx + s * 0.58, cy + s * 0.34);
         ctx.stroke();
         break;
       case 'AIRFIELD':
-        ctx.strokeStyle = '#d3dce6';
+        // Top-down swept-wing aircraft silhouette
+        ctx.fillStyle = '#d3dce6';
         ctx.beginPath();
-        ctx.moveTo(cx, cy - s * 0.74);
-        ctx.lineTo(cx, cy + s * 0.72);
-        ctx.moveTo(cx - s * 0.72, cy + s * 0.12);
-        ctx.lineTo(cx, cy - s * 0.25);
-        ctx.lineTo(cx + s * 0.72, cy + s * 0.12);
-        ctx.moveTo(cx - s * 0.32, cy + s * 0.65);
-        ctx.lineTo(cx + s * 0.32, cy + s * 0.65);
-        ctx.stroke();
+        ctx.moveTo(cx, cy - s * 0.78);
+        ctx.lineTo(cx + s * 0.16, cy - s * 0.22);
+        ctx.lineTo(cx + s * 0.76, cy + s * 0.18);
+        ctx.lineTo(cx + s * 0.76, cy + s * 0.34);
+        ctx.lineTo(cx + s * 0.16, cy + s * 0.18);
+        ctx.lineTo(cx + s * 0.14, cy + s * 0.56);
+        ctx.lineTo(cx + s * 0.36, cy + s * 0.74);
+        ctx.lineTo(cx - s * 0.36, cy + s * 0.74);
+        ctx.lineTo(cx - s * 0.14, cy + s * 0.56);
+        ctx.lineTo(cx - s * 0.16, cy + s * 0.18);
+        ctx.lineTo(cx - s * 0.76, cy + s * 0.34);
+        ctx.lineTo(cx - s * 0.76, cy + s * 0.18);
+        ctx.lineTo(cx - s * 0.16, cy - s * 0.22);
+        ctx.closePath();
+        ctx.fill();
         break;
       case 'TRENCH':
+        // Zig-zag earthwork parapet + sandbag baseline
         ctx.strokeStyle = '#d5c589';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.74, cy + s * 0.28);
-        ctx.lineTo(cx - s * 0.34, cy - s * 0.36);
-        ctx.lineTo(cx + s * 0.04, cy + s * 0.28);
-        ctx.lineTo(cx + s * 0.42, cy - s * 0.36);
-        ctx.lineTo(cx + s * 0.74, cy + s * 0.14);
-        ctx.moveTo(cx - s * 0.65, cy + s * 0.58);
-        ctx.lineTo(cx + s * 0.65, cy + s * 0.58);
+        ctx.moveTo(cx - s * 0.76, cy + s * 0.22);
+        ctx.lineTo(cx - s * 0.36, cy - s * 0.38);
+        ctx.lineTo(cx + s * 0.02, cy + s * 0.22);
+        ctx.lineTo(cx + s * 0.4, cy - s * 0.38);
+        ctx.lineTo(cx + s * 0.76, cy + s * 0.16);
+        ctx.moveTo(cx - s * 0.68, cy + s * 0.58);
+        ctx.lineTo(cx + s * 0.68, cy + s * 0.58);
         ctx.stroke();
         break;
       case 'BUNKER':
+        // Concrete pillbox casemate + firing slit
         ctx.fillStyle = '#d99b6a';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.72, cy + s * 0.58);
-        ctx.lineTo(cx - s * 0.5, cy - s * 0.42);
-        ctx.lineTo(cx + s * 0.5, cy - s * 0.42);
-        ctx.lineTo(cx + s * 0.72, cy + s * 0.58);
+        ctx.moveTo(cx - s * 0.74, cy + s * 0.58);
+        ctx.lineTo(cx - s * 0.52, cy - s * 0.44);
+        ctx.lineTo(cx + s * 0.52, cy - s * 0.44);
+        ctx.lineTo(cx + s * 0.74, cy + s * 0.58);
         ctx.closePath();
         ctx.fill();
-        ctx.strokeStyle = '#1b222a';
-        ctx.lineWidth = Math.max(1.2, s * 0.25);
+        ctx.strokeStyle = '#151b22';
+        ctx.lineWidth = Math.max(1.3, s * 0.26);
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.36, cy + s * 0.04);
-        ctx.lineTo(cx + s * 0.36, cy + s * 0.04);
+        ctx.moveTo(cx - s * 0.38, cy + s * 0.02);
+        ctx.lineTo(cx + s * 0.38, cy + s * 0.02);
         ctx.stroke();
         break;
       case 'AA_BATTERY':
+        // Twin elevated flak barrels + radar arc
         ctx.strokeStyle = '#89d2ee';
         ctx.beginPath();
-        ctx.moveTo(cx - s * 0.55, cy + s * 0.62);
-        ctx.lineTo(cx + s * 0.55, cy + s * 0.62);
+        ctx.moveTo(cx - s * 0.56, cy + s * 0.62);
+        ctx.lineTo(cx + s * 0.56, cy + s * 0.62);
         ctx.moveTo(cx - s * 0.14, cy + s * 0.62);
-        ctx.lineTo(cx + s * 0.24, cy - s * 0.64);
+        ctx.lineTo(cx + s * 0.24, cy - s * 0.66);
         ctx.moveTo(cx + s * 0.18, cy + s * 0.62);
-        ctx.lineTo(cx + s * 0.56, cy - s * 0.42);
+        ctx.lineTo(cx + s * 0.58, cy - s * 0.42);
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(cx - s * 0.12, cy - s * 0.18, s * 0.52, Math.PI * 1.05, Math.PI * 1.72);
@@ -1379,55 +1567,33 @@ export class CanvasRenderer {
     target: SelectedTarget,
   ): void {
     const anchorSc = camera.worldToScreen(target.anchorX + 0.5, target.anchorY + 0.5);
+    const { stroke } = this.getTargetAccentColor(state, target);
     ctx.save();
 
     if (target.kind === 'WILDERNESS') {
-      const rPx = 22 * camera.zoom;
-      ctx.beginPath();
-      ctx.arc(anchorSc.x, anchorSc.y, rPx, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(235, 198, 108, 0.08)';
-      ctx.fill();
-      ctx.setLineDash([6, 4]);
-      ctx.lineWidth = 1.8;
-      ctx.strokeStyle = 'rgba(235, 198, 108, 0.88)';
-      ctx.stroke();
-      ctx.setLineDash([]);
-
       ctx.beginPath();
       ctx.moveTo(anchorSc.x - 8, anchorSc.y);
       ctx.lineTo(anchorSc.x + 8, anchorSc.y);
       ctx.moveTo(anchorSc.x, anchorSc.y - 8);
       ctx.lineTo(anchorSc.x, anchorSc.y + 8);
-      ctx.strokeStyle = '#f0d88b';
+      ctx.strokeStyle = stroke;
       ctx.lineWidth = 1.6;
       ctx.stroke();
 
-      this.drawArrowBadge(ctx, anchorSc.x, anchorSc.y - rPx - 12, 'CÍL: Volné území');
+      this.drawArrowBadge(ctx, anchorSc.x, anchorSc.y - 18, 'CÍL: Volné území');
     } else {
       const player = state.players.find((p) => p.id === target.ownerId && p.alive);
       if (player) {
         const capSc = camera.worldToScreen(player.capitalX + 0.5, player.capitalY + 0.5);
-        const capR = Math.max(10, 6 * camera.zoom);
-        const accent =
-          player.relationToHuman === 'WAR'
-            ? '#e26a62'
-            : player.relationToHuman === 'ALLIED'
-              ? '#6ac288'
-              : '#ebd082';
 
         ctx.beginPath();
-        ctx.arc(capSc.x, capSc.y, capR, 0, Math.PI * 2);
-        ctx.setLineDash([5, 3]);
-        ctx.lineWidth = 2.0;
-        ctx.strokeStyle = accent;
+        ctx.moveTo(anchorSc.x - 6, anchorSc.y);
+        ctx.lineTo(anchorSc.x + 6, anchorSc.y);
+        ctx.moveTo(anchorSc.x, anchorSc.y - 6);
+        ctx.lineTo(anchorSc.x, anchorSc.y + 6);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = stroke;
         ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(anchorSc.x, anchorSc.y, Math.max(8, 10 * camera.zoom), 0, Math.PI * 2);
-        ctx.lineWidth = 1.8;
-        ctx.strokeStyle = accent;
-        ctx.stroke();
-        ctx.setLineDash([]);
 
         const relTxt =
           player.relationToHuman === 'WAR'
@@ -1437,8 +1603,8 @@ export class CanvasRenderer {
               : 'NEUTRÁLNÍ';
         this.drawArrowBadge(
           ctx,
-          anchorSc.x,
-          anchorSc.y - Math.max(18, 12 * camera.zoom),
+          capSc.x,
+          capSc.y - 18,
           `CÍL: ${player.name} [${relTxt}]`,
         );
       }

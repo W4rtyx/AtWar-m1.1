@@ -522,7 +522,7 @@ export function stepUnitProduction(state: GameState): void {
   }
 }
 
-export const NAV_CELL_STEP = 4;
+export const NAV_CELL_STEP = 2;
 export const ARTILLERY_FIRE_MISSION_TICKS = 60;
 
 function pushHumanNotice(state: GameState, playerId: number, messageCs: string): void {
@@ -572,14 +572,37 @@ function hasDirectPassableLine(
   waterOnly = false,
 ): boolean {
   const dist = Math.hypot(b.x - a.x, b.y - a.y);
-  const steps = Math.max(1, Math.ceil(dist / 0.55));
-  for (let s = 0; s <= steps; s++) {
+  const steps = Math.max(1, Math.ceil(dist / 0.4));
+  let prevX = Math.max(0, Math.min(state.width - 1, Math.floor(a.x)));
+  let prevY = Math.max(0, Math.min(state.height - 1, Math.floor(a.y)));
+  if (!isPassableUnitCell(state, playerId, prevX, prevY, waterOnly)) {
+    return false;
+  }
+
+  for (let s = 1; s <= steps; s++) {
     const t = s / steps;
-    const px = Math.floor(a.x + (b.x - a.x) * t);
-    const py = Math.floor(a.y + (b.y - a.y) * t);
+    const px = Math.max(0, Math.min(state.width - 1, Math.floor(a.x + (b.x - a.x) * t)));
+    const py = Math.max(0, Math.min(state.height - 1, Math.floor(a.y + (b.y - a.y) * t)));
     if (!isPassableUnitCell(state, playerId, px, py, waterOnly)) {
       return false;
     }
+    // Prevent diagonal corner-cutting across water cells
+    if (px !== prevX && py !== prevY) {
+      if (
+        !isPassableUnitCell(state, playerId, prevX, py, waterOnly) &&
+        !isPassableUnitCell(state, playerId, px, prevY, waterOnly)
+      ) {
+        return false;
+      }
+      if (
+        state.terrain[py * state.width + prevX] === TerrainType.WATER ||
+        state.terrain[prevY * state.width + px] === TerrainType.WATER
+      ) {
+        return false;
+      }
+    }
+    prevX = px;
+    prevY = py;
   }
   return true;
 }
@@ -596,7 +619,7 @@ function findCoarseBlockAnchor(
   const cx = x0 + NAV_CELL_STEP * 0.5;
   const cy = y0 + NAV_CELL_STEP * 0.5;
   let best: Point | null = null;
-  let bestDistSq = Infinity;
+  let bestScore = -Infinity;
 
   for (let dy = 0; dy < NAV_CELL_STEP; dy++) {
     const y = y0 + dy;
@@ -605,9 +628,17 @@ function findCoarseBlockAnchor(
       const x = x0 + dx;
       if (x >= state.width) continue;
       if (!isPassableUnitCell(state, playerId, x, y, waterOnly)) continue;
+
+      let passableNeighbors = 0;
+      if (isPassableUnitCell(state, playerId, x + 1, y, waterOnly)) passableNeighbors++;
+      if (isPassableUnitCell(state, playerId, x - 1, y, waterOnly)) passableNeighbors++;
+      if (isPassableUnitCell(state, playerId, x, y + 1, waterOnly)) passableNeighbors++;
+      if (isPassableUnitCell(state, playerId, x, y - 1, waterOnly)) passableNeighbors++;
+
       const dSq = (x + 0.5 - cx) * (x + 0.5 - cx) + (y + 0.5 - cy) * (y + 0.5 - cy);
-      if (dSq < bestDistSq) {
-        bestDistSq = dSq;
+      const score = passableNeighbors * 10 - dSq;
+      if (score > bestScore) {
+        bestScore = score;
         best = { x: x + 0.5, y: y + 0.5 };
       }
     }
@@ -1526,13 +1557,20 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
 
         let ux = dx / dist;
         let uy = dy / dist;
-        const probeDist = Math.max(stepDist, 0.85);
-        let probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + ux * probeDist)));
-        let probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + uy * probeDist)));
-        let canStep = isPassableUnitCell(state, unit.ownerId, probeX, probeY, false);
+        let stepEndX = unit.x + ux * stepDist;
+        let stepEndY = unit.y + uy * stepDist;
+        let probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
+        let probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
+        let canStep = hasDirectPassableLine(
+          state,
+          unit.ownerId,
+          { x: unit.x, y: unit.y },
+          { x: stepEndX, y: stepEndY },
+          false,
+        );
 
         if (!canStep) {
-          // Recompute coarse land path once if map border/relation changed dynamically mid-march
+          // Recompute fine land path once if map border/relation changed dynamically mid-march
           const replanned = findLandPath(
             state,
             unit.ownerId,
@@ -1553,9 +1591,17 @@ export function stepUnitsMovementAndSupply(state: GameState): void {
               ux = ndx / ndist;
               uy = ndy / ndist;
               stepDist = Math.min(ndist, stepDist);
-              probeX = Math.max(0, Math.min(width - 1, Math.floor(unit.x + ux * probeDist)));
-              probeY = Math.max(0, Math.min(height - 1, Math.floor(unit.y + uy * probeDist)));
-              canStep = isPassableUnitCell(state, unit.ownerId, probeX, probeY, false);
+              stepEndX = unit.x + ux * stepDist;
+              stepEndY = unit.y + uy * stepDist;
+              probeX = Math.max(0, Math.min(width - 1, Math.floor(stepEndX)));
+              probeY = Math.max(0, Math.min(height - 1, Math.floor(stepEndY)));
+              canStep = hasDirectPassableLine(
+                state,
+                unit.ownerId,
+                { x: unit.x, y: unit.y },
+                { x: stepEndX, y: stepEndY },
+                false,
+              );
             }
           } else {
             unit.targetX = null;

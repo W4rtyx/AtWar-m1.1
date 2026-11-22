@@ -142,6 +142,7 @@ export interface ArtilleryExplosionFx {
   readonly radius: number;
   ttlTicks: number;
   readonly maxTtlTicks: number;
+  readonly manpowerKilled: number;
 }
 
 export interface UiNotice {

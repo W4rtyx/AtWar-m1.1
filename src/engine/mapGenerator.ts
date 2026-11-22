@@ -574,6 +574,110 @@ function smoothCoastlinePass(
   return totalLand;
 }
 
+function cleanupCoastalGeometry(
+  terrain: Uint8Array,
+  width: number,
+  height: number,
+): number {
+  const cardinalDirs: ReadonlyArray<readonly [number, number]> = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ];
+
+  // Iterative pass: fill 1-cell water pinholes and prune 1-cell diagonal-only coastal spurs
+  for (let pass = 0; pass < 2; pass++) {
+    const snap = new Uint8Array(terrain);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        let landCardinals = 0;
+        for (const [dx, dy] of cardinalDirs) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          if (snap[ny * width + nx] !== TerrainType.WATER) {
+            landCardinals++;
+          }
+        }
+        if (snap[idx] === TerrainType.WATER && landCardinals === 4) {
+          terrain[idx] = TerrainType.PLAINS;
+        } else if (snap[idx] !== TerrainType.WATER && landCardinals < 2) {
+          terrain[idx] = TerrainType.WATER;
+        }
+      }
+    }
+  }
+
+  // Remove tiny disconnected coastal specks (< 12 cardinal-connected cells)
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const component: number[] = [];
+
+  for (let startIdx = 0; startIdx < total; startIdx++) {
+    if (visited[startIdx] || terrain[startIdx] === TerrainType.WATER) continue;
+    visited[startIdx] = 1;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = startIdx;
+    component.length = 0;
+
+    while (head < tail) {
+      const idx = queue[head++];
+      component.push(idx);
+      const cx = idx % width;
+      const cy = (idx - cx) / width;
+      for (const [dx, dy] of cardinalDirs) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const nIdx = ny * width + nx;
+        if (!visited[nIdx] && terrain[nIdx] !== TerrainType.WATER) {
+          visited[nIdx] = 1;
+          queue[tail++] = nIdx;
+        }
+      }
+    }
+
+    if (component.length < 12) {
+      for (const idx of component) {
+        terrain[idx] = TerrainType.WATER;
+      }
+    }
+  }
+
+  // Final cleanup pass so speck pruning doesn't leave new <2 cardinal spurs
+  const postSnap = new Uint8Array(terrain);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (postSnap[idx] === TerrainType.WATER) continue;
+      let landCardinals = 0;
+      for (const [dx, dy] of cardinalDirs) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        if (postSnap[ny * width + nx] !== TerrainType.WATER) {
+          landCardinals++;
+        }
+      }
+      if (landCardinals < 2) {
+        terrain[idx] = TerrainType.WATER;
+      }
+    }
+  }
+
+  let totalLand = 0;
+  for (let i = 0; i < total; i++) {
+    if (terrain[i] !== TerrainType.WATER) {
+      totalLand++;
+    }
+  }
+  return totalLand;
+}
+
 function generateResourceZones(
   terrain: Uint8Array,
   width: number,
@@ -718,8 +822,9 @@ export function generateEuropeMap(seed: number): GeneratedEuropeMap {
     }
   }
 
-  // Smooth jagged polygon raster corners on 720x500
-  const totalLandCells = smoothCoastlinePass(terrain, width, height);
+  // Smooth jagged polygon raster corners on 720x500 and prune uncapturable coastal spurs/specks
+  smoothCoastlinePass(terrain, width, height);
+  const totalLandCells = cleanupCoastalGeometry(terrain, width, height);
 
   // Step 2: Carve major mountain ranges on land cells
   for (let y = 0; y < height; y++) {

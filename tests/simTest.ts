@@ -41,7 +41,9 @@ import {
   getRelationKey,
 } from '../src/engine/types';
 import {
+  NAV_CELL_STEP,
   UNIT_SPECS,
+  findLandPath,
   queueUnitProduction,
   spawnUnitStack,
 } from '../src/engine/units';
@@ -2960,8 +2962,9 @@ function testManualArtilleryFireMissionBarrage(): void {
   });
   const enemyInfHpBefore = enemyInf.hp;
 
-  enemy!.manpower = enemy!.maxManpower;
-  const enemyMpBefore = enemy!.manpower;
+  enemy!.maxManpower = 2000;
+  enemy!.manpower = 2000 + enemy!.allocatedManpower;
+  const enemyActiveMpBefore = Math.max(0, enemy!.manpower - enemy!.allocatedManpower);
 
   // Create active enemy offensive arrow inside blast radius
   state.attackOrders.push({
@@ -3014,11 +3017,17 @@ function testManualArtilleryFireMissionBarrage(): void {
   assert(arty.fireMissionTicksRemaining > 0, 'Manual artillery fire mission must activate');
 
   let sawExplosion = false;
+  let sawKilledMpFx = false;
   let sawEnemyInfDamaged = false;
   let sawOrderDisrupted = false;
-  for (let t = 0; t < 24; t++) {
+  for (let t = 0; t < 35; t++) {
     dispatchAction(state, { type: 'TICK' });
-    if (state.artilleryExplosions.length > 0) sawExplosion = true;
+    if (state.artilleryExplosions.length > 0) {
+      sawExplosion = true;
+      if (state.artilleryExplosions.some((fx) => fx.manpowerKilled > 0)) {
+        sawKilledMpFx = true;
+      }
+    }
     const infCurr = state.units.find((u) => u.id === enemyInf.id);
     if (!infCurr || infCurr.hp < enemyInfHpBefore - 5) sawEnemyInfDamaged = true;
     const ordCurr = state.attackOrders.find((o) => o.playerId === enemyId);
@@ -3027,17 +3036,19 @@ function testManualArtilleryFireMissionBarrage(): void {
 
   const bunkerCurr = state.buildings.find((b) => b.id === enemyBunker.id);
   const bunkerStacksAfter = bunkerCurr ? bunkerCurr.stackCount : 0;
+  const enemyActiveMpAfter = Math.max(0, enemy!.manpower - enemy!.allocatedManpower);
+  const mpDropRatio = (enemyActiveMpBefore - enemyActiveMpAfter) / Math.max(1, enemyActiveMpBefore);
 
-  assert(sawExplosion, 'Artillery fire mission must spawn ArtilleryExplosionFx bursts');
+  assert(sawExplosion && sawKilledMpFx, 'Artillery fire mission must spawn ArtilleryExplosionFx bursts with manpowerKilled > 0');
   assert(sawEnemyInfDamaged, 'Fire mission splash must damage enemy units in blast circle');
   assert(sawOrderDisrupted, 'Fire mission must disrupt enemy offensive orders in sector');
   assert(
-    bunkerStacksAfter < 3 && enemy!.manpower < enemyMpBefore,
-    `Fire mission must degrade BUNKER stacks (3 -> ${bunkerStacksAfter}) and enemy manpower`,
+    bunkerStacksAfter < 3 && mpDropRatio >= 0.08,
+    `Fire mission must degrade BUNKER stacks (3 -> ${bunkerStacksAfter}) and kill significant % of defender activeManpower (drop=${(mpDropRatio * 100).toFixed(1)}%)`,
   );
 
   console.log(
-    `PASS [x]: Manual ARTILLERY Fire Mission barrage verified (bunker stacks 3 -> ${bunkerStacksAfter}).`,
+    `PASS [x]: Manual ARTILLERY Fire Mission barrage verified (bunker stacks 3 -> ${bunkerStacksAfter}, activeMP -${(mpDropRatio * 100).toFixed(1)}%).`,
   );
 }
 
@@ -3162,6 +3173,191 @@ function testFactoryArmorySeparationAndCityNoOverload(): void {
   );
 }
 
+function testCoastalCellsCapturableAndFinePathfinding(): void {
+  const state = createInitialGameState(9901);
+  const { width, height, terrain } = state;
+
+  // 1. Generated map must contain zero 1-cell diagonal-only coastal spurs (<2 cardinal land neighbors)
+  let badSpurs = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (terrain[y * width + x] === TerrainType.WATER) continue;
+      let cardLand = 0;
+      if (x > 0 && terrain[y * width + (x - 1)] !== TerrainType.WATER) cardLand++;
+      if (x < width - 1 && terrain[y * width + (x + 1)] !== TerrainType.WATER) cardLand++;
+      if (y > 0 && terrain[(y - 1) * width + x] !== TerrainType.WATER) cardLand++;
+      if (y < height - 1 && terrain[(y + 1) * width + x] !== TerrainType.WATER) cardLand++;
+      if (cardLand < 2) badSpurs++;
+    }
+  }
+  assert(badSpurs === 0, `Europe coastline must have 0 uncapturable 1-cell spurs (got ${badSpurs})`);
+
+  // 2. Verify coastal cells right next to WATER are cleanly captured by expansion
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const human = state.players.get(humanId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 24, 16);
+  const cx = arena.x;
+  const cy = arena.y;
+  // Sculpt a jagged coastline with a 2-cell-wide coastal land bridge over water
+  paintBlock(state, cx - 16, cy - 12, cx + 16, cy + 12, WILDERNESS_OWNER);
+  for (let y = cy - 10; y <= cy + 10; y++) {
+    for (let x = cx - 12; x <= cx + 12; x++) {
+      state.terrain[y * width + x] = TerrainType.PLAINS;
+    }
+  }
+  for (let y = cy - 4; y <= cy + 4; y++) {
+    for (let x = cx - 1; x <= cx + 6; x++) {
+      state.terrain[y * width + x] = TerrainType.WATER;
+    }
+  }
+  // Narrow 2-cell coastal bridge along y = cy - 5..cy - 4 -> carve bay below, leave bridge at y = cy - 6..cy - 5
+  for (let x = cx - 1; x <= cx + 6; x++) {
+    state.terrain[(cy - 6) * width + x] = TerrainType.PLAINS;
+    state.terrain[(cy - 5) * width + x] = TerrainType.PLAINS;
+  }
+  // Claim western shore for human
+  paintBlock(state, cx - 10, cy - 8, cx - 2, cy + 6, humanId);
+  human.manpower = 600;
+
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: cx - 3, y: cy - 5.5 },
+      { x: cx + 10, y: cy - 5.5 },
+    ],
+    manpowerPercent: 60,
+    targetOwnerId: WILDERNESS_OWNER,
+  });
+
+  for (let t = 0; t < 25; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  // Every coastal cell on the narrow bridge bordering water must be captured
+  for (let x = cx - 1; x <= cx + 6; x++) {
+    assert(
+      state.owners[(cy - 5) * width + x] === humanId,
+      `Coastal cell (${x}, ${cy - 5}) directly bordering WATER must be captured cleanly`,
+    );
+  }
+
+  // 3. Verify fine A* land pathfinding (NAV_CELL_STEP === 2) routes cleanly across the 2-cell bridge without cutting over water
+  assert(NAV_CELL_STEP === 2, `Expected NAV_CELL_STEP === 2, got ${NAV_CELL_STEP}`);
+  const path = findLandPath(state, humanId, 'TANK', cx - 6, cy + 1, cx + 9, cy + 1, false);
+  assert(path !== null && path.length >= 2, 'Fine A* pathfinder must route around bay via 2-cell coastal bridge');
+  for (const wp of path!) {
+    const ix = Math.floor(wp.x);
+    const iy = Math.floor(wp.y);
+    assert(state.terrain[iy * width + ix] !== TerrainType.WATER, 'Path waypoint must never land on WATER');
+  }
+
+  console.log('PASS [z]: Coastal cell capture & fine 2x2 A* land pathfinding verified.');
+}
+
+function testTrenchDestroyedOnCapture(): void {
+  const state = createInitialGameState(9902);
+  const start = findPlainsLandSpot(state, 220, 270);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+  const humanId = state.humanPlayerId;
+  const enemyId = 2;
+  const human = state.players.get(humanId)!;
+  const enemy = state.players.get(enemyId)!;
+  for (const p of state.players.values()) {
+    if (p.isBot) p.nextBotDecisionTick = 999999;
+  }
+
+  const arena = findInlandPlainsCenter(state, 20, 14);
+  paintBlock(state, arena.x - 14, arena.y - 10, arena.x - 1, arena.y + 10, humanId);
+  paintBlock(state, arena.x, arena.y - 10, arena.x + 14, arena.y + 10, enemyId);
+  setWarRelation(state, humanId, enemyId);
+
+  enemy.money = 5000;
+  enemy.buildingMaterial = 5000;
+  enemy.energyReserve = enemy.energyReserveMax;
+  const trench = placeBuilding(state, enemyId, 'TRENCH', arena.x + 2, arena.y, 1)!;
+  const mine = placeBuilding(state, enemyId, 'MINE', arena.x + 2, arena.y + 10, 1);
+  assert(trench !== null, 'Enemy TRENCH should be placed');
+  if (mine) {
+    mine.stackCount = 1;
+    mine.underConstructionCount = 0;
+  }
+
+  for (let t = 0; t < BUILDING_SPECS.TRENCH.constructionTicks; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+  assert(trench.stackCount === 1, 'TRENCH must finish construction before capture');
+
+  // Support human push with tactical units so enemy TRENCH sector falls decisively
+  spawnUnitStack(state, humanId, 'INFANTRY', arena.x - 2, arena.y, 3);
+  spawnUnitStack(state, humanId, 'TANK', arena.x - 2, arena.y + 2, 2);
+  human.maxManpower = 1200;
+  human.manpower = 800;
+
+  dispatchAction(state, {
+    type: 'CREATE_ATTACK_ORDER',
+    playerId: humanId,
+    waypoints: [
+      { x: arena.x - 1, y: arena.y },
+      { x: arena.x + 8, y: arena.y },
+    ],
+    manpowerPercent: 75,
+    targetOwnerId: enemyId,
+  });
+
+  for (let t = 0; t < 25; t++) {
+    dispatchAction(state, { type: 'TICK' });
+  }
+
+  assert(
+    state.owners[trench.y * state.width + trench.x] === humanId,
+    'Human attacker should capture the TRENCH cell',
+  );
+  assert(
+    !state.buildings.some((b) => b.id === trench.id),
+    'Captured TRENCH must be destroyed and removed (never transferred to attacker)',
+  );
+  if (mine && state.owners[mine.y * state.width + mine.x] === humanId) {
+    assert(mine.ownerId === humanId, 'Non-TRENCH buildings like MINE still transfer on capture');
+  }
+
+  console.log('PASS [za]: TRENCH destruction upon capture verified.');
+}
+
+function testFiveStatesOnEuropeMap(): void {
+  assert(BOT_COUNT === 4, `Expected BOT_COUNT === 4 for 5-state Europe density, got ${BOT_COUNT}`);
+  const state = createInitialGameState(9903);
+  const start = findPlainsLandSpot(state, 240, 260);
+  dispatchAction(state, { type: 'SELECT_START_POSITION', x: start.x, y: start.y });
+
+  assert(
+    state.players.size === 5,
+    `Expected exactly 5 states total (1 human + 4 bots), got ${state.players.size}`,
+  );
+  const players = [...state.players.values()];
+  let minPairDist = Infinity;
+  for (let i = 0; i < players.length; i++) {
+    for (let j = i + 1; j < players.length; j++) {
+      const d = Math.hypot(
+        players[i].capitalX - players[j].capitalX,
+        players[i].capitalY - players[j].capitalY,
+      );
+      if (d < minPairDist) minPairDist = d;
+    }
+  }
+  assert(
+    minPairDist >= 80,
+    `Starting capitals with 5 states must have ample breathing room (minDist=${minPairDist.toFixed(1)})`,
+  );
+  console.log(`PASS [zb]: 5-state Europe map density verified (min capital spacing ${minPairDist.toFixed(1)}).`);
+}
+
 function main(): void {
   testDeclareWarFromUiController();
   testStrictDeterministicPocketAnnexation();
@@ -3188,7 +3384,10 @@ function main(): void {
   testLandPathfindingAroundBayAndIslandRejection();
   testManualArtilleryFireMissionBarrage();
   testFactoryArmorySeparationAndCityNoOverload();
-  console.log('ALL 25 SIMULATION TESTS PASSED.');
+  testCoastalCellsCapturableAndFinePathfinding();
+  testTrenchDestroyedOnCapture();
+  testFiveStatesOnEuropeMap();
+  console.log('ALL 28 SIMULATION TESTS PASSED.');
 }
 
 main();

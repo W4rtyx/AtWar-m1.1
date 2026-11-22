@@ -21,6 +21,8 @@ import {
 } from './units';
 
 export const ARTILLERY_BLAST_RADIUS = 7.5;
+export const BARE_ARROW_FOREIGN_COST_MUL = 1.85;
+export const BARE_ARROW_FOREIGN_SPEED_MUL = 0.52;
 
 export interface FrontUnitSupportModifiers {
   readonly attackerCostMultiplier: number;
@@ -32,8 +34,8 @@ export interface FrontUnitSupportModifiers {
 
 /**
  * Evaluates tactical unit support & enemy unit resistance around frontier cell (cellX, cellY).
- * Friendly infantry, tanks, and artillery reduce arrow attrition and accelerate breakthroughs;
- * enemy units (especially in LOCK stance) strongly stiffen sector resistance.
+ * Bare attack arrows against foreign states are slow and costly; friendly infantry, tanks,
+ * artillery, and paratroopers provide decisive breakthrough power and suppress enemy defenses.
  */
 export function evaluateFrontUnitSupport(
   state: GameState,
@@ -45,8 +47,8 @@ export function evaluateFrontUnitSupport(
 ): FrontUnitSupportModifiers {
   if (state.units.length === 0) {
     return {
-      attackerCostMultiplier: 1,
-      attackerSpeedMultiplier: 1,
+      attackerCostMultiplier: BARE_ARROW_FOREIGN_COST_MUL,
+      attackerSpeedMultiplier: BARE_ARROW_FOREIGN_SPEED_MUL,
       fortificationSuppression: 0,
       defenderResistanceCostMultiplier: 1,
       defenderResistanceSpeedMultiplier: 1,
@@ -56,6 +58,7 @@ export function evaluateFrontUnitSupport(
   const enemyDef =
     defenderId >= 0 ? evaluateCellDefense(state.buildings, defenderId, cellX, cellY) : null;
 
+  let attackerSupportWeight = 0;
   let costReduction = 0;
   let speedBoost = 0;
   let fortSuppression = 0;
@@ -75,6 +78,7 @@ export function evaluateFrontUnitSupport(
     if (u.ownerId === attackerId) {
       const encircledMul = u.isEncircled ? 0.65 : 1.0;
       const w = baseWeight * encircledMul;
+      attackerSupportWeight += w;
       if (u.type === 'INFANTRY') {
         costReduction += 0.14 * w;
         speedBoost += 0.16 * w;
@@ -83,11 +87,11 @@ export function evaluateFrontUnitSupport(
         const bunkerDamp = enemyDef ? 1 / (1 + enemyDef.antiArmorFactor * 0.65) : 1.0;
         costReduction += 0.24 * w * terrainScale * bunkerDamp;
         speedBoost += 0.34 * w * terrainScale * bunkerDamp;
-        fortSuppression += 0.1 * w * terrainScale;
+        fortSuppression += 0.12 * w * terrainScale;
       } else if (u.type === 'ARTILLERY') {
         costReduction += 0.16 * w;
         speedBoost += 0.14 * w;
-        fortSuppression += 0.32 * w;
+        fortSuppression += 0.34 * w;
       } else if (u.type === 'PARATROOPERS') {
         const dropMul = u.dropVulnerabilityTicks > 0 ? 0.5 : 1.0;
         costReduction += 0.15 * w * dropMul;
@@ -99,10 +103,14 @@ export function evaluateFrontUnitSupport(
     }
   }
 
+  const supportBlend = Math.min(1, attackerSupportWeight / 1.35);
+  const baseCostMul = 1 + (BARE_ARROW_FOREIGN_COST_MUL - 1) * (1 - supportBlend);
+  const baseSpeedMul = 1 - (1 - BARE_ARROW_FOREIGN_SPEED_MUL) * (1 - supportBlend);
+
   return {
-    attackerCostMultiplier: Math.max(0.5, 1 - Math.min(0.5, costReduction)),
-    attackerSpeedMultiplier: Math.min(1.42, 1 + Math.min(0.42, speedBoost * 0.55)),
-    fortificationSuppression: Math.min(0.52, fortSuppression),
+    attackerCostMultiplier: Math.max(0.42, baseCostMul * (1 - Math.min(0.58, costReduction))),
+    attackerSpeedMultiplier: Math.min(1.65, baseSpeedMul * (1 + Math.min(0.65, speedBoost * 0.65))),
+    fortificationSuppression: Math.min(0.62, fortSuppression),
     defenderResistanceCostMultiplier: Math.min(2.4, 1 + defenderResist),
     defenderResistanceSpeedMultiplier: Math.max(0.3, 1 / (1 + defenderResist * 0.75)),
   };
@@ -164,15 +172,6 @@ function executeArtilleryFireMissionSalvo(
   if (remainingAfterDec % 10 !== 9) {
     return;
   }
-
-  state.artilleryExplosions.push({
-    id: state.nextFxId++,
-    x: fx,
-    y: fy,
-    radius: ARTILLERY_BLAST_RADIUS,
-    ttlTicks: 10,
-    maxTtlTicks: 10,
-  });
 
   const supplyMul = 0.45 + 0.55 * attacker.supplyLevel;
   const moraleMul = 0.5 + 0.5 * (attacker.morale / 100);
@@ -237,8 +236,8 @@ function executeArtilleryFireMissionSalvo(
     }
   }
 
-  // 4. Garrison & population casualties inside WAR enemy tiles covered by blast radius
-  const impactedOwners = new Set<number>();
+  // 4. Garrison & activeManpower percentage casualties inside WAR enemy tiles covered by blast radius
+  const impactedCellsByOwner = new Map<number, number>();
   const rCeil = Math.ceil(ARTILLERY_BLAST_RADIUS);
   const rSq = ARTILLERY_BLAST_RADIUS * ARTILLERY_BLAST_RADIUS;
   const minX = Math.max(0, Math.floor(fx) - rCeil);
@@ -251,6 +250,7 @@ function executeArtilleryFireMissionSalvo(
     for (let x = minX; x <= maxX; x++) {
       const dx = x + 0.5 - fx;
       if (dx * dx + dy * dy > rSq) continue;
+      if (state.terrain[row + x] === TerrainType.WATER) continue;
       const cellOwner = state.owners[row + x];
       if (
         cellOwner >= 0 &&
@@ -258,21 +258,46 @@ function executeArtilleryFireMissionSalvo(
         cellOwner !== WILDERNESS_OWNER &&
         getUnitRelation(state, attacker.ownerId, cellOwner) === 'WAR'
       ) {
-        impactedOwners.add(cellOwner);
+        impactedCellsByOwner.set(cellOwner, (impactedCellsByOwner.get(cellOwner) ?? 0) + 1);
       }
     }
   }
 
-  for (const enemyId of impactedOwners) {
+  let totalManpowerKilled = 0;
+  const refArea = Math.max(1, Math.PI * ARTILLERY_BLAST_RADIUS * ARTILLERY_BLAST_RADIUS * 0.55);
+  for (const [enemyId, hitCells] of impactedCellsByOwner) {
     const occupier = state.players.get(enemyId);
     if (!occupier || !occupier.alive || occupier.isEliminated) continue;
-    const mpLoss = Math.min(28, salvoPower * 0.34);
-    const floor = occupier.allocatedManpower;
-    if (occupier.manpower > floor) {
-      occupier.manpower = Math.max(floor, occupier.manpower - mpLoss);
-      syncPlayerActiveManpower(occupier);
-    }
+    const coverageRatio = Math.min(1, hitCells / refArea);
+    const activeMp = Math.max(0, occupier.manpower - occupier.allocatedManpower);
+    if (activeMp <= 0) continue;
+
+    const pctRate = Math.min(
+      0.08,
+      (0.02 + 0.014 * Math.min(4, countScale)) *
+        coverageRatio *
+        hpEfficiency *
+        supplyMul *
+        moraleMul *
+        blackoutMul,
+    );
+    const flatFloor = Math.min(60, salvoPower * 0.45 * coverageRatio);
+    const mpLoss = Math.min(activeMp, Math.max(flatFloor, activeMp * pctRate));
+
+    occupier.manpower = Math.max(occupier.allocatedManpower, occupier.manpower - mpLoss);
+    syncPlayerActiveManpower(occupier);
+    totalManpowerKilled += Math.round(mpLoss);
   }
+
+  state.artilleryExplosions.push({
+    id: state.nextFxId++,
+    x: fx,
+    y: fy,
+    radius: ARTILLERY_BLAST_RADIUS,
+    ttlTicks: 10,
+    maxTtlTicks: 10,
+    manpowerKilled: totalManpowerKilled,
+  });
 }
 
 function shellEnemyDefenseOrFrontline(

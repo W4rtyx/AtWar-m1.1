@@ -1024,23 +1024,36 @@ export function createCapitalCityBuilding(
   return city;
 }
 
-/** Transfers building ownership (including any units under construction) whenever the underlying cell is captured. */
+/**
+ * Synchronizes building ownership whenever the underlying cell is captured.
+ * Trenches (TRENCH) are destroyed upon capture instead of transferring intact to the attacker.
+ */
 export function syncBuildingOwnership(state: GameState): boolean {
   const { width, owners } = state;
-  let anyTransferred = false;
+  let anyChanged = false;
+  const destroyedTrenchIds = new Set<number>();
 
   for (const building of state.buildings) {
     const cellOwner = owners[building.y * width + building.x];
     if (cellOwner >= 0 && cellOwner !== building.ownerId) {
-      building.ownerId = cellOwner;
-      building.occupancyOverride = null;
-      building.unitQueue = [];
-      building.paradropCooldownTicks = 0;
-      anyTransferred = true;
+      if (building.type === 'TRENCH') {
+        destroyedTrenchIds.add(building.id);
+        anyChanged = true;
+      } else {
+        building.ownerId = cellOwner;
+        building.occupancyOverride = null;
+        building.unitQueue = [];
+        building.paradropCooldownTicks = 0;
+        anyChanged = true;
+      }
     }
   }
 
-  return anyTransferred;
+  if (destroyedTrenchIds.size > 0) {
+    state.buildings = state.buildings.filter((b) => !destroyedTrenchIds.has(b.id));
+  }
+
+  return anyChanged;
 }
 
 /** Returns all building types valid for placement on cell (x, y) owned by playerId (coast-aware). */

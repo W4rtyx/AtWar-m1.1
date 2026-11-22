@@ -896,6 +896,7 @@ function bootstrap(): void {
         }
         if (selectedTarget !== null) {
           selectedTarget = null;
+          syncHud(state);
           return;
         }
         const hitBuilding = findHumanBuildingAtScreen(state, e.clientX, e.clientY);
@@ -1036,6 +1037,7 @@ function bootstrap(): void {
       arrowBendOffset = 0;
       arrowPreview = null;
       resetAmbush();
+      syncHud(engine.getRenderState());
     }
   });
 

@@ -79,51 +79,65 @@ function drawUnitSilhouette(
 
   switch (unit.type) {
     case 'TANK': {
-      // Crisp top/side armored tank silhouette: beveled tracks, hull & centered turret + cannon
+      // Canonical armored tank silhouette: crisp ink outline, treads + road wheels, sloped hull, turret & gun barrel
       ctx.save();
       ctx.scale(dirX, 1);
 
       // Treads bar
-      drawRoundedRectPath(ctx, -w * 0.64, h * 0.04, w * 1.24, h * 0.44, h * 0.22);
-      ctx.fillStyle = '#d7b56a';
+      drawRoundedRectPath(ctx, -w * 0.66, h * 0.04, w * 1.28, h * 0.44, h * 0.22);
+      ctx.fillStyle = '#c8aa66';
       ctx.fill();
-      ctx.strokeStyle = '#18140d';
-      ctx.lineWidth = 0.85;
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 1.0;
       ctx.stroke();
 
       // Road wheel cutouts
-      ctx.fillStyle = '#201b12';
-      for (const wx of [-0.42, -0.14, 0.14, 0.42]) {
+      ctx.fillStyle = '#18140d';
+      for (const wx of [-0.44, -0.15, 0.14, 0.43]) {
         ctx.beginPath();
         ctx.arc(wx * w, h * 0.26, Math.max(1.0, h * 0.09), 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // Upper hull slope
+      // Upper sloped hull
       ctx.beginPath();
-      ctx.moveTo(-w * 0.56, h * 0.06);
+      ctx.moveTo(-w * 0.58, h * 0.06);
       ctx.lineTo(-w * 0.42, -h * 0.18);
       ctx.lineTo(w * 0.48, -h * 0.18);
-      ctx.lineTo(w * 0.6, h * 0.06);
+      ctx.lineTo(w * 0.62, h * 0.06);
       ctx.closePath();
-      ctx.fillStyle = '#f2d98e';
+      ctx.fillStyle = '#e8cf86';
       ctx.fill();
-
-      // Crisp turret + cannon barrel
-      drawRoundedRectPath(ctx, -w * 0.26, -h * 0.44, w * 0.52, h * 0.3, 1.8);
-      ctx.fillStyle = '#faeaad';
-      ctx.fill();
-
-      ctx.strokeStyle = '#faeaad';
-      ctx.lineWidth = Math.max(1.9, h * 0.17);
-      ctx.beginPath();
-      ctx.moveTo(w * 0.18, -h * 0.3);
-      ctx.lineTo(w * 0.78, -h * 0.3);
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.85;
       ctx.stroke();
+
+      // Turret + commander cupola
+      drawRoundedRectPath(ctx, -w * 0.28, -h * 0.46, w * 0.54, h * 0.3, 1.8);
+      ctx.fillStyle = '#f5e2a4';
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillRect(-w * 0.18, -h * 0.56, w * 0.18, h * 0.12);
+
+      // Long horizontal barrel + muzzle brake
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = Math.max(2.9, h * 0.25);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.2, -h * 0.31);
+      ctx.lineTo(w * 0.82, -h * 0.31);
+      ctx.stroke();
+      ctx.strokeStyle = '#f5e2a4';
+      ctx.lineWidth = Math.max(1.7, h * 0.15);
+      ctx.beginPath();
+      ctx.moveTo(w * 0.2, -h * 0.31);
+      ctx.lineTo(w * 0.8, -h * 0.31);
+      ctx.stroke();
+      ctx.fillStyle = '#f5e2a4';
+      ctx.fillRect(w * 0.74, -h * 0.39, w * 0.11, h * 0.16);
 
       if (unit.combatCooldownTicks >= 4) {
         ctx.beginPath();
-        ctx.arc(w * 0.84, -h * 0.3, Math.max(1.8, h * 0.16), 0, Math.PI * 2);
+        ctx.arc(w * 0.88, -h * 0.31, Math.max(1.8, h * 0.16), 0, Math.PI * 2);
         ctx.fillStyle = '#fff3b8';
         ctx.fill();
       }
@@ -132,52 +146,61 @@ function drawUnitSilhouette(
     }
 
     case 'ARTILLERY': {
-      // Crisp wheeled howitzer field gun silhouette: wheel, trail spade, shield & long elevated barrel
+      // Canonical wheeled field howitzer silhouette: split trail spade, spoked wheel, shield & elevated barrel
       ctx.save();
       ctx.scale(dirX, 1);
 
       // Trail spade
-      ctx.strokeStyle = '#d9985b';
-      ctx.lineWidth = Math.max(1.6, h * 0.14);
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = Math.max(2.6, h * 0.22);
       ctx.beginPath();
       ctx.moveTo(-w * 0.12, h * 0.26);
-      ctx.lineTo(-w * 0.68, h * 0.48);
+      ctx.lineTo(-w * 0.72, h * 0.48);
+      ctx.stroke();
+      ctx.strokeStyle = '#d49458';
+      ctx.lineWidth = Math.max(1.5, h * 0.13);
       ctx.stroke();
 
-      // Long elevated barrel
-      ctx.strokeStyle = '#f9c784';
-      ctx.lineWidth = Math.max(2.1, h * 0.19);
+      // Long elevated howitzer barrel with dark outline + muzzle brake
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = Math.max(3.1, h * 0.27);
       ctx.beginPath();
-      ctx.moveTo(-w * 0.18, h * 0.12);
-      ctx.lineTo(w * 0.68, -h * 0.52);
+      ctx.moveTo(-w * 0.2, h * 0.12);
+      ctx.lineTo(w * 0.7, -h * 0.54);
+      ctx.stroke();
+      ctx.strokeStyle = '#f3be7c';
+      ctx.lineWidth = Math.max(1.9, h * 0.17);
       ctx.stroke();
 
       // Gun shield
-      ctx.strokeStyle = '#f2ae66';
-      ctx.lineWidth = Math.max(1.8, h * 0.16);
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = Math.max(2.8, h * 0.24);
       ctx.beginPath();
-      ctx.moveTo(w * 0.04, -h * 0.38);
-      ctx.lineTo(w * 0.14, h * 0.16);
+      ctx.moveTo(w * 0.02, -h * 0.38);
+      ctx.lineTo(w * 0.14, h * 0.18);
+      ctx.stroke();
+      ctx.strokeStyle = '#e8a25e';
+      ctx.lineWidth = Math.max(1.6, h * 0.14);
       ctx.stroke();
 
       // Carriage wheel + rim highlight
-      const wheelR = Math.max(2.6, h * 0.27);
+      const wheelR = Math.max(2.7, h * 0.28);
       ctx.beginPath();
       ctx.arc(-w * 0.08, h * 0.3, wheelR, 0, Math.PI * 2);
-      ctx.fillStyle = '#201812';
+      ctx.fillStyle = '#14110d';
       ctx.fill();
-      ctx.lineWidth = Math.max(1.4, h * 0.12);
-      ctx.strokeStyle = '#f7be7d';
+      ctx.lineWidth = Math.max(1.5, h * 0.13);
+      ctx.strokeStyle = '#f2b876';
       ctx.stroke();
 
       ctx.beginPath();
       ctx.arc(-w * 0.08, h * 0.3, Math.max(1.0, wheelR * 0.35), 0, Math.PI * 2);
-      ctx.fillStyle = '#f7be7d';
+      ctx.fillStyle = '#f2b876';
       ctx.fill();
 
       if (unit.combatCooldownTicks >= 3) {
         ctx.beginPath();
-        ctx.arc(w * 0.74, -h * 0.56, Math.max(2.2, h * 0.2), 0, Math.PI * 2);
+        ctx.arc(w * 0.76, -h * 0.58, Math.max(2.2, h * 0.2), 0, Math.PI * 2);
         ctx.fillStyle = '#ffe6a3';
         ctx.fill();
       }
@@ -186,56 +209,82 @@ function drawUnitSilhouette(
     }
 
     case 'INFANTRY': {
-      // Sharp high-contrast NATO tactical crossed belts + top chevron bar
-      const gx = w * 0.52;
-      const gy = h * 0.42;
-      ctx.strokeStyle = '#eef6fc';
-      ctx.lineWidth = Math.max(1.8, h * 0.18);
+      // Canonical combat infantry silhouette: steel helmet + crossed rifles
+      const rx = w * 0.56;
+      const ry = h * 0.44;
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = Math.max(2.9, h * 0.26);
       ctx.beginPath();
-      ctx.moveTo(-gx, -gy);
-      ctx.lineTo(gx, gy);
-      ctx.moveTo(gx, -gy);
-      ctx.lineTo(-gx, gy);
+      ctx.moveTo(-rx, -ry * 0.4);
+      ctx.lineTo(rx, ry);
+      ctx.moveTo(rx, -ry * 0.4);
+      ctx.lineTo(-rx, ry);
       ctx.stroke();
 
-      // Top readiness bar
-      ctx.strokeStyle = '#a8d4f0';
-      ctx.lineWidth = Math.max(1.3, h * 0.13);
+      ctx.strokeStyle = '#e3eef6';
+      ctx.lineWidth = Math.max(1.6, h * 0.15);
+      ctx.stroke();
+
+      // Steel helmet dome centered above crossed rifles
+      const helmR = Math.max(2.6, w * 0.28);
       ctx.beginPath();
-      ctx.moveTo(-gx * 0.85, -gy - h * 0.15);
-      ctx.lineTo(gx * 0.85, -gy - h * 0.15);
+      ctx.arc(0, -h * 0.16, helmR, Math.PI, 0);
+      ctx.lineTo(helmR * 1.18, -h * 0.16);
+      ctx.lineTo(-helmR * 1.18, -h * 0.16);
+      ctx.closePath();
+      ctx.fillStyle = '#b4d6ec';
+      ctx.fill();
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 0.9;
       ctx.stroke();
       break;
     }
 
     case 'PARATROOPERS': {
-      // Crisp dome parachute canopy + taut suspension lines + airborne V-wings
-      const domeR = w * 0.54;
-      const domeY = -h * 0.05;
+      // Canonical airborne silhouette: ribbed parachute dome canopy, suspension lines & trooper wings
+      const domeR = w * 0.56;
+      const domeY = -h * 0.08;
       ctx.beginPath();
       ctx.arc(0, domeY, domeR, Math.PI, 0);
       ctx.closePath();
-      ctx.fillStyle = '#a8ebfc';
+      ctx.fillStyle = '#9ce2f6';
       ctx.fill();
-      ctx.strokeStyle = '#255064';
-      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = '#0c1015';
+      ctx.lineWidth = 1.0;
+      ctx.stroke();
+
+      ctx.strokeStyle = '#336a80';
+      ctx.lineWidth = 0.85;
+      ctx.beginPath();
+      ctx.moveTo(-domeR * 0.45, domeY);
+      ctx.quadraticCurveTo(-domeR * 0.3, domeY - domeR * 0.72, 0, domeY - domeR);
+      ctx.moveTo(domeR * 0.45, domeY);
+      ctx.quadraticCurveTo(domeR * 0.3, domeY - domeR * 0.72, 0, domeY - domeR);
       ctx.stroke();
 
       ctx.strokeStyle = '#d8f6ff';
       ctx.lineWidth = Math.max(1.1, h * 0.1);
       ctx.beginPath();
       ctx.moveTo(-domeR * 0.88, domeY);
-      ctx.lineTo(0, h * 0.48);
+      ctx.lineTo(0, h * 0.42);
       ctx.moveTo(domeR * 0.88, domeY);
-      ctx.lineTo(0, h * 0.48);
+      ctx.lineTo(0, h * 0.42);
       ctx.moveTo(0, domeY);
-      ctx.lineTo(0, h * 0.48);
+      ctx.lineTo(0, h * 0.42);
       ctx.stroke();
 
+      // Descending trooper & chevron wings
       ctx.beginPath();
-      ctx.arc(0, h * 0.5, Math.max(1.5, h * 0.14), 0, Math.PI * 2);
+      ctx.arc(0, h * 0.48, Math.max(1.6, h * 0.14), 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff';
       ctx.fill();
+      ctx.strokeStyle = '#8ad8f0';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(-w * 0.3, h * 0.42);
+      ctx.lineTo(0, h * 0.58);
+      ctx.lineTo(w * 0.3, h * 0.42);
+      ctx.stroke();
       break;
     }
   }
@@ -367,6 +416,20 @@ export function drawArtilleryExplosions(
     ctx.arc(sc.x, sc.y, rPx * 0.82, 0, Math.PI * 2);
     ctx.fillStyle = grad;
     ctx.fill();
+
+    if (fx.manpowerKilled > 0) {
+      const floatY = sc.y - 6 - elapsed * 16;
+      const label = `-${fx.manpowerKilled} MP`;
+      ctx.font = '700 10.5px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 2.6;
+      ctx.strokeStyle = `rgba(14, 10, 10, ${(alpha * 0.92).toFixed(3)})`;
+      ctx.strokeText(label, sc.x, floatY);
+      ctx.fillStyle = `rgba(255, 166, 118, ${alpha.toFixed(3)})`;
+      ctx.fillText(label, sc.x, floatY);
+    }
+
     ctx.restore();
   }
 }

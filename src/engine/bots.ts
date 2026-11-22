@@ -27,17 +27,17 @@ interface BotIdentity {
 }
 
 const BOT_IDENTITIES: ReadonlyArray<BotIdentity> = [
-  { name: 'Iberský Pakt', colorHex: '#9e5347', colorRgb: [158, 83, 71] },
-  { name: 'Alpská Koalice', colorHex: '#5b7d53', colorRgb: [91, 125, 83] },
-  { name: 'Severní Unie', colorHex: '#8d7548', colorRgb: [141, 117, 72] },
-  { name: 'Východní Marka', colorHex: '#735b87', colorRgb: [115, 91, 135] },
-  { name: 'Balkánský Svaz', colorHex: '#9c6e44', colorRgb: [156, 110, 68] },
-  { name: 'Kaledonie', colorHex: '#4f7a75', colorRgb: [79, 122, 117] },
-  { name: 'Panonská Liga', colorHex: '#8a566f', colorRgb: [138, 86, 111] },
-  { name: 'Pobaltí', colorHex: '#59746b', colorRgb: [89, 116, 107] },
-  { name: 'Kyjevská Rus', colorHex: '#7e664b', colorRgb: [126, 102, 75] },
-  { name: 'Italská Liga', colorHex: '#6c7c4e', colorRgb: [108, 124, 78] },
-  { name: 'Akvitánie', colorHex: '#7d5a5a', colorRgb: [125, 90, 90] },
+  { name: 'Iberský Pakt', colorHex: '#8f4f45', colorRgb: [143, 79, 69] },
+  { name: 'Alpská Koalice', colorHex: '#556f4d', colorRgb: [85, 111, 77] },
+  { name: 'Severní Unie', colorHex: '#8b764c', colorRgb: [139, 118, 76] },
+  { name: 'Východní Marka', colorHex: '#6c597a', colorRgb: [108, 89, 122] },
+  { name: 'Balkánský Svaz', colorHex: '#8c6642', colorRgb: [140, 102, 66] },
+  { name: 'Kaledonie', colorHex: '#4b6e6a', colorRgb: [75, 110, 106] },
+  { name: 'Panonská Liga', colorHex: '#7d5267', colorRgb: [125, 82, 103] },
+  { name: 'Pobaltí', colorHex: '#556b63', colorRgb: [85, 107, 99] },
+  { name: 'Kyjevská Rus', colorHex: '#756048', colorRgb: [117, 96, 72] },
+  { name: 'Italská Liga', colorHex: '#66744c', colorRgb: [102, 116, 76] },
+  { name: 'Akvitánie', colorHex: '#755656', colorRgb: [117, 86, 86] },
 ];
 
 function countFreeLandInRadius(
@@ -79,7 +79,7 @@ export function spawnBots(state: GameState, count: number): void {
     let bestY = -1;
     let bestScore = -1;
 
-    for (let attempt = 0; attempt < 320; attempt++) {
+    for (let attempt = 0; attempt < 420; attempt++) {
       const x = 32 + Math.floor(nextRandom(rngBox) * (width - 64));
       const y = 24 + Math.floor(nextRandom(rngBox) * (height - 48));
       const idx = y * width + x;
@@ -101,7 +101,11 @@ export function spawnBots(state: GameState, count: number): void {
         }
       }
 
-      const score = Math.min(minDist, 145) + freeLand * 0.08;
+      if (attempt < 260 && minDist < 120) {
+        continue;
+      }
+
+      const score = Math.min(minDist, 240) * 1.3 + freeLand * 0.06;
       if (score > bestScore) {
         bestScore = score;
         bestX = x;
